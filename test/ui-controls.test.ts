@@ -84,6 +84,48 @@ test("unknown local commands stay local and commands_changed refreshes completio
 	});
 });
 
+test("Ctrl+Shift+P routes palette choices and preserves the composer draft", async () => {
+	const terminal = new FakeTerminal();
+	const initialization = initializedResponse();
+	initialization.commands = [{ name: "initial-native", description: "Initial SDK command", argumentHint: "" }];
+	const fake = new FakeQueryHarness(Promise.resolve(initialization));
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const running = controller.run();
+	try {
+		await waitFor(() => controller.ready !== undefined);
+		controller.setDraft("composer draft stays");
+		terminal.input("\u001b[112;6u");
+		await waitFor(() => terminal.output.includes("Command palette"));
+		assert.match(terminal.output, /\/initial-native/u);
+		assert.match(terminal.output, /\/phi tasks/u);
+		assert.equal(controller.views.editor.getText(), "composer draft stays");
+
+		terminal.input("\u001b");
+		assert.equal(controller.views.editor.getText(), "composer draft stays");
+		terminal.input("\u001b[112;6u");
+		await waitFor(() => controller.commandPaletteVisible);
+		terminal.output = "";
+		fake.pushMessage(commandChanged([{ name: "updated-native", description: "Updated SDK command", argumentHint: "<value>" }]));
+		await waitFor(() => controller.ready?.commands[0]?.name === "updated-native");
+		await waitFor(() => terminal.output.includes("updated-native"));
+		terminal.input("updated-native");
+		terminal.input("\r");
+		await fake.waitForInputCount(1);
+		assert.equal(fake.receivedMessages[0]?.message.content, "/updated-native");
+		assert.equal(controller.views.editor.getText(), "composer draft stays");
+
+		terminal.input("\u001b[112;6u");
+		terminal.input("phi tasks");
+		terminal.input("\r");
+		await waitFor(() => controller.views.active === "tasks");
+		assert.equal(fake.receivedMessages.length, 1);
+		assert.equal(controller.views.editor.getText(), "composer draft stays");
+	} finally {
+		await controller.close(0);
+		await running;
+	}
+});
+
 test("interrupt, background, and selected-task stop use distinct native controls", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
