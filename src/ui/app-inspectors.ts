@@ -3,7 +3,7 @@ import type { PhiState } from "../state.js";
 import type { HistoryReader } from "../history.js";
 import type { JournalCursor, JournalPage, WorkflowReference, WorkflowJournalRecord } from "../workflows.js";
 import type { AppDependencies } from "./app-types.js";
-import { createInspectorModel, InspectorView, type InspectorPanel } from "./inspectors.js";
+import { createInspectorModel, getHistoryMessageSearchText, getHistoryMessageText, InspectorView, type InspectorPanel } from "./inspectors.js";
 
 const HISTORY_PAGE_SIZE = 200;
 
@@ -237,16 +237,25 @@ export class AppInspectorController {
 	selectedOutput(): string | undefined {
 		if (this.model.selectedChildId) {
 			const last = this.model.childMessages.at(-1);
-			return last ? messagePreview(last.message) : undefined;
+			return last ? copiedMessageText(last.message) : undefined;
 		}
 		if (this.model.selectedTaskId) {
 			const task = this.state.tasks.get(this.model.selectedTaskId);
 			if (task) return task.progressSummary ?? task.error ?? task.description ?? task.outputFile;
 		}
 		const messages = this.model.selectedChildId ? this.model.childMessages : this.model.historyMessages;
+		const search = this.model.panel === "history" ? this.model.searchText?.toLocaleLowerCase() : undefined;
+		if (search) {
+			for (let index = messages.length - 1; index >= 0; index -= 1) {
+				const candidate = messages[index];
+				if (!candidate) continue;
+				const content = getHistoryMessageSearchText(candidate.message);
+				if (content.toLocaleLowerCase().includes(search)) return copiedMessageText(candidate.message);
+			}
+			return undefined;
+		}
 		const last = messages.at(-1);
-		if (!last) return undefined;
-		return messagePreview(last.message);
+		return last ? copiedMessageText(last.message) : undefined;
 	}
 
 	close(): Promise<void> {
@@ -359,20 +368,8 @@ function workflowRecordKey(record: WorkflowJournalRecord): string {
 		: `${record.type}:${record.taskId ?? ""}:${record.agentId ?? ""}:${record.phase ?? ""}:${record.timestamp ?? ""}:${record.label ?? record.name ?? ""}`;
 }
 
-function messagePreview(message: unknown): string {
-	if (typeof message === "string") return message;
-	if (message && typeof message === "object") {
-		const record = message as Record<string, unknown>;
-		if (typeof record.content === "string") return record.content;
-		if (Array.isArray(record.content)) {
-			return record.content.map((block) => {
-				if (!block || typeof block !== "object") return "";
-				const entry = block as Record<string, unknown>;
-				return typeof entry.text === "string" ? entry.text : "";
-			}).filter(Boolean).join("\n");
-		}
-	}
-	return JSON.stringify(message) ?? String(message);
+function copiedMessageText(message: unknown): string {
+	return getHistoryMessageText(message) ?? JSON.stringify(message) ?? String(message);
 }
 
 function errorText(error: unknown): string {

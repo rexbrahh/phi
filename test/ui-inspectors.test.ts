@@ -268,6 +268,87 @@ test("child selection survives History/Tasks navigation without changing copied 
 	assert.equal(await running, 0);
 });
 
+test("Ctrl+Y copies complete native tool-result text from the loaded history page", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	const sentinel = "NATIVE_TOOL_RESULT_END";
+	const resultText = "r".repeat(37 * 1024 - sentinel.length) + sentinel;
+	const copied: string[] = [];
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+		createHistoryReader: () => historyReaderWithMessages([nativeToolResultMessage("native-result", resultText)]),
+		copyText: async (text) => { copied.push(text); },
+	}));
+	const running = controller.run();
+	await waitFor(() => controller.ready !== undefined);
+	controller.views.inspectors.setSession("copy-session");
+	controller.showInspector("history");
+	await waitFor(() => controller.views.inspectors.model.historyMessages.length === 1);
+
+	assert.equal(resultText.length, 37 * 1024);
+	assert.equal(controller.views.inspectors.selectedOutput(), resultText);
+	terminal.input("\u0019");
+	await waitFor(() => copied.length === 1);
+	assert.equal(copied[0], resultText);
+
+	await controller.close(0);
+	assert.equal(await running, 0);
+});
+
+test("native history tool-result text is sanitized before rendering", () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	controller.views.inspectors.model.panel = "history";
+	controller.views.inspectors.model.historyMessages = [
+		nativeToolResultMessage("unsafe-native-result", "before\u001b[2Jafter"),
+	];
+
+	const rendered = controller.views.inspectors.view.render(100).join("\n");
+	assert.doesNotMatch(rendered, /\u001b\[2J/);
+	assert.match(rendered, /beforeafter/);
+});
+
+test("history search finds native text beyond the preview cap and copies its visible match", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	const sentinel = "NATIVE_TOOL_RESULT_END";
+	const resultText = "r".repeat(37 * 1024 - sentinel.length) + sentinel;
+	const copied: string[] = [];
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+		createHistoryReader: () => historyReaderWithMessages([
+			nativeToolResultMessage("native-result", resultText),
+			historyMessage("newer-unrelated", "newest unrelated message"),
+		]),
+		copyText: async (text) => { copied.push(text); },
+	}));
+	const running = controller.run();
+	await waitFor(() => controller.ready !== undefined);
+	controller.views.inspectors.setSession("search-session");
+	controller.showInspector("history");
+	await waitFor(() => controller.views.inspectors.model.historyMessages.length === 2);
+
+	assert.ok(resultText.indexOf(sentinel) > 8_192);
+	controller.views.inspectors.searchLoadedHistory(sentinel);
+	const rendered = controller.views.inspectors.view.render(100);
+	const renderedText = rendered.join("\n");
+	assert.match(renderedText, /You:/);
+	assert.doesNotMatch(renderedText, /newest unrelated message/);
+	const displayedResult = rendered
+		.filter((line) => line.includes("r".repeat(20)))
+		.map((line) => line.trim())
+		.join("");
+	assert.equal(displayedResult, "r".repeat(8_191) + "…");
+	assert.equal(displayedResult.includes(sentinel), false);
+	assert.equal(controller.views.inspectors.selectedOutput(), resultText);
+
+	terminal.input("\u0019");
+	await waitFor(() => copied.length === 1);
+	assert.equal(copied[0], resultText);
+
+	await controller.close(0);
+	assert.equal(await running, 0);
+});
+
 test("task and child identifiers and types are sanitized before inspector rendering", () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
@@ -310,3 +391,31 @@ test("history instructions name the Tasks panel for Tab child selection", () => 
 	const rendered = controller.views.inspectors.view.render(100).join("\n");
 	assert.match(rendered, /Children: open Tasks \(Ctrl\+T\); Tab selects the next task or child transcript\./);
 });
+
+function nativeToolResultMessage(uuid: string, resultText: string): SessionMessage {
+	return {
+		type: "user",
+		uuid,
+		session_id: "test-session",
+		message: {
+			role: "user",
+			content: [{
+				type: "tool_result",
+				tool_use_id: "native-tool-use",
+				content: [{ type: "text", text: resultText }],
+			}],
+		},
+		parent_tool_use_id: null,
+		parent_agent_id: null,
+	} as unknown as SessionMessage;
+}
+
+function historyReaderWithMessages(messages: SessionMessage[]) {
+	return {
+		list: async () => [],
+		messages: async () => messages,
+		agents: async () => [],
+		agentMessages: async () => [],
+		close: async () => undefined,
+	};
+}

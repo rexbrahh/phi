@@ -2,7 +2,7 @@ import { Text, type Component } from "@earendil-works/pi-tui";
 import type { SessionMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { JournalPage, WorkflowJournalRecord } from "../workflows.js";
 import type { PhiState, TaskRecord } from "../state.js";
-import { boundedPreviewFromParts, boundedPreviewValue, getDisplayText, getProperty, getStringProperty } from "../state-utils.js";
+import { boundedPreview, boundedPreviewValue, getContentType, getDisplayText, getProperty } from "../state-utils.js";
 import type { WorkspaceInfo } from "../workspace.js";
 import { sanitizeTerminalText } from "./safe-text.js";
 import { theme } from "./theme.js";
@@ -144,31 +144,46 @@ export class InspectorView implements Component {
 		if (messages.length === 0) return [...lines, this.model.historyLoading ? "" : "No messages loaded."];
 		for (const message of messages) {
 			const role = message.type === "assistant" ? "Phi" : message.type === "user" ? "You" : "System";
-			const content = messageText(message.message);
+			const content = getHistoryMessageSearchText(message.message);
 			if (this.model.searchText && !content.toLocaleLowerCase().includes(this.model.searchText.toLocaleLowerCase())) continue;
 			lines.push(theme.accent(`${role}:`));
-			lines.push(...new Text(sanitizeTerminalText(content)).render(width));
+			lines.push(...new Text(boundedPreview(sanitizeTerminalText(content))).render(width));
 		}
 		return lines;
 	}
 }
 
-function messageText(message: unknown): string {
-	if (typeof message === "string") return boundedPreviewValue(message);
+export function getHistoryMessageText(message: unknown): string | undefined {
+	if (typeof message === "string") return message;
 	const content = getProperty(message, "content");
-	if (typeof content === "string") return boundedPreviewValue(content);
-	if (Array.isArray(content)) {
-		const text = boundedPreviewFromParts(displayTextParts(content));
-		return text ?? boundedPreviewValue(content);
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return undefined;
+
+	const parts: string[] = [];
+	for (const block of content) {
+		if (getContentType(block) === "tool_result") {
+			const result = getProperty(block, "content");
+			if (typeof result === "string") {
+				if (result) parts.push(result);
+			} else if (Array.isArray(result)) {
+				for (const item of result) {
+					const text = getDisplayText(item);
+					if (text) parts.push(text);
+				}
+			}
+			continue;
+		}
+		const text = getDisplayText(block);
+		if (text) parts.push(text);
 	}
-	return boundedPreviewValue(message);
+	return parts.join("\n");
 }
 
-function* displayTextParts(content: unknown[]): Iterable<string> {
-	for (const item of content) {
-		const text = getDisplayText(item);
-		if (text) yield text;
-	}
+export function getHistoryMessageSearchText(message: unknown): string {
+	const text = getHistoryMessageText(message);
+	if (text !== undefined && (text !== "" || !Array.isArray(getProperty(message, "content")))) return text;
+	const content = getProperty(message, "content");
+	return boundedPreviewValue(Array.isArray(content) ? content : message);
 }
 
 function formatWorkflowRecord(record: WorkflowJournalRecord): string {
