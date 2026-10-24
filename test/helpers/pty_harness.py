@@ -104,7 +104,7 @@ class PTYChild:
 		self.home = directory / "home"
 		self.home.mkdir()
 		self.phi_home = directory / "phi-home"
-		self.phi_home.mkdir()
+		self.phi_home.mkdir(mode=0o700)
 		self.config = directory / "config"
 		self.config.mkdir()
 		self.markers_path = directory / "markers.jsonl"
