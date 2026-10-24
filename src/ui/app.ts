@@ -548,6 +548,7 @@ export class AppController {
 			}
 		} catch (error) {
 			this.showNotice(`Could not start Phi: ${errorText(error)}`);
+			this.views.tui.renderNow();
 			result = this.exitRequested ? this.exitCode : 1;
 		}
 		const cleanupErrors = await this.cleanup();

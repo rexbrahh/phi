@@ -142,6 +142,7 @@ def run_initialization_failure(child: PTYChild, issues: list[str]) -> None:
 	check(issues, exit_event.get("code") == 1, f"initialization failure returned {exit_event.get('code')}, expected 1")
 	check(issues, exit_event.get("queryCloseCalls") == 1, "failed session query was not closed exactly once")
 	check(issues, child.wait_exit() == 1, "initialization failure process exit code was not 1")
+	check(issues, b"Could not start Phi: PTY initialization failure" in child.output, "initialization failure diagnostic was not visible in PTY output")
 	check(issues, child.mode_error(expect_restored=True) is None, "initialization failure did not restore exact terminal settings")
 
 
