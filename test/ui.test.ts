@@ -237,7 +237,12 @@ test("hiding a pending permission dialog preserves its request and editor draft"
 	terminal.input("\u001b");
 	assert.equal(controller.interactions.pending.length, 1);
 	assert.equal(controller.views.editor.getText(), "draft stays here");
-	terminal.input("\u000f");
+	terminal.input("\u001b[112;6u");
+	await waitFor(() => controller.commandPaletteVisible);
+	terminal.input("phi questions");
+	terminal.input("\r");
+	await waitFor(() => controller.views.dialogs.requestId === "permission-1");
+	assert.equal(controller.views.editor.getText(), "draft stays here");
 	terminal.input("d");
 	assert.equal((await request)?.behavior, "deny");
 	await controller.close(0);
@@ -336,6 +341,47 @@ test("Ctrl+C requires confirmation before discarding a composer draft", async ()
 	terminal.input("\r");
 	await fake.waitForInputCount(1);
 	assert.equal(fake.receivedMessages[0]?.message.content, "unsent draft stays");
+
+	await controller.close(0);
+	assert.equal(await running, 0);
+});
+
+test("Ctrl+O opens transcript and /phi questions reopens a hidden native question", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+		createHistoryReader: () => ({
+			list: async () => [],
+			messages: async () => [],
+			agents: async () => [],
+			agentMessages: async () => [],
+			close: async () => undefined,
+		}),
+	}));
+	const running = controller.run();
+	await waitFor(() => controller.ready !== undefined);
+	const callback = fake.parameters?.options?.canUseTool;
+	assert.ok(callback);
+	const question = callback("AskUserQuestion", {
+		questions: [{ question: "Choose an answer", options: [{ label: "First" }, { label: "Second" }] }],
+	}, {
+		requestId: "hidden-question",
+		toolUseID: "hidden-question-tool",
+		signal: new AbortController().signal,
+	} as Parameters<NonNullable<Options["canUseTool"]>>[2]);
+	await waitFor(() => controller.views.dialogs.requestId === "hidden-question");
+
+	terminal.input("\u000f");
+	await waitFor(() => controller.views.active === "history");
+	assert.equal(controller.interactions.pending.length, 1);
+	terminal.output = "";
+	terminal.input("/phi questions");
+	terminal.input("\r");
+	await waitFor(() => terminal.output.includes("Choose an answer"));
+	terminal.input("1");
+	const answeredQuestion = await question;
+	assert.ok(answeredQuestion?.behavior === "allow");
+	assert.deepEqual(answeredQuestion.updatedInput?.answers, { "Choose an answer": "First" });
 
 	await controller.close(0);
 	assert.equal(await running, 0);

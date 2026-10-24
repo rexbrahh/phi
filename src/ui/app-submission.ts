@@ -61,31 +61,36 @@ export class AppSubmissionController {
 		this.sendPrompt(text);
 	}
 
-	private sendPrompt(text: string): void {
+	sendNativeCommand(commandName: string): void {
+		this.sendPrompt(`/${commandName}`, true);
+	}
+
+	private sendPrompt(text: string, preserveComposer = false): void {
 		if (this.options.isSessionTransitionInProgress()) {
-			this.options.editor.setText(text);
+			if (!preserveComposer) this.options.editor.setText(text);
 			this.options.showNotice("A session switch is in progress. Your draft is still in the composer.");
 			return;
 		}
 		const session = this.options.session();
 		const sessionId = this.options.sessionId();
 		if (sessionId === undefined || !session) {
-			this.options.editor.setText(text);
+			if (!preserveComposer) this.options.editor.setText(text);
 			this.options.showNotice("The session is not ready. Your draft is still in the composer.");
 			return;
 		}
 
 		let blocks: SDKUserMessage["message"]["content"];
+		const attachments = preserveComposer ? [] : this.options.attachments;
 		try {
-			assertAttachmentTotalWithinLimit(this.options.attachments);
-			blocks = this.options.attachments.length
+			assertAttachmentTotalWithinLimit(attachments);
+			blocks = attachments.length
 				? [
 					...(text ? [{ type: "text" as const, text }] : []),
-					...this.options.attachments.map((attachment) => attachment.block),
+					...attachments.map((attachment) => attachment.block),
 				]
 				: text;
 		} catch (error) {
-			this.options.editor.setText(text);
+			if (!preserveComposer) this.options.editor.setText(text);
 			this.options.showNotice(errorText(error));
 			return;
 		}
@@ -99,19 +104,21 @@ export class AppSubmissionController {
 			uuid,
 			session_id: sessionId,
 			origin: { kind: "human" },
-			...(inlinePastes.length ? { inline_pastes: inlinePastes } : {}),
+			...(!preserveComposer && inlinePastes.length ? { inline_pastes: inlinePastes } : {}),
 		};
 		recordSubmittedInput(this.options.state, uuid);
 		try {
 			session.send(message);
 			this.options.onPromptSubmitted();
 			this.options.editor.addToHistory(text);
-			this.options.attachments.length = 0;
-			this.options.keyboard.clearInlinePastes();
+			if (!preserveComposer) {
+				this.options.attachments.length = 0;
+				this.options.keyboard.clearInlinePastes();
+			}
 			this.options.showNotice(undefined);
 		} catch (error) {
 			markInputsDeliveryUnknown(this.options.state, [uuid]);
-			this.options.editor.setText(text);
+			if (!preserveComposer) this.options.editor.setText(text);
 			this.options.showNotice(`Could not submit prompt: ${errorText(error)}. Your draft is still in the composer.`);
 		}
 	}

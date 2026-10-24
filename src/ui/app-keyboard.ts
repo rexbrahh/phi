@@ -10,8 +10,11 @@ export interface AppKeyboardActions {
 	handleDialogInput(data: string): void;
 	exitConfirmationVisible(): boolean;
 	handleExitConfirmationInput(data: string): void;
+	commandPaletteVisible(): boolean;
+	handleCommandPaletteInput(data: string): void;
+	toggleCommandPalette(): void;
+	openTranscriptInspector(): void;
 	hideDialog(): void;
-	reopenDialog(): void;
 	leaveShellMode(): void;
 	interruptForeground(): void;
 	backgroundTasks(): void;
@@ -40,6 +43,19 @@ export class AppKeyboardController {
 	) {}
 
 	onInput(data: string): { consume?: boolean } | undefined {
+		if (this.actions.exitConfirmationVisible()) {
+			this.discardPartialPaste();
+			this.actions.handleExitConfirmationInput(data);
+			return { consume: true };
+		}
+		if (matchesKey(data, Key.ctrlShift("p"))) {
+			this.actions.toggleCommandPalette();
+			return { consume: true };
+		}
+		if (matchesKey(data, Key.ctrl("o"))) {
+			this.actions.openTranscriptInspector();
+			return { consume: true };
+		}
 		if (this.actions.dialogVisible()) {
 			this.discardPartialPaste();
 			if (matchesKey(data, Key.ctrl("c"))) {
@@ -55,9 +71,9 @@ export class AppKeyboardController {
 			this.actions.render();
 			return { consume: true };
 		}
-		if (this.actions.exitConfirmationVisible()) {
+		if (this.actions.commandPaletteVisible()) {
 			this.discardPartialPaste();
-			this.actions.handleExitConfirmationInput(data);
+			this.actions.handleCommandPaletteInput(data);
 			return { consume: true };
 		}
 		if (this.shell.mode) this.discardPartialPaste();
@@ -120,10 +136,6 @@ export class AppKeyboardController {
 		}
 		if (matchesKey(data, Key.ctrl("v"))) {
 			this.attachments.loadClipboardImage();
-			return { consume: true };
-		}
-		if (matchesKey(data, Key.ctrl("o"))) {
-			this.actions.reopenDialog();
 			return { consume: true };
 		}
 		if (matchesKey(data, Key.alt("backspace"))) {

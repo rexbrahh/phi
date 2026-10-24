@@ -40,6 +40,8 @@ test("parses every command in the Task 7 local command matrix", () => {
 		["/phi attach ./image file.png", { kind: "attach", path: "./image file.png" }],
 		["/phi mcp", { kind: "mcp" }],
 		["/phi reload", { kind: "reload" }],
+		["/phi palette", { kind: "palette" }],
+		["/phi questions", { kind: "questions" }],
 		["/phi ultracode", { kind: "ultracode" }],
 		["/phi workflow-size", { kind: "workflow-size" }],
 		["/phi send text", { kind: "send", text: "text" }],

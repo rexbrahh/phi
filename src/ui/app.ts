@@ -14,11 +14,12 @@ import {
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { buildOptions, type LaunchOptions } from "../config.js";
-import { dispatchLocalCommand, type LocalCommand, type WorkflowSize } from "../commands.js";
+import { dispatchLocalCommand, parseLocalCommand, type LocalCommand, type WorkflowSize } from "../commands.js";
 import { InteractionQueue } from "../interactions.js";
 import { startSession, type Session } from "../session.js";
 import { createState, resetStateForProcess, type PhiState } from "../state.js";
 import { AppAttachmentController } from "./app-attachments.js";
+import { AppCommandPaletteController, type PaletteCommandChoice } from "./app-command-palette.js";
 import { AppExitConfirmationController } from "./app-exit-confirmation.js";
 import { AppKeyboardController } from "./app-keyboard.js";
 import { AppDialogController } from "./app-dialogs.js";
@@ -88,6 +89,7 @@ export class AppController {
 	private readonly dependencies: AppDependencies;
 	private readonly shell: AppShellController;
 	private readonly attachmentController: AppAttachmentController;
+	private readonly commandPalette: AppCommandPaletteController;
 	private readonly exitConfirmation: AppExitConfirmationController;
 	private readonly keyboard: AppKeyboardController;
 	private readonly dialogController: AppDialogController;
@@ -144,6 +146,13 @@ export class AppController {
 		tui.setFocus(editor);
 		this.views = new ControllerViews(tui, screen, editor, transcript, dialogs, inspectors);
 		this.dialogController = dialogController;
+		this.commandPalette = new AppCommandPaletteController(
+			tui,
+			editor,
+			(choice) => this.dispatchPaletteChoice(choice),
+			(restoreDialog) => { if (restoreDialog) this.dialogController.reopen(); },
+			() => this.render(),
+		);
 		this.exitConfirmation = new AppExitConfirmationController(
 			tui,
 			editor,
@@ -173,8 +182,11 @@ export class AppController {
 			handleDialogInput: (data) => this.dialogController.handleKey(data),
 			exitConfirmationVisible: () => this.exitConfirmation.visible,
 			handleExitConfirmationInput: (data) => this.exitConfirmation.handleInput(data),
+			commandPaletteVisible: () => this.commandPalette.visible,
+			handleCommandPaletteInput: (data) => this.commandPalette.handleInput(data),
+			toggleCommandPalette: () => this.toggleCommandPalette(),
+			openTranscriptInspector: () => this.openTranscriptInspector(),
 			hideDialog: () => this.dialogController.hide(),
-			reopenDialog: () => this.dialogController.reopen(),
 			leaveShellMode: () => this.shell.leave(),
 			interruptForeground: () => { void this.interruptForeground(); },
 			backgroundTasks: () => { void this.backgroundTasks(); },
@@ -237,6 +249,10 @@ export class AppController {
 
 	get shellCwdSnapshot(): string | undefined {
 		return this.shell.cwdSnapshot;
+	}
+
+	get commandPaletteVisible(): boolean {
+		return this.commandPalette.visible;
 	}
 
 	run(): Promise<number> {
@@ -346,9 +362,45 @@ export class AppController {
 		});
 	}
 
+	private openTranscriptInspector(): void {
+		if (this.commandPalette.visible) this.commandPalette.hide(false);
+		if (this.dialogController.visible) this.dialogController.hide();
+		this.showInspector("history");
+		this.views.tui.setFocus(this.views.editor);
+	}
+
+	private dispatchPaletteChoice(choice: PaletteCommandChoice): void {
+		if (choice.kind === "native") {
+			this.submission.sendNativeCommand(choice.command);
+			return;
+		}
+		const command = parseLocalCommand(choice.command);
+		if (command) this.queueLocalCommand(command);
+	}
+
 	refreshNativeCommands(commands: SDKControlInitializeResponse["commands"]): void {
 		if (this.ready) this.ready = { ...this.ready, commands };
 		this.views.editor.setAutocompleteProvider(new CombinedAutocompleteProvider(commands, this.state.cwd));
+		this.commandPalette.setNativeCommands(commands);
+	}
+
+	openCommandPalette(): void {
+		if (this.commandPalette.visible) return;
+		const restoreDialog = this.dialogController.visible;
+		if (restoreDialog) this.dialogController.hide();
+		this.commandPalette.show(restoreDialog);
+	}
+
+	toggleCommandPalette(): void {
+		if (this.commandPalette.visible) {
+			this.commandPalette.hide();
+			return;
+		}
+		this.openCommandPalette();
+	}
+
+	reopenQuestions(): void {
+		this.dialogController.reopen();
 	}
 
 	showMcpStatus(statuses: unknown): void {

@@ -17,6 +17,8 @@ type ArgumentlessKind =
 	| "worktrees"
 	| "shell"
 	| "reload"
+	| "palette"
+	| "questions"
 	| "quit";
 
 export type LocalCommand =
@@ -40,6 +42,8 @@ export type LocalCommand =
 	| { readonly kind: "attach"; readonly path: string }
 	| { readonly kind: "mcp"; readonly server?: string }
 	| { readonly kind: "reload" }
+	| { readonly kind: "palette" }
+	| { readonly kind: "questions" }
 	| { readonly kind: "ultracode"; readonly enabled?: boolean }
 	| { readonly kind: "workflow-size"; readonly size?: WorkflowSize }
 	| { readonly kind: "send"; readonly text: string }
@@ -140,6 +144,10 @@ export function parseLocalCommand(text: string): LocalCommand | null {
 			};
 		case "reload":
 			return argumentless(text, name, argumentsText, "reload");
+		case "palette":
+			return argumentless(text, name, argumentsText, "palette");
+		case "questions":
+			return argumentless(text, name, argumentsText, "questions");
 		case "ultracode": {
 			const value = argumentsText.trim();
 			if (value.length === 0) return { kind: "ultracode" };
@@ -197,6 +205,14 @@ export async function dispatchLocalCommand(command: LocalCommand, app: AppContro
 		app.requestUserExit();
 		return;
 	}
+	if (command.kind === "palette") {
+		app.openCommandPalette();
+		return;
+	}
+	if (command.kind === "questions") {
+		app.reopenQuestions();
+		return;
+	}
 	if (command.kind === "new" || command.kind === "resume" || command.kind === "fork") {
 		await app.replaceSession(command);
 		return;
@@ -206,7 +222,7 @@ export async function dispatchLocalCommand(command: LocalCommand, app: AppContro
 		return;
 	}
 	if (command.kind === "help") {
-		app.showNotice("Local Phi: /phi status, context, model [id], effort [level], permissions [mode], tasks, workflows, transcript [text], copy, sessions, new, resume <id>, fork, rewind, worktrees, shell, attach <path>, mcp [server], reload, ultracode [on|off], workflow-size [unrestricted|small|medium|large], send <text>, quit. In Tasks, x stops the selected task; Ctrl+B backgrounds foreground work. SDK slash commands and @ paths pass through unchanged.");
+		app.showNotice("Local Phi: /phi status, context, model [id], effort [level], permissions [mode], tasks, workflows, transcript [text], copy, sessions, new, resume <id>, fork, rewind, worktrees, shell, attach <path>, mcp [server], reload, palette, questions, ultracode [on|off], workflow-size [unrestricted|small|medium|large], send <text>, quit. In Tasks, x stops the selected task; Ctrl+B backgrounds foreground work. SDK slash commands and @ paths pass through unchanged.");
 		return;
 	}
 
