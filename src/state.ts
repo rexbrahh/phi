@@ -164,6 +164,11 @@ export function createState(cwd: string): PhiState {
 		seenEnvelopeIds: new Set(),
 	};
 }
+
+export function resetStateForProcess(state: PhiState, cwd: string): void {
+	const fresh = createState(cwd);
+	Object.assign(state, fresh);
+}
 export function applySdkMessage(state: PhiState, message: SDKMessage): void {
 	const envelopeId = getEnvelopeId(message);
 	if (envelopeId && state.seenEnvelopeIds.has(envelopeId)) return;

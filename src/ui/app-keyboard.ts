@@ -12,6 +12,8 @@ export interface AppKeyboardActions {
 	reopenDialog(): void;
 	leaveShellMode(): void;
 	interruptForeground(): void;
+	backgroundTasks(): void;
+	stopSelectedTask(): void;
 	close(): void;
 	suspendTerminal(): void;
 	refreshWorkspace(): void;
@@ -75,6 +77,10 @@ export class AppKeyboardController {
 			else this.actions.close();
 			return { consume: true };
 		}
+		if (matchesKey(data, Key.ctrl("b"))) {
+			this.actions.backgroundTasks();
+			return { consume: true };
+		}
 		if (matchesKey(data, Key.ctrl("z"))) {
 			this.actions.suspendTerminal();
 			return { consume: true };
@@ -133,6 +139,10 @@ export class AppKeyboardController {
 			const model = this.views.inspectors.model;
 			if (model.selectedChildId) this.actions.selectChild(model.selectedChildId);
 			else if (model.selectedTaskId) this.actions.selectTask(model.selectedTaskId);
+			return { consume: true };
+		}
+		if (this.views.active === "tasks" && data.toLowerCase() === "x") {
+			this.actions.stopSelectedTask();
 			return { consume: true };
 		}
 		if (data === "!" && this.views.editor.getText().length === 0 && !this.shell.mode) {

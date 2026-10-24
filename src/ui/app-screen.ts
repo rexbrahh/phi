@@ -79,7 +79,7 @@ export class MainScreen {
 			if (values.shellPreview.stderr) activity.push(theme.dim(sanitizeTerminalText(values.shellPreview.stderr)));
 		}
 		this.activity.setText(activity.join(" · "));
-		this.footer.setText(theme.dim("Enter send · Ctrl+T tasks · Ctrl+R history · Ctrl+W workspace · Ctrl+G refresh · Ctrl+V image · Ctrl+C interrupt or exit · Esc close view"));
+		this.footer.setText(theme.dim("Enter send · Ctrl+T tasks · Ctrl+B background · Ctrl+R history · Ctrl+W workspace · Ctrl+V image · Ctrl+C interrupt or exit · Esc close view"));
 		this.tui.requestRender();
 	}
 }

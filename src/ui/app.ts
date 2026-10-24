@@ -7,11 +7,16 @@ import {
 import {
 	type Query,
 	type SDKControlInitializeResponse,
+	type SDKMessage,
+	type EffortLevel,
+	type PermissionMode,
 } from "@anthropic-ai/claude-agent-sdk";
+import { randomUUID } from "node:crypto";
 import { buildOptions, type LaunchOptions } from "../config.js";
+import { dispatchLocalCommand, type LocalCommand, type WorkflowSize } from "../commands.js";
 import { InteractionQueue } from "../interactions.js";
 import { startSession, type Session } from "../session.js";
-import { createState, type PhiState } from "../state.js";
+import { createState, resetStateForProcess, type PhiState } from "../state.js";
 import { AppAttachmentController } from "./app-attachments.js";
 import { AppKeyboardController } from "./app-keyboard.js";
 import { AppDialogController } from "./app-dialogs.js";
@@ -25,6 +30,22 @@ import { MainScreen } from "./app-screen.js";
 import { editorTheme, theme } from "./theme.js";
 import { TranscriptView } from "./transcript.js";
 import type { InspectorPanel } from "./inspectors.js";
+
+export interface SessionControlSelections {
+	model?: string;
+	effort?: EffortLevel;
+	permissionMode?: PermissionMode;
+	ultracode?: boolean;
+	workflowSize?: WorkflowSize;
+}
+
+type SessionTransition = Extract<LocalCommand, { kind: "new" | "resume" | "fork" }>;
+interface PendingSessionTransition {
+	key: string;
+	expiresAt: number;
+	launch: LaunchOptions;
+	sessionId: string;
+}
 
 export interface AppViews {
 	tui: TuiMainScreen;
@@ -71,15 +92,28 @@ export class AppController {
 	private exitRequested = false;
 	private closing = false;
 	private exitCode = 0;
+	private processGeneration = 0;
 	private terminalStarted = false;
 	private suspended = false;
 	private notice: string | undefined;
 	private sessionId: string | undefined;
+	private lastCheckpointId: string | undefined;
+	private reportedModelValueOverride: string | undefined;
+	private sessionControlSelections: SessionControlSelections = {};
+	private transitionTail: Promise<void> = Promise.resolve();
+	private localCommandTail: Promise<void> = Promise.resolve();
+	private pendingTransition: PendingSessionTransition | undefined;
+	private sessionError: string | undefined;
+	private pendingRewindId: string | undefined;
+	private userInteractionVersion = 0;
+	private completedInteractionVersion = -1;
+	private lastProgramStatus: string | undefined;
+	private lastProgressState: boolean | undefined;
 	private removeInputListener: (() => void) | undefined;
 	private readonly signalListeners = new Map<NodeJS.Signals, () => void>();
 	private draftRevision = 0;
 
-	constructor(private readonly launch: LaunchOptions, dependencies: Partial<AppDependencies> = {}) {
+	constructor(private launch: LaunchOptions, dependencies: Partial<AppDependencies> = {}) {
 		this.dependencies = { ...createDefaultDependencies(), ...dependencies };
 		this.state = createState(launch.cwd);
 		this.exitPromise = new Promise((resolve) => {
@@ -108,6 +142,7 @@ export class AppController {
 			editor,
 			draftRevision: () => this.draftRevision,
 			sessionId: () => this.sessionId,
+			processGeneration: () => this.processGeneration,
 			selectedOutput: () => this.views.inspectors.selectedOutput(),
 			isClosing: () => this.closing,
 			showNotice: (message) => this.showNotice(message),
@@ -118,6 +153,7 @@ export class AppController {
 			() => this.render(),
 			(message) => this.showNotice(message),
 			(receipt, preview, command, cwd, sessionId) => this.submission.sendShellReceipt(receipt, preview, command, cwd, sessionId),
+			() => this.processGeneration,
 		);
 		this.keyboard = new AppKeyboardController(this.views, this.state, this.shell, this.attachmentController, {
 			dialogVisible: () => this.dialogController.visible,
@@ -125,9 +161,9 @@ export class AppController {
 			hideDialog: () => this.dialogController.hide(),
 			reopenDialog: () => this.dialogController.reopen(),
 			leaveShellMode: () => this.shell.leave(),
-			interruptForeground: () => {
-				void this.query?.interrupt().catch((error: unknown) => this.showNotice(`Could not interrupt the current turn: ${errorText(error)}`));
-			},
+			interruptForeground: () => { void this.interruptForeground(); },
+			backgroundTasks: () => { void this.backgroundTasks(); },
+			stopSelectedTask: () => { void this.stopSelectedTask(); },
 			close: () => void this.close(0),
 			suspendTerminal: () => this.suspendTerminal(),
 			refreshWorkspace: () => void this.refreshWorkspace(this.state.cwd),
@@ -147,7 +183,8 @@ export class AppController {
 			session: () => this.session,
 			sessionId: () => this.sessionId,
 			leaveShellMode: () => this.shell.leave(),
-			refreshWorkspace: (cwd) => { void this.refreshWorkspace(cwd); },
+			dispatchLocalCommand: (command) => this.queueLocalCommand(command),
+			onPromptSubmitted: () => this.notePromptSubmitted(),
 			showNotice: (message) => this.showNotice(message),
 		});
 		editor.onChange = () => {
@@ -164,6 +201,18 @@ export class AppController {
 
 	get currentSessionId(): string | undefined {
 		return this.sessionId;
+	}
+
+	get sessionControls(): Readonly<SessionControlSelections> {
+		return this.sessionControlSelections;
+	}
+
+	get reportedModel(): string | undefined {
+		return this.reportedModelValue();
+	}
+
+	get dangerousPermissionsEnabled(): boolean {
+		return this.launch.dangerouslySkipPermissions;
 	}
 
 	get shellMode(): boolean {
@@ -213,6 +262,10 @@ export class AppController {
 		this.submission.submit(text);
 	}
 
+	submitLiteral(text: string): void {
+		this.submission.sendLiteral(text);
+	}
+
 	openShellMode(): void {
 		this.shell.enter(this.state.cwd);
 	}
@@ -231,6 +284,162 @@ export class AppController {
 
 	listAllSessions(options: { limit?: number; offset?: number } = {}) {
 		return this.views.inspectors.listAllSessions(options);
+	}
+
+	showNotice(message: string | undefined): void {
+		this.notice = message;
+		this.render();
+	}
+
+	setSessionControl<K extends keyof SessionControlSelections>(key: K, value: SessionControlSelections[K]): void {
+		this.sessionControlSelections = { ...this.sessionControlSelections, [key]: value };
+	}
+
+	setReportedModel(model: string): void {
+		this.reportedModelValueOverride = model;
+	}
+
+	private queueLocalCommand(command: LocalCommand): void {
+		if (command.kind === "attach") {
+			// Capture the current draft and process generation before the next input event.
+			void dispatchLocalCommand(command, this).catch((error: unknown) => {
+				this.showNotice(`Could not run /phi ${command.kind}: ${errorText(error)}`);
+			});
+			return;
+		}
+		const operation = this.localCommandTail.then(() => dispatchLocalCommand(command, this));
+		this.localCommandTail = operation.catch((error: unknown) => {
+			this.showNotice(`Could not run /phi ${command.kind}: ${errorText(error)}`);
+		});
+	}
+
+	refreshNativeCommands(commands: SDKControlInitializeResponse["commands"]): void {
+		if (this.ready) this.ready = { ...this.ready, commands };
+		this.views.editor.setAutocompleteProvider(new CombinedAutocompleteProvider(commands, this.state.cwd));
+	}
+
+	showMcpStatus(statuses: unknown): void {
+		this.dialogController.showMcpStatus(statuses);
+	}
+
+	loadImage(path: string, restoreDraft: string): void {
+		this.attachmentController.loadImage(path, restoreDraft);
+	}
+
+	copySelectedOutput(): Promise<void> {
+		return this.attachmentController.copySelectedOutput();
+	}
+
+	backgroundTasks(): Promise<void> {
+		const query = this.query;
+		if (!query) {
+			this.showNotice("The SDK session is not ready.");
+			return Promise.resolve();
+		}
+		const generation = this.processGeneration;
+		return query.backgroundTasks().then((backgrounded) => {
+			if (generation !== this.processGeneration) return;
+			this.showNotice(backgrounded ? "Foreground tasks were backgrounded by the SDK." : "The SDK found no foreground task to background.");
+		}).catch((error: unknown) => {
+			if (generation === this.processGeneration) this.showNotice(`Could not background foreground work: ${errorText(error)}`);
+		});
+	}
+
+	async stopSelectedTask(): Promise<void> {
+		const taskId = this.views.inspectors.model.selectedTaskId;
+		const task = taskId ? this.state.tasks.get(taskId) : undefined;
+		const query = this.query;
+		if (!taskId || !task || task.status !== "running" || !query) {
+			this.showNotice("Select a running SDK task before requesting stop.");
+			return;
+		}
+		const generation = this.processGeneration;
+		try {
+			await query.stopTask(taskId);
+			if (generation === this.processGeneration) this.showNotice(`Stop requested for task ${taskId}.`);
+		} catch (error) {
+			if (generation === this.processGeneration) this.showNotice(`Could not stop task ${taskId}: ${errorText(error)}`);
+		}
+	}
+
+	async interruptForeground(): Promise<void> {
+		const query = this.query;
+		if (!query) return;
+		const generation = this.processGeneration;
+		try {
+			await query.interrupt();
+			if (generation === this.processGeneration) this.showNotice("Foreground interruption was accepted by the SDK.");
+		} catch (error) {
+			if (generation === this.processGeneration) this.showNotice(`Could not interrupt foreground work: ${errorText(error)}`);
+		}
+	}
+
+	replaceSession(command: SessionTransition): Promise<void> {
+		const operation = this.transitionTail.then(() => this.replaceSessionNow(command));
+		this.transitionTail = operation.catch(() => undefined);
+		return operation;
+	}
+
+	async rewindFiles(): Promise<void> {
+		const query = this.query;
+		if (!query) throw new Error("The SDK session is not ready.");
+		if (this.hasActiveWork()) {
+			this.pendingRewindId = undefined;
+			this.showNotice("File rewind requires an idle session. Stop or finish active tasks first.");
+			return;
+		}
+		const checkpointId = this.lastCheckpointId;
+		if (!checkpointId) {
+			this.showNotice("No SDK user-message checkpoint has been captured in this session.");
+			return;
+		}
+		const generation = this.processGeneration;
+		let preview: Awaited<ReturnType<Query["rewindFiles"]>>;
+		try {
+			preview = await query.rewindFiles(checkpointId, { dryRun: true });
+		} catch (error) {
+			if (generation === this.processGeneration) {
+				this.pendingRewindId = undefined;
+				this.showNotice(`File rewind preview failed: ${errorText(error)}`);
+			}
+			return;
+		}
+		if (generation !== this.processGeneration) return;
+		if (!preview.canRewind) {
+			this.pendingRewindId = undefined;
+			this.showNotice(`Files cannot be rewound to ${checkpointId}: ${preview.error ?? "the SDK did not approve the preview"}`);
+			return;
+		}
+		if (this.hasActiveWork()) {
+			this.pendingRewindId = undefined;
+			this.showNotice("File rewind stopped because work became active during the SDK preview. Wait for an idle session and preview again.");
+			return;
+		}
+		if (this.lastCheckpointId !== checkpointId) {
+			this.pendingRewindId = undefined;
+			this.showNotice("The latest SDK checkpoint changed during the rewind preview. Run /phi rewind again to preview the current checkpoint.");
+			return;
+		}
+		const confirmed = this.pendingRewindId === checkpointId;
+		if (!confirmed) {
+			this.pendingRewindId = checkpointId;
+			this.showNotice(`Fresh preview for ${checkpointId}: ${preview.filesChanged?.length ?? 0} tracked file(s), ${preview.insertions ?? 0} insertion(s), ${preview.deletions ?? 0} deletion(s). This changes files only; Git and shell effects are outside rewind. Run /phi rewind again to confirm.`);
+			return;
+		}
+		this.pendingRewindId = undefined;
+		let result: Awaited<ReturnType<Query["rewindFiles"]>>;
+		try {
+			result = await query.rewindFiles(checkpointId, { dryRun: false });
+		} catch (error) {
+			if (generation === this.processGeneration) this.showNotice(`File rewind failed: ${errorText(error)}`);
+			return;
+		}
+		if (generation !== this.processGeneration) return;
+		if (!result.canRewind) {
+			this.showNotice(`File rewind failed: ${result.error ?? "the SDK did not complete the rewind"}${result.skippedLinks !== undefined ? `; skipped links: ${result.skippedLinks}` : ""}`);
+			return;
+		}
+		this.showNotice(`Rewound ${result.filesChanged?.length ?? 0} tracked file(s) to ${checkpointId}${result.skippedLinks !== undefined ? `; skipped links: ${result.skippedLinks}` : ""}. Git and shell effects were not changed.`);
 	}
 
 	private async runInternal(): Promise<number> {
@@ -292,6 +501,60 @@ export class AppController {
 		} finally {
 			await this.cleanup();
 		}
+		let sessionCwd = this.launch.cwd;
+		try {
+			const sessions = await this.listAllSessions({ limit: 1_000, offset: 0 });
+			const session = sessions.find((candidate) => candidate.sessionId === command.sessionId);
+			if (session?.cwd) sessionCwd = session.cwd;
+		} catch {
+			// The SDK resume request remains authoritative if local listing is unavailable.
+		}
+		return {
+			key,
+			expiresAt: Date.now() + 30_000,
+			sessionId: command.sessionId,
+			launch: { ...this.launch, cwd: sessionCwd, resume: command.sessionId, forkSession: false, sessionId: undefined, continue: false },
+		};
+	}
+
+	private transitionCommand(command: SessionTransition): string {
+		if (command.kind === "resume") return `/phi resume ${command.sessionId}`;
+		return `/phi ${command.kind}`;
+	}
+
+	private hasActiveWork(): boolean {
+		return this.shell.running
+			|| this.interactions.pending.length > 0
+			|| this.state.effectiveStatus.foreground === "running"
+			|| this.state.liveBackgroundTaskIds.size > 0
+			|| [...this.state.tasks.values()].some((task) => task.status === "running");
+	}
+
+	private tasksToStopBeforeSwitch(): string[] {
+		const ids = new Set(this.state.liveBackgroundTaskIds);
+		for (const task of this.state.tasks.values()) {
+			if (task.status === "running" && (task.ambient || task.isBackgrounded)) ids.add(task.taskId);
+		}
+		return [...ids];
+	}
+
+	private resetSessionControls(launch: LaunchOptions): void {
+		this.sessionControlSelections = {
+			...(launch.model ? { model: launch.model } : {}),
+			...(launch.effort ? { effort: launch.effort } : {}),
+			...(launch.permissionMode ? { permissionMode: launch.permissionMode } : {}),
+		};
+	}
+
+	private reportedModelValue(): string | undefined {
+		if (this.reportedModelValueOverride) return this.reportedModelValueOverride;
+		const models = this.state.usage?.modelUsage;
+		return models ? Object.keys(models).at(-1) : undefined;
+	}
+
+	private notePromptSubmitted(): void {
+		this.userInteractionVersion += 1;
+		this.sessionError = undefined;
 	}
 
 	private startTerminal(): void {
@@ -312,11 +575,6 @@ export class AppController {
 			this.signalListeners.set(signal, listener);
 			this.dependencies.signals.on(signal, listener);
 		}
-	}
-
-	private showNotice(message: string | undefined): void {
-		this.notice = message;
-		this.render();
 	}
 
 	private render(): void {

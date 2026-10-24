@@ -5,6 +5,7 @@ import { assertAttachmentTotalWithinLimit, type ImageAttachment } from "../attac
 import type { Session } from "../session.js";
 import type { ShellPreview, ShellReceipt } from "../shell.js";
 import { markInputsDeliveryUnknown, recordSubmittedInput, type PhiState } from "../state.js";
+import { parseLocalCommand, type LocalCommand } from "../commands.js";
 import type { AppAttachmentController } from "./app-attachments.js";
 import type { AppKeyboardController } from "./app-keyboard.js";
 import type { AppShellController } from "./app-shell.js";
@@ -19,7 +20,8 @@ export interface AppSubmissionOptions {
 	session(): Session | undefined;
 	sessionId(): string | undefined;
 	leaveShellMode(): void;
-	refreshWorkspace(cwd: string): void;
+	dispatchLocalCommand(command: LocalCommand): void;
+	onPromptSubmitted(): void;
 	showNotice(message: string | undefined): void;
 }
 
@@ -44,11 +46,21 @@ export class AppSubmissionController {
 			}
 			return;
 		}
-		if (content === "/phi" || content.startsWith("/phi ")) {
+		const command = parseLocalCommand(text);
+		if (command) {
 			this.options.keyboard.clearInlinePastes();
-			this.dispatchLocalCommand(content);
+			this.options.dispatchLocalCommand(command);
 			return;
 		}
+		this.sendPrompt(text);
+	}
+
+	sendLiteral(text: string): void {
+		if (!text.trim() && this.options.attachments.length === 0) return;
+		this.sendPrompt(text);
+	}
+
+	private sendPrompt(text: string): void {
 		const session = this.options.session();
 		const sessionId = this.options.sessionId();
 		if (sessionId === undefined || !session) {
@@ -62,10 +74,10 @@ export class AppSubmissionController {
 			assertAttachmentTotalWithinLimit(this.options.attachments);
 			blocks = this.options.attachments.length
 				? [
-					...(content ? [{ type: "text" as const, text: content }] : []),
+					...(text ? [{ type: "text" as const, text }] : []),
 					...this.options.attachments.map((attachment) => attachment.block),
 				]
-				: content;
+				: text;
 		} catch (error) {
 			this.options.editor.setText(text);
 			this.options.showNotice(errorText(error));
@@ -86,7 +98,8 @@ export class AppSubmissionController {
 		recordSubmittedInput(this.options.state, uuid);
 		try {
 			session.send(message);
-			this.options.editor.addToHistory(content);
+			this.options.onPromptSubmitted();
+			this.options.editor.addToHistory(text);
 			this.options.attachments.length = 0;
 			this.options.keyboard.clearInlinePastes();
 			this.options.showNotice(undefined);
@@ -147,22 +160,6 @@ export class AppSubmissionController {
 		}
 	}
 
-	private dispatchLocalCommand(line: string): void {
-		const [name = "help", ...args] = line.trim().slice(4).trim().split(/\s+/u);
-		if (name === "help") {
-			this.options.showNotice("Local Phi: /phi help, /phi shell, /phi attach <image path>, /phi refresh. Ctrl+T tasks, Ctrl+R history, Ctrl+W workspace, Ctrl+O reopens a pending dialog. SDK slash commands and @ mentions pass through unchanged.");
-		} else if (name === "shell" && args.length === 0) {
-			this.options.shell.enter(this.options.state.cwd);
-		} else if (name === "attach" && args.length > 0) {
-			const path = line.trim().slice(line.trim().indexOf("attach") + "attach".length).trim().replace(/^(?:"(.*)"|'(.*)')$/u, (_match, doubleQuoted: string, singleQuoted: string) => doubleQuoted ?? singleQuoted ?? "");
-			this.options.attachmentController.loadImage(path, line);
-		} else if (name === "refresh" && args.length === 0) {
-			this.options.refreshWorkspace(this.options.state.cwd);
-			this.options.showNotice("Refreshing Git status.");
-		} else {
-			this.options.showNotice("Unknown local command. Use /phi help. This input was not sent to the model.");
-		}
-	}
 }
 
 function errorText(error: unknown): string {

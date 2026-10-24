@@ -57,7 +57,7 @@ export class InspectorView implements Component {
 	invalidate(): void {}
 
 	private renderTasks(width: number): string[] {
-		const lines = [theme.accent("Tasks · Ctrl+T"), "Tab selects the next task or child transcript · Enter opens selection"];
+		const lines = [theme.accent("Tasks · Ctrl+T"), "Tab cycles tasks and children · Enter opens · x stops selected task"];
 		const tasks = [...this.state.tasks.values()].filter((task) => !task.ambient);
 		if (tasks.length === 0) lines.push("No SDK tasks have been reported.");
 		for (const task of tasks) lines.push(...this.renderTaskRow(task, width));

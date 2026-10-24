@@ -14,6 +14,7 @@ interface ActiveShellJob {
 	command: string;
 	cwd: string;
 	sessionId: string;
+	processGeneration: number;
 	preview?: ShellPreview;
 	done: Promise<void>;
 }
@@ -29,6 +30,7 @@ export class AppShellController {
 		private readonly onChange: () => void,
 		private readonly onNotice: (message: string) => void,
 		private readonly onReceipt: (receipt: ShellReceipt, preview: ShellPreview | undefined, command: string, cwd: string, sessionId: string) => void,
+		private readonly currentProcessGeneration: () => number,
 	) {}
 
 	get running(): boolean {
@@ -52,11 +54,16 @@ export class AppShellController {
 			this.onNotice("A local shell job is already running. Your command remains in the composer.");
 			return false;
 		}
+		if (this.closed) {
+			this.onNotice("The local shell is closing. Your command remains in the composer.");
+			return false;
+		}
 		if (!sessionId) {
 			this.onNotice("The session is not ready. Your shell command remains in the composer.");
 			return false;
 		}
 		const controller = new AbortController();
+		const processGeneration = this.currentProcessGeneration();
 		let initialPreview: ShellPreview | undefined;
 		let jobId: string | undefined;
 		try {
@@ -65,7 +72,7 @@ export class AppShellController {
 					initialPreview = preview;
 					return;
 				}
-				if (this.active?.job.jobId !== jobId) return;
+				if (this.active?.job.jobId !== jobId || processGeneration !== this.currentProcessGeneration()) return;
 				this.active.preview = preview;
 				this.onChange();
 			});
@@ -76,6 +83,7 @@ export class AppShellController {
 				command,
 				cwd,
 				sessionId,
+				processGeneration,
 				preview: initialPreview,
 				done: Promise.resolve(),
 			};
@@ -107,6 +115,10 @@ export class AppShellController {
 
 	async close(): Promise<void> {
 		this.closed = true;
+		await this.stop();
+	}
+
+	async stop(): Promise<void> {
 		const active = this.active;
 		active?.controller.abort();
 		await active?.done;
@@ -115,14 +127,14 @@ export class AppShellController {
 	private async finish(active: ActiveShellJob): Promise<void> {
 		try {
 			const receipt = await active.job.done;
-			if (!this.closed) {
+			if (!this.closed && active.processGeneration === this.currentProcessGeneration()) {
 				this.onNotice(receipt.aborted
 					? "Local shell command stopped."
 					: `Local shell command exited ${receipt.exitCode ?? receipt.signal ?? "with an error"}.`);
 				this.onReceipt(receipt, active.preview, active.command, active.cwd, active.sessionId);
 			}
 		} catch (error) {
-			if (!this.closed) this.onNotice(`Local shell job failed: ${errorText(error)}`);
+			if (!this.closed && active.processGeneration === this.currentProcessGeneration()) this.onNotice(`Local shell job failed: ${errorText(error)}`);
 		} finally {
 			if (this.active === active) this.active = undefined;
 			this.onChange();

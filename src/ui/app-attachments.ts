@@ -8,6 +8,7 @@ export interface AppAttachmentOptions {
 	editor: Editor;
 	draftRevision(): number;
 	sessionId(): string | undefined;
+	processGeneration(): number;
 	selectedOutput(): string | undefined;
 	isClosing(): boolean;
 	showNotice(message: string | undefined): void;
@@ -76,6 +77,7 @@ export class AppAttachmentController {
 		const controller = new AbortController();
 		const draftRevision = this.options.draftRevision();
 		const sessionId = this.options.sessionId();
+		const processGeneration = this.options.processGeneration();
 		this.controllers.add(controller);
 		const operation = (async () => {
 			try {
@@ -89,6 +91,7 @@ export class AppAttachmentController {
 					controller.signal.aborted
 					|| draftRevision !== this.options.draftRevision()
 					|| sessionId !== this.options.sessionId()
+					|| processGeneration !== this.options.processGeneration()
 				) {
 					this.options.showNotice("Image load was discarded because the session or composer draft changed.");
 					return;

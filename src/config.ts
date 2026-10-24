@@ -13,6 +13,8 @@ import type {
 export interface LaunchOptions {
 	cwd: string;
 	resume?: string;
+	sessionId?: string;
+	forkSession?: boolean;
 	continue: boolean;
 	model?: string;
 	effort?: EffortLevel;
@@ -201,13 +203,14 @@ export function buildOptions(
 		...callbacks,
 		cwd: launch.cwd,
 		...(launch.resume ? { resume: launch.resume } : {}),
+		...(launch.forkSession ? { forkSession: true } : {}),
 		...(launch.model ? { model: launch.model } : {}),
 		...(launch.effort ? { effort: launch.effort } : {}),
 		...(launch.permissionMode ? { permissionMode: launch.permissionMode } : {}),
 		...(launch.maxBudgetUsd === undefined ? {} : { maxBudgetUsd: launch.maxBudgetUsd }),
 		plugins: launch.pluginDirs.map((path) => ({ type: "local", path })),
 		...(launch.dangerouslySkipPermissions ? { allowDangerouslySkipPermissions: true } : {}),
-		...(startsNewSession ? { sessionId: randomUUID() } : {}),
+		...(launch.sessionId ? { sessionId: launch.sessionId } : startsNewSession ? { sessionId: randomUUID() } : {}),
 		systemPrompt: { type: "preset", preset: "claude_code" },
 		tools: { type: "preset", preset: "claude_code" },
 		settingSources: ["user", "project", "local"],
@@ -216,6 +219,7 @@ export function buildOptions(
 		forwardSubagentText: true,
 		includeHookEvents: true,
 		enableFileCheckpointing: true,
+		perTaskStopAffordance: true,
 		agentProgressSummaries: false,
 		extraArgs: { "replay-user-messages": null },
 		env: {
