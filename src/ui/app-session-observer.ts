@@ -68,7 +68,7 @@ export class AppSessionObserver {
 				}
 			},
 			onClosing: (reason) => {
-				if (this.isCurrentGeneration()) this.interactions.cancelAll(reason);
+				if (this.isCurrentGeneration()) this.interactions.cancelPending(reason);
 			},
 		};
 	}

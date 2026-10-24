@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { SDKControlInitializeResponse, SDKMessage, SDKSessionInfo, SessionMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { Options, SDKControlInitializeResponse, SDKMessage, SDKSessionInfo, SessionMessage } from "@anthropic-ai/claude-agent-sdk";
 import { parseArgs } from "../src/config.js";
 import type { HistoryReader } from "../src/history.js";
 import type { ShellReceipt } from "../src/shell.js";
@@ -27,6 +27,20 @@ async function waitForOutput(terminal: FakeTerminal, text: string): Promise<void
 		await waitFor(() => plainTerminalOutput(terminal).includes(text));
 	} catch {
 		throw new Error(`Timed out waiting for terminal output ${JSON.stringify(text)}; got ${terminal.output.slice(-1_000)}`);
+	}
+}
+
+async function waitForResult<T>(promise: Promise<T>, label: string): Promise<T> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<T>((_resolve, reject) => {
+				timeout = setTimeout(() => reject(new Error(`Timed out waiting for ${label}.`)), 2_000);
+			}),
+		]);
+	} finally {
+		if (timeout) clearTimeout(timeout);
 	}
 }
 
@@ -151,6 +165,14 @@ test("new, fork, and resume stop old work and open SDK sessions in order", async
 	const running = controller.run();
 	try {
 		await waitFor(() => controller.ready !== undefined);
+		const firstPermission = first.parameters?.options?.canUseTool;
+		assert.ok(firstPermission);
+		const oldPermission = firstPermission("Read", {}, {
+			requestId: "transition-permission",
+			toolUseID: "transition-tool",
+			signal: new AbortController().signal,
+		} as Parameters<NonNullable<Options["canUseTool"]>>[2]);
+		await waitFor(() => controller.interactions.pending.length === 1);
 		first.pushMessage(backgroundTasksChanged({
 			envelopeId: "background-before-clear",
 			tasks: [
@@ -176,20 +198,87 @@ test("new, fork, and resume stop old work and open SDK sessions in order", async
 		assert.equal(second.parameters?.options?.forkSession, undefined);
 		assert.ok(second.parameters?.options?.sessionId);
 		assert.equal(controller.state.liveBackgroundTaskIds.size, 0);
+		assert.equal((await waitForResult(oldPermission, "old permission cancellation"))?.behavior, "deny");
+
+		const secondPermission = second.parameters?.options?.canUseTool;
+		assert.ok(secondPermission);
+		const newPermission = secondPermission("Read", {}, {
+			requestId: "reused-transition-permission",
+			toolUseID: "new-session-tool",
+			signal: new AbortController().signal,
+		} as Parameters<NonNullable<Options["canUseTool"]>>[2]);
+		await waitFor(() => controller.views.dialogs.requestId === "reused-transition-permission");
+		terminal.input("1");
+		assert.equal((await waitForResult(newPermission, "new session permission answer"))?.behavior, "allow");
 
 		const newSessionId = controller.currentSessionId;
+		const secondQuestion = second.parameters?.options?.canUseTool;
+		assert.ok(secondQuestion);
+		const oldQuestion = secondQuestion("AskUserQuestion", {
+			questions: [{ question: "Continue the fork?", options: [{ label: "Yes" }, { label: "No" }] }],
+		}, {
+			requestId: "transition-question",
+			toolUseID: "transition-question-tool",
+			signal: new AbortController().signal,
+		} as Parameters<NonNullable<Options["canUseTool"]>>[2]);
+		await waitFor(() => controller.interactions.pending.length === 1);
+		controller.submitPrompt("/phi fork");
+		await waitForOutput(terminal, "confirm stop-and-switch");
 		controller.submitPrompt("/phi fork");
 		await waitFor(() => third.parameters !== undefined);
+		assert.equal((await waitForResult(oldQuestion, "old question cancellation"))?.behavior, "deny");
 		assert.equal(third.parameters?.options?.resume, newSessionId);
 		assert.equal(third.parameters?.options?.forkSession, true);
 		assert.notEqual(third.parameters?.options?.sessionId, newSessionId);
 
+		const thirdQuestion = third.parameters?.options?.canUseTool;
+		assert.ok(thirdQuestion);
+		const forkQuestion = thirdQuestion("AskUserQuestion", {
+			questions: [{ question: "Answer in the fork?", options: [{ label: "Answered" }] }],
+		}, {
+			requestId: "fork-question",
+			toolUseID: "fork-question-tool",
+			signal: new AbortController().signal,
+		} as Parameters<NonNullable<Options["canUseTool"]>>[2]);
+		await waitFor(() => controller.views.dialogs.requestId === "fork-question");
+		terminal.input("1");
+		assert.equal((await waitForResult(forkQuestion, "forked question answer"))?.behavior, "allow");
+
+		const thirdElicitation = third.parameters?.options?.onElicitation;
+		assert.ok(thirdElicitation);
+		const oldElicitation = thirdElicitation({
+			mode: "url",
+			serverName: "fork-session",
+			message: "Authenticate",
+			url: "https://auth.example.test/fork",
+		}, { requestId: "transition-elicitation", signal: new AbortController().signal });
+		await waitFor(() => controller.interactions.pending.length === 1);
+		controller.submitPrompt(`/phi resume ${RESUME_ID}`);
+		await waitForOutput(terminal, "confirm stop-and-switch");
 		controller.submitPrompt(`/phi resume ${RESUME_ID}`);
 		await waitFor(() => fourth.parameters !== undefined && controller.currentSessionId === RESUME_ID);
+		assert.deepEqual(await waitForResult(oldElicitation, "old elicitation cancellation"), { action: "cancel" });
 		assert.equal(fourth.parameters?.options?.resume, RESUME_ID);
 		assert.equal(fourth.parameters?.options?.cwd, "/target/project");
 		assert.equal(fourth.parameters?.options?.forkSession, undefined);
 		assert.equal((await history.list({})).some((session) => session.sessionId === RESUME_ID), true);
+
+		const resumedElicitation = fourth.parameters?.options?.onElicitation;
+		assert.ok(resumedElicitation);
+		const answeredElicitation = resumedElicitation({
+			mode: "form",
+			serverName: "resumed-session",
+			message: "Provide your name",
+			requestedSchema: {
+				type: "object",
+				properties: { name: { type: "string" } },
+				required: ["name"],
+			},
+		}, { requestId: "resumed-elicitation", signal: new AbortController().signal });
+		await waitFor(() => controller.views.dialogs.requestId === "resumed-elicitation");
+		terminal.input('{"name":"Ada"}');
+		terminal.input("\r");
+		assert.deepEqual(await waitForResult(answeredElicitation, "resumed MCP form answer"), { action: "accept", content: { name: "Ada" } });
 	} finally {
 		await controller.close(0);
 		await running;

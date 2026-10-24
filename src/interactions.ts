@@ -97,9 +97,22 @@ export class InteractionQueue {
 	cancelAll(reason: string): void {
 		const cancellation = normalizeReason(reason, "Session closed");
 		this.closedReason ??= cancellation;
+		this.cancelPending(cancellation);
+	}
+
+	cancelPending(reason: string): void {
+		const cancellation = normalizeReason(reason, "Session changed");
 		for (const active of [...this.activeRequests.values()]) {
 			this.cancel(active, cancellation, true);
 		}
+		this.settledRequests.clear();
+	}
+
+	cancelRequest(requestId: string, reason: string): boolean {
+		const active = this.activeRequests.get(requestId);
+		if (!active) return false;
+		this.cancel(active, normalizeReason(reason, "Request cancelled"), true);
+		return true;
 	}
 
 	private enqueueTool(

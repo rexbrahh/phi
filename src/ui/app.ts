@@ -615,7 +615,7 @@ export class AppController {
 				}
 			}
 
-			this.interactions.cancelAll("Session switch requested");
+			this.interactions.cancelPending("Session switch requested");
 			generation = ++this.processGeneration;
 			this.views.inspectors.setSession(this.sessionId ?? "", generation, this.state.cwd);
 			await this.shell.stop();

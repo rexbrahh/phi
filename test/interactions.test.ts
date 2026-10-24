@@ -790,6 +790,27 @@ test("cancelAll settles every request and prevents later answers", async () => {
 	assert.match(permissionDeny(await lateRequest.promise).message, /session closed/i);
 });
 
+test("cancelPending settles old session requests and leaves the queue open", async () => {
+	const queue = new InteractionQueue();
+	const oldPermission = permissionRequest(queue, "reused-request-id");
+	const oldElicitation = elicitationRequest(queue, "old-elicitation", {
+		mode: "url",
+		serverName: "old-session",
+		message: "Authenticate",
+		url: "https://auth.example.test/old",
+	});
+
+	queue.cancelPending("Session switch requested");
+	assert.equal(permissionDeny(await oldPermission.promise).behavior, "deny");
+	assert.deepEqual(await elicitationResult(oldElicitation.promise), { action: "cancel" });
+	assert.deepEqual(pendingIds(queue), []);
+
+	const nextPermission = permissionRequest(queue, "reused-request-id");
+	assert.deepEqual(pendingIds(queue), ["reused-request-id"]);
+	assert.equal(queue.answer("reused-request-id", { kind: "permission", action: "allow-once" }), true);
+	assert.equal(permissionAllow(await nextPermission.promise).behavior, "allow");
+});
+
 test("callbacks after close do not replay settled allow or accept results", async () => {
 	const queue = new InteractionQueue();
 	const tool = permissionRequest(queue, "settled-tool-after-close");
