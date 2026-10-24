@@ -4,6 +4,7 @@ import type { HistoryReader } from "../history.js";
 import type { JournalCursor, JournalPage, WorkflowReference, WorkflowJournalRecord } from "../workflows.js";
 import type { AppDependencies } from "./app-types.js";
 import { createInspectorModel, getHistoryMessageSearchText, getHistoryMessageText, InspectorView, type InspectorPanel } from "./inspectors.js";
+import { formatErrorText } from "./error-text.js";
 
 const HISTORY_PAGE_SIZE = 200;
 
@@ -32,6 +33,10 @@ export class AppInspectorController {
 		private readonly onChange: () => void,
 	) {
 		this.view = new InspectorView(state, this.model);
+	}
+
+	private errorText(error: unknown): string {
+		return formatErrorText(error, this.dependencies.environment.ANTHROPIC_API_KEY);
 	}
 
 	setSession(sessionId: string, processGeneration = this.processGeneration, cwd = this.launchCwd, refreshActive = false): void {
@@ -166,7 +171,7 @@ export class AppInspectorController {
 			this.model.childMessages = messages;
 			this.model.historyError = undefined;
 		} catch (error) {
-			if (generation === this.historyGeneration && this.processGeneration === processGeneration) this.model.historyError = errorText(error);
+			if (generation === this.historyGeneration && this.processGeneration === processGeneration) this.model.historyError = this.errorText(error);
 		} finally {
 			if (generation === this.historyGeneration && this.processGeneration === processGeneration) {
 				this.model.historyLoading = false;
@@ -194,7 +199,7 @@ export class AppInspectorController {
 			if (this.closed || generation !== this.historyGeneration || this.processGeneration !== processGeneration || this.sessionId !== sessionId) return;
 			this.model.historyMessages = messages;
 		} catch (error) {
-			if (generation === this.historyGeneration && this.processGeneration === processGeneration) this.model.historyError = errorText(error);
+			if (generation === this.historyGeneration && this.processGeneration === processGeneration) this.model.historyError = this.errorText(error);
 		} finally {
 			if (generation === this.historyGeneration && this.processGeneration === processGeneration) {
 				this.model.historyLoading = false;
@@ -221,7 +226,7 @@ export class AppInspectorController {
 			this.onChange();
 		} catch (error) {
 			if (this.closed || generation !== this.workspaceGeneration || this.processGeneration !== processGeneration || this.state.cwd !== cwd) return;
-			this.model.workspace = { kind: "error", cwd, error: errorText(error) };
+			this.model.workspace = { kind: "error", cwd, error: this.errorText(error) };
 			this.onChange();
 		}
 	}
@@ -312,7 +317,7 @@ export class AppInspectorController {
 			this.onChange();
 		} catch (error) {
 			if (generation !== this.historyGeneration || this.processGeneration !== processGeneration) return;
-			this.model.historyError = errorText(error);
+			this.model.historyError = this.errorText(error);
 			this.onChange();
 		}
 	}
@@ -359,7 +364,7 @@ export class AppInspectorController {
 			this.mergeWorkflowPage(taskId, page);
 		} catch (error) {
 			if (!this.closed && generation === this.workflowGeneration && this.isSelectedActiveWorkflow(taskId)) {
-				this.model.workflowWarnings = [errorText(error)];
+				this.model.workflowWarnings = [this.errorText(error)];
 			}
 		} finally {
 			this.workflowPollActive = false;
@@ -396,8 +401,4 @@ function workflowRecordKey(record: WorkflowJournalRecord): string {
 
 function copiedMessageText(message: unknown): string {
 	return getHistoryMessageText(message) ?? JSON.stringify(message) ?? String(message);
-}
-
-function errorText(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }

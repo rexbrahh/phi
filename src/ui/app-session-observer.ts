@@ -28,6 +28,7 @@ export class AppSessionObserver {
 		private readonly onCheckpoint: (uuid: string) => void,
 		private readonly onResult: () => void,
 		private readonly onSdkError: (message: string) => void,
+		private readonly formatDiagnostic: (error: unknown) => string,
 	) {}
 
 	callbacks(): AppSessionCallbacks {
@@ -64,7 +65,7 @@ export class AppSessionObserver {
 			onMessage: (message) => this.onMessage(message),
 			onError: (error) => {
 				if (!this.isClosing() && this.isCurrentGeneration()) {
-					const message = `SDK error: ${errorText(error)}`;
+					const message = `SDK error: ${this.formatDiagnostic(error)}`;
 					this.onSdkError(message);
 					this.showNotice(message);
 				}
@@ -89,8 +90,4 @@ export class AppSessionObserver {
 		this.syncInteractions();
 		this.render();
 	}
-}
-
-function errorText(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }

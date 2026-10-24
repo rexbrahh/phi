@@ -33,6 +33,7 @@ import { MainScreen } from "./app-screen.js";
 import { editorTheme, theme } from "./theme.js";
 import { TranscriptView } from "./transcript.js";
 import type { InspectorPanel } from "./inspectors.js";
+import { formatErrorText } from "./error-text.js";
 
 const SESSION_LOOKUP_PAGE_SIZE = 1_000;
 
@@ -330,8 +331,16 @@ export class AppController {
 	}
 
 	showNotice(message: string | undefined): void {
-		this.notice = message;
+		this.notice = message === undefined ? undefined : this.formatDiagnostic(message);
 		this.render();
+	}
+
+	private formatDiagnostic(value: unknown): string {
+		return formatErrorText(value, this.dependencies.environment.ANTHROPIC_API_KEY);
+	}
+
+	private setSessionError(message: string | undefined): void {
+		this.sessionError = message === undefined ? undefined : this.formatDiagnostic(message);
 	}
 
 	setSessionControl<K extends keyof SessionControlSelections>(key: K, value: SessionControlSelections[K]): void {
@@ -583,8 +592,9 @@ export class AppController {
 			(commands) => this.refreshNativeCommands(commands),
 			() => this.refreshNativeCommands(this.ready?.commands ?? []),
 			(uuid) => { this.lastCheckpointId = uuid; },
-			() => { this.completedInteractionVersion = this.userInteractionVersion; this.sessionError = undefined; },
-			(message) => { this.sessionError = message; },
+			() => { this.completedInteractionVersion = this.userInteractionVersion; this.setSessionError(undefined); },
+			(message) => { this.setSessionError(message); },
+			(error) => this.formatDiagnostic(error),
 		);
 		const callbacks = observer.callbacks();
 		const options = buildOptions(launch, {
@@ -597,7 +607,7 @@ export class AppController {
 		this.session = startSession(options, callbacks, this.dependencies.createQuery);
 		const session = this.session;
 		this.ready = undefined;
-		this.sessionError = undefined;
+		this.setSessionError(undefined);
 		this.pendingRewindId = undefined;
 		void session.done.then(
 			() => {
@@ -605,7 +615,7 @@ export class AppController {
 				if (replacement) {
 					this.session = undefined;
 					this.ready = undefined;
-					this.sessionError = "The SDK output stream ended.";
+					this.setSessionError("The SDK output stream ended.");
 					this.showNotice(`Session ${this.sessionId ?? "unknown"} ended.`);
 				} else {
 					this.requestExit(0);
@@ -614,7 +624,7 @@ export class AppController {
 			(error: unknown) => {
 				if (!isCurrent()) return;
 				const detail = `Session ended with an error: ${errorText(error)}`;
-				this.sessionError = detail;
+				this.setSessionError(detail);
 				this.showNotice(detail);
 				if (replacement) {
 					this.session = undefined;
@@ -643,7 +653,7 @@ export class AppController {
 			}
 		} catch (error) {
 			if (isCurrent()) {
-				this.sessionError = `Could not open session ${this.sessionId ?? "unknown"}: ${errorText(error)}`;
+				this.setSessionError(`Could not open session ${this.sessionId ?? "unknown"}: ${errorText(error)}`);
 				this.showNotice(this.sessionError);
 			}
 			if (replacement) {
@@ -652,7 +662,7 @@ export class AppController {
 					if (isCurrent()) this.session = undefined;
 				} catch (closeError) {
 					if (isCurrent()) {
-						this.sessionError = `Could not open session ${this.sessionId ?? "unknown"}: ${errorText(error)}. Query cleanup failed: ${errorText(closeError)}`;
+						this.setSessionError(`Could not open session ${this.sessionId ?? "unknown"}: ${errorText(error)}. Query cleanup failed: ${errorText(closeError)}`);
 						this.showNotice(this.sessionError);
 					}
 				}
@@ -713,14 +723,14 @@ export class AppController {
 				if (!isCurrent()) return;
 				if (this.session === oldSession) this.session = undefined;
 				this.ready = undefined;
-				this.sessionError = `Could not close the current SDK query; ${target.sessionId} was not opened: ${errorText(error)}`;
+				this.setSessionError(`Could not close the current SDK query; ${target.sessionId} was not opened: ${errorText(error)}`);
 				this.showNotice(this.sessionError);
 				return;
 			}
 			if (!isCurrent()) return;
 			if (this.session === oldSession) this.session = undefined;
 			this.ready = undefined;
-			this.sessionError = undefined;
+			this.setSessionError(undefined);
 			this.lastCheckpointId = undefined;
 			this.reportedModelValueOverride = undefined;
 			this.state.cwd = target.launch.cwd;
@@ -739,7 +749,7 @@ export class AppController {
 				if (!this.exitRequested && generation === this.processGeneration) void this.refreshWorkspace(target.launch.cwd);
 			} catch (error) {
 				if (generation === this.processGeneration && !this.sessionError) {
-					this.sessionError = `Could not open session ${target.sessionId}: ${errorText(error)}`;
+					this.setSessionError(`Could not open session ${target.sessionId}: ${errorText(error)}`);
 					this.showNotice(this.sessionError);
 				}
 			}
@@ -802,7 +812,7 @@ export class AppController {
 			}
 		} catch (error) {
 			if (!isCurrent()) return undefined;
-			cwdWarning = `Local session metadata could not be read (${errorText(error)}); this resume uses the current directory.`;
+			cwdWarning = `Local session metadata could not be read (${this.formatDiagnostic(error)}); this resume uses the current directory.`;
 		}
 		if (!isCurrent()) return undefined;
 		return {
@@ -851,7 +861,7 @@ export class AppController {
 
 	private notePromptSubmitted(): void {
 		this.userInteractionVersion += 1;
-		this.sessionError = undefined;
+		this.setSessionError(undefined);
 	}
 
 	private startTerminal(): void {
