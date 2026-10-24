@@ -73,7 +73,11 @@ export async function importClaudeCustomizations(
 		throw safeError(error);
 	}
 	if (sourceReal === homeReal) return { imported: [], skipped: [] };
-	if (!(await stat(sourceReal)).isDirectory()) throw new Error(IMPORT_ERROR);
+	try {
+		if (!(await stat(sourceReal)).isDirectory()) throw new Error(IMPORT_ERROR);
+	} catch (error) {
+		throw safeError(error);
+	}
 
 	const stage = join(phiHome, `.claude-import-${randomUUID()}.staging`);
 	const phiTarget = resolve(phiHome);
