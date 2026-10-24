@@ -269,3 +269,137 @@ test("permission decisions reject unknown actions without settling", async () =>
 	assert.equal(queue.answer("invalid-permission-answer", { kind: "permission", action: "deny" }), true);
 	assert.equal(permissionDeny(await request.promise).behavior, "deny");
 });
+
+test("AskUserQuestion preserves native questions and maps one choice by question text", async () => {
+	const queue = new InteractionQueue();
+	const input = questionInput([
+		{
+			question: "Run the command?",
+			header: "Execution",
+			options: [{ label: "Run", description: "Execute it" }, { label: "Skip", description: "Do not execute" }],
+		},
+	]);
+	const request = questionRequest(queue, "question-choice", input);
+	const pending = queue.pending[0];
+	assert.ok(pending?.kind === "question");
+	assert.strictEqual((pending.nativePayload as { input: unknown }).input, input);
+	assert.deepEqual(pending.questions, input.questions);
+
+	assert.equal(queue.answer("question-choice", {
+		kind: "question",
+		answers: { "Run the command?": { kind: "choice", label: "Run" } },
+	}), true);
+	const response = permissionAllow(await request.promise);
+	assert.equal(response.behavior, "allow");
+	assert.ok(response.updatedInput);
+	assert.strictEqual(response.updatedInput.questions, input.questions);
+	assert.deepEqual(response.updatedInput, {
+		...input,
+		answers: { "Run the command?": "Run" },
+	});
+	assert.deepEqual(pendingIds(queue), []);
+});
+
+test("AskUserQuestion returns multiselect answers as label arrays", async () => {
+	const queue = new InteractionQueue();
+	const input = questionInput([{
+		question: "Include which checks?",
+		header: "Checks",
+		multiSelect: true,
+		options: [{ label: "Unit" }, { label: "Integration" }, { label: "UI" }],
+	}]);
+	const request = questionRequest(queue, "question-multiple", input);
+
+	assert.equal(queue.answer("question-multiple", {
+		kind: "question",
+		answers: { "Include which checks?": { kind: "choices", labels: ["Unit", "UI"] } },
+	}), true);
+	const response = permissionAllow(await request.promise);
+	assert.ok(response.updatedInput);
+	assert.deepEqual(response.updatedInput.answers, { "Include which checks?": ["Unit", "UI"] });
+	assert.deepEqual(pendingIds(queue), []);
+});
+
+test("AskUserQuestion returns actual free text", async () => {
+	const queue = new InteractionQueue();
+	const input = questionInput([{ question: "What should the branch be called?", header: "Branch", options: [] }]);
+	const request = questionRequest(queue, "question-text", input);
+	const freeText = "  fix/request-correlation  ";
+
+	assert.equal(queue.answer("question-text", {
+		kind: "question",
+		answers: { "What should the branch be called?": { kind: "text", text: freeText } },
+	}), true);
+	const response = permissionAllow(await request.promise);
+	assert.ok(response.updatedInput);
+	assert.deepEqual(response.updatedInput.answers, { "What should the branch be called?": freeText });
+	assert.deepEqual(pendingIds(queue), []);
+});
+
+test("AskUserQuestion rejects empty required answers and keeps the dialog pending", async () => {
+	const queue = new InteractionQueue();
+	const input = questionInput([{ question: "Describe the change", header: "Details", options: [] }]);
+	const request = questionRequest(queue, "question-required", input);
+
+	assert.throws(() => queue.answer("question-required", {
+		kind: "question",
+		answers: { "Describe the change": { kind: "text", text: "   " } },
+	}), /required|empty/i);
+	assert.deepEqual(pendingIds(queue), ["question-required"]);
+	assert.equal(queue.answer("question-required", {
+		kind: "question",
+		answers: { "Describe the change": { kind: "text", text: "Use the failing test" } },
+	}), true);
+	const response = permissionAllow(await request.promise);
+	assert.ok(response.updatedInput);
+	assert.deepEqual(response.updatedInput.answers, { "Describe the change": "Use the failing test" });
+});
+
+test("AskUserQuestion rejects labels, missing questions, and extra question keys", async () => {
+	const queue = new InteractionQueue();
+	const input = questionInput([{ question: "Choose", options: [{ label: "A" }, { label: "B" }] }]);
+	const request = questionRequest(queue, "question-invalid", input);
+
+	for (const answers of [
+		{ Choose: { kind: "choice", label: "not an option" } },
+		{},
+		{ Choose: { kind: "choice", label: "A" }, Other: { kind: "text", text: "extra" } },
+	]) {
+		assert.throws(
+			() => queue.answer("question-invalid", { kind: "question", answers } as InteractionAnswer),
+			/answer|option|question/i,
+		);
+		assert.deepEqual(pendingIds(queue), ["question-invalid"]);
+	}
+	assert.throws(
+		() => queue.answer("question-invalid", { kind: "question", action: "approve" } as unknown as InteractionAnswer),
+		/question response|cancel/i,
+	);
+
+	assert.equal(queue.answer("question-invalid", {
+		kind: "question",
+		answers: { Choose: { kind: "choice", label: "B" } },
+	}), true);
+	const response = permissionAllow(await request.promise);
+	assert.ok(response.updatedInput);
+	assert.deepEqual(response.updatedInput.answers, { Choose: "B" });
+});
+
+test("AskUserQuestion explicit cancellation returns a deny", async () => {
+	const queue = new InteractionQueue();
+	const request = questionRequest(queue, "question-cancel", questionInput([{ question: "Continue?", options: [] }]));
+
+	assert.equal(queue.answer("question-cancel", { kind: "question", action: "cancel", reason: "user declined" }), true);
+	const response = permissionDeny(await request.promise);
+	assert.match(response.message, /user declined/);
+	assert.deepEqual(pendingIds(queue), []);
+});
+
+test("malformed AskUserQuestion input is denied without opening a dialog", async () => {
+	const queue = new InteractionQueue();
+	const request = questionRequest(queue, "question-malformed", { questions: [{ question: "Duplicate" }, { question: "Duplicate" }] });
+	const response = permissionDeny(await request.promise);
+	assert.equal(response.behavior, "deny");
+	assert.match(response.message, /question/i);
+	assert.deepEqual(pendingIds(queue), []);
+});
