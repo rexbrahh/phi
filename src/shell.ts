@@ -141,20 +141,21 @@ async function outputFileExists(path: string | undefined): Promise<boolean> {
 	}
 }
 
-function signalGroup(child: ChildProcess, signal: NodeJS.Signals, addError: (error: unknown) => void): void {
-	if (child.pid === undefined) return;
+function signalGroup(child: ChildProcess, signal: NodeJS.Signals, addError: (error: unknown) => void): boolean {
+	if (child.pid === undefined) return false;
 	if (process.platform === "win32") {
 		try {
-			child.kill(signal);
+			return child.kill(signal);
 		} catch (error) {
 			addError(error);
+			return false;
 		}
-		return;
 	}
 	try {
-		process.kill(-child.pid, signal);
+		return process.kill(-child.pid, signal);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ESRCH") addError(error);
+		return false;
 	}
 }
 
@@ -172,26 +173,27 @@ function wait(milliseconds: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function waitForProcessGroupExit(pid: number): Promise<void> {
+async function waitForProcessGroupExit(pid: number, onExit: () => void): Promise<void> {
 	while (processGroupExists(pid)) await wait(50);
+	onExit();
 }
 
 async function terminateProcessGroup(
 	child: ChildProcess,
 	addError: (error: unknown) => void,
-): Promise<void> {
+): Promise<NodeJS.Signals | null> {
 	const pid = child.pid;
 	if (pid === undefined || process.platform === "win32") {
-		signalGroup(child, "SIGTERM", addError);
-		return;
+		return signalGroup(child, "SIGTERM", addError) ? "SIGTERM" : null;
 	}
 
-	signalGroup(child, "SIGTERM", addError);
+	let deliveredSignal: NodeJS.Signals | null = signalGroup(child, "SIGTERM", addError) ? "SIGTERM" : null;
 	const deadline = Date.now() + STOP_ESCALATION_MS;
 	while (Date.now() < deadline && processGroupExists(pid)) {
 		await wait(Math.min(50, deadline - Date.now()));
 	}
-	if (processGroupExists(pid)) signalGroup(child, "SIGKILL", addError);
+	if (processGroupExists(pid) && signalGroup(child, "SIGKILL", addError)) deliveredSignal = "SIGKILL";
+	return deliveredSignal;
 }
 
 async function runJob(
@@ -208,6 +210,7 @@ async function runJob(
 	let aborted = signal.aborted;
 	let child: ChildProcess | undefined;
 	let stopPromise: Promise<void> | undefined;
+	let deliveredSignal: NodeJS.Signals | null = null;
 	let processExit: ProcessExit = { exitCode: null, signal: null };
 	const outputFiles: { stdout?: OutputSink; stderr?: OutputSink } = {};
 	const outputPaths: { stdout?: string; stderr?: string } = {};
@@ -241,7 +244,11 @@ async function runJob(
 	const onAbort = (): void => {
 		if (aborted) return;
 		aborted = true;
-		if (child) stopPromise = terminateProcessGroup(child, addInfrastructureError);
+		if (child) {
+			stopPromise = terminateProcessGroup(child, addInfrastructureError).then((delivered) => {
+				deliveredSignal = delivered;
+			});
+		}
 	};
 
 	if (!signal.aborted) signal.addEventListener("abort", onAbort, { once: true });
@@ -334,8 +341,14 @@ async function runJob(
 			});
 		});
 		processExit = await close;
-		if (child.pid !== undefined && process.platform !== "win32") await waitForProcessGroupExit(child.pid);
+		if (child.pid !== undefined && process.platform !== "win32") {
+			await waitForProcessGroupExit(child.pid, () => signal.removeEventListener("abort", onAbort));
+		} else {
+			signal.removeEventListener("abort", onAbort);
+		}
 		if (stopPromise) await stopPromise;
+	} else {
+		signal.removeEventListener("abort", onAbort);
 	}
 
 	if (child?.stdout) {
@@ -362,7 +375,6 @@ async function runJob(
 	};
 
 	await Promise.all(Object.values(outputFiles).filter((sink): sink is OutputSink => sink !== undefined).map(finishSink));
-	signal.removeEventListener("abort", onAbort);
 
 	const existingOutputPaths: ShellReceipt["outputFiles"] = {};
 	if (await outputFileExists(outputPaths.stdout)) existingOutputPaths.stdout = outputPaths.stdout;
@@ -374,7 +386,7 @@ async function runJob(
 		command,
 		cwd,
 		exitCode: aborted || spawnFailed ? null : processExit.exitCode,
-		signal: aborted ? processExit.signal ?? (child ? "SIGTERM" : null) : processExit.signal,
+		signal: aborted ? deliveredSignal : processExit.signal,
 		aborted,
 		...(infrastructureError ? { infrastructureError } : {}),
 		outputFiles: existingOutputPaths,

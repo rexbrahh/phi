@@ -424,6 +424,93 @@ test("runUserShell reports no signal when an already-aborted job starts no child
 	}
 });
 
+test("runUserShell reports no signal when abort races with process-group disappearance", async () => {
+	const temporary = await mkdtemp(join(tmpdir(), "phi shell disappearing group "));
+	const restoreEnvironment = setEnvironment({ XDG_STATE_HOME: join(temporary, "state"), SHELL: "/bin/sh" });
+	const controller = new AbortController();
+	const originalKill = process.kill;
+	let groupDisappearanceObserved = false;
+	process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+		if (pid < 0) {
+			if (signal === 0) {
+				groupDisappearanceObserved = true;
+				controller.abort();
+			}
+			throw Object.assign(new Error("no such process group"), { code: "ESRCH" });
+		}
+		return originalKill(pid, signal);
+	}) as typeof process.kill;
+	try {
+		const receipt = await runUserShell("true", temporary, "disappearing-group-session", controller.signal, () => {}).done;
+		assert.equal(groupDisappearanceObserved, true);
+		assert.equal(receipt.aborted, true);
+		assert.equal(receipt.exitCode, null);
+		assert.equal(receipt.signal, null);
+	} finally {
+		process.kill = originalKill;
+		restoreEnvironment();
+		await rm(temporary, { recursive: true, force: true });
+	}
+});
+
+test("runUserShell removes its abort listener after the process group disappears", async () => {
+	const temporary = await mkdtemp(join(tmpdir(), "phi shell empty group abort "));
+	const restoreEnvironment = setEnvironment({ XDG_STATE_HOME: join(temporary, "state"), SHELL: "/bin/sh" });
+	const controller = new AbortController();
+	const originalKill = process.kill;
+	const originalCreateWriteStream = fs.createWriteStream;
+	let groupDisappearanceObserved = false;
+	let finishCount = 0;
+	let announceSinksFinishing!: () => void;
+	let releaseSinks!: () => void;
+	const sinksFinishing = new Promise<void>((resolve) => {
+		announceSinksFinishing = resolve;
+	});
+	const sinksReleased = new Promise<void>((resolve) => {
+		releaseSinks = resolve;
+	});
+	process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+		if (pid < 0) {
+			if (signal === 0) groupDisappearanceObserved = true;
+			throw Object.assign(new Error("no such process group"), { code: "ESRCH" });
+		}
+		return originalKill(pid, signal);
+	}) as typeof process.kill;
+	fs.createWriteStream = ((path, options) => {
+		const stream = originalCreateWriteStream(path, options);
+		const originalEnd = stream.end.bind(stream);
+		stream.end = (() => {
+			finishCount += 1;
+			if (finishCount === 2) announceSinksFinishing();
+			void sinksReleased.then(() => originalEnd());
+			return stream;
+		}) as typeof stream.end;
+		return stream;
+	}) as typeof fs.createWriteStream;
+	syncBuiltinESMExports();
+	let job: ReturnType<typeof runUserShell> | undefined;
+	try {
+		job = runUserShell("true", temporary, "empty-group-abort-session", controller.signal, () => {});
+		const pendingReceipt = job.done;
+		await withinDeadline(sinksFinishing, 3_000, "output sinks did not enter finish");
+		assert.equal(groupDisappearanceObserved, true);
+		controller.abort();
+		releaseSinks();
+		const receipt = await withinDeadline(pendingReceipt, 3_000, "shell receipt did not finish");
+		assert.equal(receipt.aborted, false);
+		assert.equal(receipt.exitCode, 0);
+		assert.equal(receipt.signal, null);
+	} finally {
+		releaseSinks();
+		if (job) await job.done;
+		process.kill = originalKill;
+		fs.createWriteStream = originalCreateWriteStream;
+		syncBuiltinESMExports();
+		restoreEnvironment();
+		await rm(temporary, { recursive: true, force: true });
+	}
+});
+
 test("runUserShell allows only one active local job", async () => {
 	const temporary = await mkdtemp(join(tmpdir(), "phi shell single "));
 	const restoreEnvironment = setEnvironment({ XDG_STATE_HOME: join(temporary, "state"), SHELL: "/bin/sh" });
