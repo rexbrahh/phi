@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -163,6 +165,42 @@ test("runUserShell reports output storage failure without hiding command complet
 		assert.match(receipt.infrastructureError ?? "", /not a directory|enotdir/i);
 		assert.deepEqual(receipt.outputFiles, {});
 	} finally {
+		restoreEnvironment();
+		await rm(temporary, { recursive: true, force: true });
+	}
+});
+
+test("runUserShell reports a disk write error and continues draining child output", async () => {
+	const temporary = await mkdtemp(join(tmpdir(), "phi shell write failure "));
+	const restoreEnvironment = setEnvironment({ XDG_STATE_HOME: join(temporary, "state"), SHELL: "/bin/sh" });
+	const originalCreateWriteStream = fs.createWriteStream;
+	fs.createWriteStream = ((path, options) => {
+		const stream = originalCreateWriteStream(path, options);
+		if (String(path).includes("stdout-")) {
+			stream.write = (() => {
+				process.nextTick(() => stream.emit("error", new Error("simulated disk write failure")));
+				return false;
+			}) as typeof stream.write;
+		}
+		return stream;
+	}) as typeof fs.createWriteStream;
+	syncBuiltinESMExports();
+	try {
+		let latest: ShellPreview | undefined;
+		const command = "printf 'preview remains available'; printf 'stderr remains available' >&2";
+		const receipt = await runUserShell(command, temporary, "write-failure-session", new AbortController().signal, (preview) => {
+			latest = preview;
+		}).done;
+		assert.equal(receipt.exitCode, 0);
+		assert.match(receipt.infrastructureError ?? "", /cannot write stdout output: simulated disk write failure/);
+		assert.equal(latest?.stdout, "preview remains available");
+		assert.equal(latest?.stderr, "stderr remains available");
+		assert.ok(receipt.outputFiles.stdout);
+		assert.equal(await readFile(receipt.outputFiles.stdout!, "utf8"), "");
+		assert.equal(await readFile(receipt.outputFiles.stderr!, "utf8"), "stderr remains available");
+	} finally {
+		fs.createWriteStream = originalCreateWriteStream;
+		syncBuiltinESMExports();
 		restoreEnvironment();
 		await rm(temporary, { recursive: true, force: true });
 	}
