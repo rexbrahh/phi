@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { LiveRunRefusal, parseLiveBudget } from "./live.js";
+import { assertPinnedModelUsage, LIVE_MODEL, LiveRunRefusal, parseLiveBudget } from "./live.js";
 
 type HarnessAssertions = {
 	isExactFixtureTarget(repository: string, target: string, value: unknown): boolean;
@@ -28,10 +28,27 @@ type HarnessAssertions = {
 const runner = join(dirname(fileURLToPath(import.meta.url)), "live.js");
 
 test("live budget parser accepts the planned positive cap and rejects malformed arguments", () => {
-	assert.equal(parseLiveBudget(["--max-budget-usd", "5"]), 5);
+	assert.equal(parseLiveBudget(["--max-budget-usd", "0.10"]), 0.10);
 	assert.throws(() => parseLiveBudget([]), LiveRunRefusal);
 	assert.throws(() => parseLiveBudget(["--max-budget-usd", "0"]), LiveRunRefusal);
-	assert.throws(() => parseLiveBudget(["--max-budget-usd", "5", "--max-budget-usd", "6"]), LiveRunRefusal);
+	assert.throws(() => parseLiveBudget(["--max-budget-usd", "0.1001"]), /must not exceed \$0\.10/);
+	assert.throws(() => parseLiveBudget(["--max-budget-usd", "0.01", "--max-budget-usd", "0.02"]), /exactly once/);
+});
+
+test("the runner and both native Workflow agents stay pinned to Haiku 5.5", () => {
+	assert.equal(LIVE_MODEL, "claude-haiku-5-5");
+	assert.doesNotThrow(() => assertPinnedModelUsage({ [LIVE_MODEL]: {} }));
+	assert.doesNotThrow(() => assertPinnedModelUsage({ [`${LIVE_MODEL}-20261007`]: {} }));
+	assert.throws(() => assertPinnedModelUsage({}), /must report per-model usage/);
+	assert.throws(
+		() => assertPinnedModelUsage({ [LIVE_MODEL]: {}, "claude-opus-5-5": {} }),
+		/usage must stay on claude-haiku-5-5/,
+	);
+
+	const workflowPath = join(dirname(fileURLToPath(import.meta.url)), "../../test/live-workflow.js");
+	const workflowSource = readFileSync(workflowPath, "utf8");
+	assert.match(workflowSource, new RegExp(`const LIVE_MODEL = "${LIVE_MODEL}";`));
+	assert.equal((workflowSource.match(/model: LIVE_MODEL/g) ?? []).length, 2);
 });
 
 test("tool assertions constrain Edit, Workflow, active tasks, and fixture skill evidence", async () => {
@@ -118,7 +135,7 @@ test(
 		const cases = [
 			{
 				name: "missing opt-in",
-				args: ["--max-budget-usd", "5"],
+				args: ["--max-budget-usd", "0.10"],
 				env: { ...baseEnvironment },
 				message: /PHI_LIVE_TEST=1/,
 			},
@@ -141,8 +158,14 @@ test(
 				message: /finite positive number/,
 			},
 			{
+				name: "budget above fixture cap",
+				args: ["--max-budget-usd", "0.1001"],
+				env: { ...baseEnvironment, PHI_LIVE_TEST: "1" },
+				message: /must not exceed \$0\.10/,
+			},
+			{
 				name: "missing isolated fixture API key",
-				args: ["--max-budget-usd", "5"],
+				args: ["--max-budget-usd", "0.10"],
 				env: { ...baseEnvironment, PHI_LIVE_TEST: "1" },
 				message: /requires ANTHROPIC_API_KEY/,
 			},
@@ -164,7 +187,7 @@ test(
 				assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /sk-ant-[A-Za-z0-9_-]+/);
 			}
 
-			const tripwire = spawnSync(process.execPath, [runner, "--max-budget-usd", "5"], {
+			const tripwire = spawnSync(process.execPath, [runner, "--max-budget-usd", "0.10"], {
 				cwd: testHome,
 				encoding: "utf8",
 				env: {

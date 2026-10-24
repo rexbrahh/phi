@@ -153,10 +153,10 @@ npm run test:pty
 npm run test:load
 ```
 
-Run a live check only after separate approval. The runner requires `PHI_LIVE_TEST=1` and a positive `--max-budget-usd` value. The planned separately approved run uses a 5 USD budget:
+Run a live check only with separate approval and an inherited `ANTHROPIC_API_KEY`. The fixture pins the main session, resumed session, and both native Workflow agents to `claude-haiku-5-5`, uses low effort and a 1024-token output cap, and rejects budgets above 0.10 USD total. Its command does not accept a key argument:
 
 ```sh
-PHI_LIVE_TEST=1 npm run test:live -- --max-budget-usd 5
+PHI_LIVE_TEST=1 npm run test:live -- --max-budget-usd 0.10
 ```
 
-Calls already in flight can exceed the requested budget.
+The runner divides the configured total between the initial query and resume, and checks cumulative SDK model usage and reported cost. SDK estimates and calls already in flight can still exceed the requested budget.

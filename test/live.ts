@@ -9,6 +9,11 @@ import type { Options, SDKMessage, SDKResultMessage, SDKUserMessage } from "@ant
 import type { WorkflowOutput } from "../src/workflows.js";
 
 const SKILL_NAME = "phi-live-acceptance";
+export const LIVE_MODEL = "claude-haiku-5-5";
+const MAX_LIVE_BUDGET_USD = 0.10;
+const MAX_OUTPUT_TOKENS = "1024";
+const MAX_MAIN_TURNS = 6;
+const MAX_WORKFLOW_AGENT_TURNS = "2";
 const MAIN_SLEEP_COMMAND = "sleep 8";
 const AGENT_SLEEP_COMMAND = "sleep 90";
 const INITIAL_BUDGET_SHARE = 0.75;
@@ -60,6 +65,9 @@ export function parseLiveBudget(argv: string[]): number {
 		if (!Number.isFinite(parsed) || parsed <= 0) {
 			throw new LiveRunRefusal("--max-budget-usd must be a finite positive number");
 		}
+		if (parsed > MAX_LIVE_BUDGET_USD) {
+			throw new LiveRunRefusal("--max-budget-usd must not exceed $0.10 USD");
+		}
 		budget = parsed;
 		index += 1;
 	}
@@ -84,6 +92,15 @@ export function validateLiveInvocation(env: NodeJS.ProcessEnv, argv: string[]): 
 	return budget;
 }
 
+export function assertPinnedModelUsage(modelUsage: Record<string, unknown>): void {
+	const models = Object.keys(modelUsage);
+	assert.ok(models.length > 0, "native SDK result must report per-model usage");
+	assert.ok(
+		models.every((model) => model === LIVE_MODEL || model.startsWith(`${LIVE_MODEL}-`)),
+		`native SDK usage must stay on ${LIVE_MODEL}; received: ${models.join(", ")}`,
+	);
+}
+
 function isMainModule(): boolean {
 	const entry = process.argv[1];
 	return entry !== undefined && pathToFileURL(resolve(entry)).href === import.meta.url;
@@ -93,6 +110,9 @@ interface HarnessFixture {
 	root: string;
 	repository: string;
 	configRoot: string;
+	homeRoot: string;
+	tempRoot: string;
+	pluginCacheRoot: string;
 	settingsHookLog: string;
 	toolEditTarget: string;
 	workflowPath: string;
@@ -127,12 +147,7 @@ async function main(): Promise<void> {
 		});
 
 	const fixture = await createFixture();
-	const environment: NodeJS.ProcessEnv = {
-		...process.env,
-		PHI_HOME: fixture.configRoot,
-		CLAUDE_CONFIG_DIR: join(fixture.root, "legacy-claude-config"),
-		CLAUDE_CODE_PLUGIN_CACHE_DIR: join(fixture.root, "legacy-plugin-cache"),
-	};
+	const environment = createFixtureEnvironment(fixture);
 	const sessions: Array<ReturnType<typeof startSession>> = [];
 	let reportedSpend: number | undefined;
 	let sessionId: string | undefined;
@@ -143,17 +158,26 @@ async function main(): Promise<void> {
 		const firstBudgetUsd = maxBudgetUsd * INITIAL_BUDGET_SHARE;
 		const initialLaunch = parseArgs([
 			"--cwd", fixture.repository,
+			"--model", LIVE_MODEL,
 			"--permission-mode", "acceptEdits",
 			"--max-budget-usd", String(firstBudgetUsd),
 		], environment);
 		const firstOptions = buildOptions(initialLaunch, fixtureCallbacks(fixture), environment);
-		firstOptions.maxTurns = 3;
+		assert.equal(firstOptions.model, LIVE_MODEL);
+		firstOptions.maxTurns = MAX_MAIN_TURNS;
+		firstOptions.effort = "low";
+		firstOptions.thinking = { type: "disabled" };
 		firstOptions.disallowedTools = ["WebFetch", "WebSearch"];
 		firstOptions.mcpServers = {};
 		firstOptions.strictMcpConfig = true;
 		firstOptions.env = {
 			...firstOptions.env,
-			CLAUDE_CODE_MAX_TURNS: "2",
+			CLAUDE_CODE_EFFORT_LEVEL: "low",
+			CLAUDE_CODE_MAX_OUTPUT_TOKENS: MAX_OUTPUT_TOKENS,
+			CLAUDE_CODE_MAX_RETRIES: "0",
+			CLAUDE_CODE_MAX_TURNS: MAX_WORKFLOW_AGENT_TURNS,
+			CLAUDE_CODE_SUBAGENT_MODEL: LIVE_MODEL,
+			CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1",
 			CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "2",
 		};
 
@@ -308,6 +332,7 @@ async function main(): Promise<void> {
 		console.log(`Reported session spend after initial turn: $${reportedSpend.toFixed(4)} USD.`);
 		assert.equal(firstTurn.session_id, sessionId);
 		assert.equal(firstTurn.is_error, false, "initial native session turn must succeed");
+		assertPinnedModelUsage(firstTurn.modelUsage);
 		assert.equal(findToolUses(events.messages, "Edit").length, 1, "the fixture must produce exactly one native Edit call");
 		assert.ok(findToolUse(events.messages, "Skill", (input) => input.skill === SKILL_NAME), "native Skill tool must run");
 		assert.ok(hasSkillMarker(events.messages, "phi-live-skill-ok"), "fixture skill marker must appear in native assistant output");
@@ -356,12 +381,16 @@ async function main(): Promise<void> {
 		console.log(`Reported session spend before resume: $${reportedSpend.toFixed(4)} USD.`);
 		assert.equal(continuedTurn.session_id, sessionId);
 		assert.equal(continuedTurn.is_error, false);
+		assertPinnedModelUsage(continuedTurn.modelUsage);
 		assert.ok(
 			isBackgroundTaskActive(events.messages, secondAgentTaskId),
 			"the sibling must still be active when continued main input completes",
 		);
-		const remainingBudgetUsd = maxBudgetUsd - reportedSpend;
-		assert.ok(remainingBudgetUsd > 0, "reported initial spend leaves room inside the requested total budget for resume");
+		const remainingBudgetUsd = Math.min(
+			maxBudgetUsd - firstBudgetUsd,
+			maxBudgetUsd - reportedSpend,
+		);
+		assert.ok(remainingBudgetUsd > 0, "reported initial spend and fixed allocation leave room inside the total budget for resume");
 
 		await waitFor(
 			() => hasTaskNotification(events.messages, mainBashTaskId, "completed"),
@@ -385,19 +414,28 @@ async function main(): Promise<void> {
 			parseArgs([
 				"--cwd", fixture.repository,
 				"--resume", sessionId,
+				"--model", LIVE_MODEL,
 				"--permission-mode", "acceptEdits",
 				"--max-budget-usd", String(remainingBudgetUsd),
 			], environment),
 			fixtureCallbacks(fixture),
 			environment,
 		);
+		assert.equal(resumeOptions.model, LIVE_MODEL);
 		resumeOptions.maxTurns = 1;
+		resumeOptions.effort = "low";
+		resumeOptions.thinking = { type: "disabled" };
 		resumeOptions.disallowedTools = ["WebFetch", "WebSearch"];
 		resumeOptions.mcpServers = {};
 		resumeOptions.strictMcpConfig = true;
 		resumeOptions.env = {
 			...resumeOptions.env,
-			CLAUDE_CODE_MAX_TURNS: "2",
+			CLAUDE_CODE_EFFORT_LEVEL: "low",
+			CLAUDE_CODE_MAX_OUTPUT_TOKENS: MAX_OUTPUT_TOKENS,
+			CLAUDE_CODE_MAX_RETRIES: "0",
+			CLAUDE_CODE_MAX_TURNS: MAX_WORKFLOW_AGENT_TURNS,
+			CLAUDE_CODE_SUBAGENT_MODEL: LIVE_MODEL,
+			CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1",
 			CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "2",
 		};
 
@@ -431,6 +469,7 @@ async function main(): Promise<void> {
 		reportedSpend = resumedResult.total_cost_usd;
 		console.log(`Reported session spend after resume: $${reportedSpend.toFixed(4)} USD.`);
 		assert.equal(resumedResult.is_error, false);
+		assertPinnedModelUsage(resumedResult.modelUsage);
 		if (resumedResult.subtype !== "success") {
 			throw new Error(`Native session resume ended with ${resumedResult.subtype}`);
 		}
@@ -501,6 +540,9 @@ async function createFixture(): Promise<HarnessFixture> {
 	const root = await mkdtemp(join(tmpdir(), "phi-live-acceptance-"));
 	const repository = join(root, "synthetic-repository");
 	const configRoot = join(root, "isolated-claude-config");
+	const homeRoot = join(root, "isolated-home");
+	const tempRoot = join(root, "isolated-tmp");
+	const pluginCacheRoot = join(root, "isolated-plugin-cache");
 	const settingsHookLog = join(root, "settings-hook.log");
 	const hookProgram = join(root, "verify-settings-hook.cjs");
 	const toolEditTarget = join(repository, "target.txt");
@@ -512,10 +554,13 @@ async function createFixture(): Promise<HarnessFixture> {
 
 	try {
 		await Promise.all([
-			mkdir(repository, { recursive: true }),
-			mkdir(configRoot, { recursive: true }),
-			mkdir(skillDir, { recursive: true }),
-			mkdir(workflowsDir, { recursive: true }),
+			mkdir(repository, { recursive: true, mode: 0o700 }),
+			mkdir(configRoot, { recursive: true, mode: 0o700 }),
+			mkdir(homeRoot, { recursive: true, mode: 0o700 }),
+			mkdir(tempRoot, { recursive: true, mode: 0o700 }),
+			mkdir(pluginCacheRoot, { recursive: true, mode: 0o700 }),
+			mkdir(skillDir, { recursive: true, mode: 0o700 }),
+			mkdir(workflowsDir, { recursive: true, mode: 0o700 }),
 		]);
 		await writeFile(join(configRoot, "settings.json"), JSON.stringify({
 			env: { PHI_LIVE_USER_SETTING: "user-fixture" },
@@ -568,11 +613,26 @@ async function createFixture(): Promise<HarnessFixture> {
 			timeout: 5_000,
 		});
 		if (gitInit.status !== 0) throw new Error("Could not initialize the disposable local Git repository");
-		return { root, repository, configRoot, settingsHookLog, toolEditTarget, workflowPath };
+		return { root, repository, configRoot, homeRoot, tempRoot, pluginCacheRoot, settingsHookLog, toolEditTarget, workflowPath };
 	} catch (error) {
 		await rm(root, { recursive: true, force: true });
 		throw error;
 	}
+}
+
+function createFixtureEnvironment(fixture: HarnessFixture): NodeJS.ProcessEnv {
+	return {
+		PATH: process.env.PATH,
+		ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+		PHI_HOME: fixture.configRoot,
+		CLAUDE_CONFIG_DIR: fixture.configRoot,
+		CLAUDE_CODE_TMPDIR: fixture.tempRoot,
+		CLAUDE_CODE_PLUGIN_CACHE_DIR: fixture.pluginCacheRoot,
+		HOME: fixture.homeRoot,
+		TMPDIR: fixture.tempRoot,
+		LANG: process.env.LANG,
+		LC_ALL: process.env.LC_ALL,
+	};
 }
 
 function buildInitialPrompt(workflowPath: string, checkpoint: string): string {
