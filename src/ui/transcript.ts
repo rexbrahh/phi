@@ -10,6 +10,7 @@ interface CachedBlock {
 }
 
 interface CachedPreview {
+	width: number;
 	source: string;
 	text: string;
 }
@@ -25,7 +26,7 @@ const MAX_TOOL_RESULT_DISPLAY_LINES = 4;
 
 export class TranscriptView implements Component {
 	private readonly renderedBlocks = new Map<string, CachedBlock>();
-	private readonly toolResultPreviews = new WeakMap<ToolReceipt, Map<number, CachedPreview>>();
+	private readonly toolResultPreviews = new WeakMap<ToolReceipt, CachedPreview>();
 
 	constructor(private readonly state: PhiState) {}
 
@@ -137,19 +138,14 @@ export class TranscriptView implements Component {
 		const source = receipt.resultPreview;
 		if (!source) return undefined;
 
-		let byWidth = this.toolResultPreviews.get(receipt);
-		const cached = byWidth?.get(width);
-		if (cached?.source === source) return cached.text;
+		const cached = this.toolResultPreviews.get(receipt);
+		if (cached?.width === width && cached.source === source) return cached.text;
 
 		const rendered = new Text(source, 0, 0).render(Math.max(1, width - 2));
 		const text = rendered.length <= MAX_TOOL_RESULT_DISPLAY_LINES
 			? source
 			: `${rendered.slice(0, MAX_TOOL_RESULT_DISPLAY_LINES - 1).join("\n")}\n…`;
-		if (!byWidth) {
-			byWidth = new Map<number, CachedPreview>();
-			this.toolResultPreviews.set(receipt, byWidth);
-		}
-		byWidth.set(width, { source, text });
+		this.toolResultPreviews.set(receipt, { width, source, text });
 		return text;
 	}
 
