@@ -31,6 +31,8 @@ import { editorTheme, theme } from "./theme.js";
 import { TranscriptView } from "./transcript.js";
 import type { InspectorPanel } from "./inspectors.js";
 
+const SESSION_LOOKUP_PAGE_SIZE = 1_000;
+
 export interface SessionControlSelections {
 	model?: string;
 	effort?: EffortLevel;
@@ -688,13 +690,28 @@ export class AppController {
 		let sessionCwd = this.launch.cwd;
 		let cwdWarning: string | undefined;
 		try {
-			const sessions = await this.listAllSessions({ limit: 1_000, offset: 0 });
-			if (!isCurrent()) return undefined;
-			const session = sessions.find((candidate) => candidate.sessionId === command.sessionId);
-			if (session?.cwd) sessionCwd = session.cwd;
-			else if (session) {
+			let offset = 0;
+			let sessionFound = false;
+			let sessionCwdFound = false;
+			for (;;) {
+				if (!isCurrent()) return undefined;
+				const sessions = await this.listAllSessions({ limit: SESSION_LOOKUP_PAGE_SIZE, offset });
+				if (!isCurrent()) return undefined;
+				const session = sessions.find((candidate) => candidate.sessionId === command.sessionId);
+				if (session) {
+					sessionFound = true;
+					if (session.cwd) {
+						sessionCwd = session.cwd;
+						sessionCwdFound = true;
+					}
+					break;
+				}
+				if (sessions.length < SESSION_LOOKUP_PAGE_SIZE) break;
+				offset += sessions.length;
+			}
+			if (sessionFound && !sessionCwdFound) {
 				cwdWarning = `Local history did not report a working directory for ${command.sessionId}; this resume uses the current directory.`;
-			} else {
+			} else if (!sessionFound) {
 				cwdWarning = `Local history did not contain ${command.sessionId}; this resume uses the current directory.`;
 			}
 		} catch (error) {

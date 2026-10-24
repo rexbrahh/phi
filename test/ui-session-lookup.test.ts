@@ -104,3 +104,108 @@ test("resume lookup resolving or rejecting after close cannot create a query aft
 		assert.equal(controller.currentSessionId, originalSessionId);
 	}
 });
+
+test("resume finds the target session after the first all-project history page", async () => {
+	const terminal = new FakeTerminal();
+	const first = new FakeQueryHarness();
+	const second = new FakeQueryHarness();
+	const offsets: number[] = [];
+	const history: HistoryReader = {
+		list: async (options) => {
+			const offset = options.offset ?? 0;
+			offsets.push(offset);
+			if (offset === 0) {
+				return Array.from({ length: 1_000 }, (_, index) => ({
+					sessionId: `session-${index}`,
+					summary: "older session",
+					lastModified: index,
+				}));
+			}
+			if (offset === 1_000) {
+				return [{ sessionId: RESUME_ID, summary: "target", lastModified: 1_001, cwd: "/target/cwd" }];
+			}
+			return [];
+		},
+		messages: async (): Promise<SessionMessage[]> => [],
+		agents: async () => [],
+		agentMessages: async (): Promise<SessionMessage[]> => [],
+		close: async () => undefined,
+	};
+	let queryCount = 0;
+	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+		createQuery: (parameters) => {
+			queryCount += 1;
+			return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);
+		},
+		createHistoryReader: () => history,
+	}));
+	const running = controller.run();
+	try {
+		await waitFor(() => controller.ready !== undefined);
+		controller.submitPrompt(`/phi resume ${RESUME_ID}`);
+		await waitFor(() => second.parameters !== undefined && controller.ready !== undefined);
+		assert.deepEqual(offsets, [0, 1_000]);
+		assert.equal(second.parameters?.options?.resume, RESUME_ID);
+		assert.equal(second.parameters?.options?.cwd, "/target/cwd");
+	} finally {
+		await controller.close(0);
+		await running;
+	}
+});
+
+test("resume history lookup stops before the next page after shutdown", async () => {
+	const terminal = new FakeTerminal();
+	const first = new FakeQueryHarness();
+	const second = new FakeQueryHarness();
+	const offsets: number[] = [];
+	let controller: AppController;
+	let closing: Promise<void> | undefined;
+	const history: HistoryReader = {
+		list: async (options) => {
+			const offset = options.offset ?? 0;
+			offsets.push(offset);
+			if (offset === 0) {
+				return new Promise((resolve) => {
+					queueMicrotask(() => {
+						queueMicrotask(() => { closing = controller.close(0); });
+						resolve(Array.from({ length: 1_000 }, (_, index) => ({
+							sessionId: `session-${index}`,
+							summary: "older session",
+							lastModified: index,
+						})));
+					});
+				});
+			}
+			return [];
+		},
+		messages: async (): Promise<SessionMessage[]> => [],
+		agents: async () => [],
+		agentMessages: async (): Promise<SessionMessage[]> => [],
+		close: async () => undefined,
+	};
+	let queryCount = 0;
+	controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+		createQuery: (parameters) => {
+			queryCount += 1;
+			return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);
+		},
+		createHistoryReader: () => history,
+	}));
+	const running = controller.run();
+	const transition = async () => controller.replaceSession({ kind: "resume", sessionId: RESUME_ID });
+	try {
+		await waitFor(() => controller.ready !== undefined);
+		const switching = transition();
+		await waitFor(() => closing !== undefined);
+		await closing;
+		await running;
+		await switching;
+		assert.deepEqual(offsets, [0]);
+		assert.equal(queryCount, 1);
+		assert.equal(second.parameters, undefined);
+		assert.equal(terminal.stopCalls, 1);
+	} finally {
+		await controller.close(0);
+		await running;
+	}
+});

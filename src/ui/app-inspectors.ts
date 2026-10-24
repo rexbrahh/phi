@@ -103,11 +103,13 @@ export class AppInspectorController {
 		this.model.childMessages = [];
 		this.model.workflowRecords = [];
 		this.model.workflowWarnings = [];
+		this.model.workflowScriptPath = undefined;
 		this.model.workflowUnavailable = undefined;
 		this.stopWorkflowPolling();
 		this.onChange();
 		this.model.workflowRecords = [...(this.workflowRecords.get(taskId)?.values() ?? [])];
 		const reference = this.workflowReferences.get(taskId);
+		this.model.workflowScriptPath = reference?.output.scriptPath;
 		if (!task.workflowRunId && !reference && task.taskType !== "local_workflow" && !task.workflowName) return;
 		if (!reference) {
 			this.model.workflowUnavailable = "Workflow path metadata was not reported by the SDK.";

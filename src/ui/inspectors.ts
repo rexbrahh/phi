@@ -22,6 +22,7 @@ export interface InspectorModel {
 	workspace?: WorkspaceInfo;
 	workflowRecords: WorkflowJournalRecord[];
 	workflowWarnings: string[];
+	workflowScriptPath?: string;
 	workflowUnavailable?: string;
 	searchText?: string;
 }
@@ -74,6 +75,7 @@ export class InspectorView implements Component {
 			if (selectedTask.outputFile) lines.push(...new Text(`Output: ${sanitizeTerminalText(selectedTask.outputFile)}`).render(width));
 			if (selectedTask.workflowRunId || selectedTask.taskType === "local_workflow" || selectedTask.workflowName) {
 				lines.push(`Workflow run: ${sanitizeTerminalText(selectedTask.workflowRunId ?? "unavailable")}`);
+				lines.push(`Workflow script: ${sanitizeTerminalText(this.model.workflowScriptPath ?? "unavailable")}`);
 				lines.push("Workflow journal events are observations. SDK task state determines completion.");
 				const phaseCounts = new Map<string, number>();
 				for (const record of this.model.workflowRecords) {

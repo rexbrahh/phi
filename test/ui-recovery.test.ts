@@ -474,3 +474,40 @@ test("shutdown waits for cleanup of a target query opened before initialization 
 		await running;
 	}
 });
+
+test("shutdown during old query close prevents opening the transition target", async () => {
+	const terminal = new FakeTerminal();
+	const first = new FakeQueryHarness();
+	const second = new FakeQueryHarness();
+	first.query.close = () => { first.closeCalls += 1; };
+	let queryCount = 0;
+	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+		createQuery: (parameters) => {
+			queryCount += 1;
+			return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);
+		},
+	}));
+	const running = controller.run();
+	let switching: Promise<void> | undefined;
+	try {
+		await waitFor(() => controller.ready !== undefined);
+		switching = controller.replaceSession({ kind: "new" });
+		await waitFor(() => first.closeCalls === 1);
+
+		const closing = controller.close(0);
+		first.finishOutput();
+		await closing;
+		assert.equal(await running, 0);
+		await switching;
+
+		assert.equal(queryCount, 1);
+		assert.equal(second.parameters, undefined);
+		assert.equal(first.closeCalls, 1);
+		assert.equal(terminal.stopCalls, 1);
+	} finally {
+		first.finishOutput();
+		if (switching) await switching;
+		await controller.close(0);
+		await running;
+	}
+});

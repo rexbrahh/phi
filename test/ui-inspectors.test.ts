@@ -143,6 +143,45 @@ test("workflow journal phases remain observations and do not complete an SDK tas
 	await controller.close(0);
 	assert.equal(historyClosed, true);
 	assert.equal(await running, 0);
+	assert.match(controller.views.inspectors.view.render(100).join("\n"), /Workflow script: unavailable/u);
+});
+
+test("selected workflow details render and sanitize the SDK script path", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const running = controller.run();
+	try {
+		await waitFor(() => controller.ready !== undefined);
+		controller.state.tasks.set("workflow-task", {
+			taskId: "workflow-task",
+			taskType: "local_workflow",
+			workflowRunId: "workflow-run",
+			status: "completed",
+			ambient: false,
+		});
+		controller.views.inspectors.onSdkMessage({
+			type: "user",
+			message: { role: "user", content: "" },
+			parent_tool_use_id: "tool-1",
+			session_id: "workflow-session",
+			tool_use_result: {
+				status: "async_launched",
+				taskId: "workflow-task",
+				runId: "workflow-run",
+				transcriptDir: "/reported/workflow/run",
+				scriptPath: "/reported/workflow/\u001b[31mdeploy.yaml\u001b[0m",
+			},
+		} as never);
+		controller.showInspector("tasks");
+		await controller.selectTask("workflow-task");
+		const output = controller.views.inspectors.view.render(100).join("\n");
+		assert.match(output, /Workflow script: \/reported\/workflow\/deploy\.yaml/u);
+		assert.equal(output.includes("\u001b[31m"), false);
+	} finally {
+		await controller.close(0);
+		await running;
+	}
 });
 
 test("a stale workflow failure cannot overwrite the selected task's journal state", async () => {
