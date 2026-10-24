@@ -9,6 +9,11 @@ interface CachedBlock {
 	component: Component;
 }
 
+interface CachedPreview {
+	source: string;
+	text: string;
+}
+
 interface DisplayBlock {
 	key: string;
 	role: string;
@@ -16,8 +21,11 @@ interface DisplayBlock {
 	markdown: boolean;
 }
 
+const MAX_TOOL_RESULT_DISPLAY_LINES = 4;
+
 export class TranscriptView implements Component {
 	private readonly renderedBlocks = new Map<string, CachedBlock>();
+	private readonly toolResultPreviews = new WeakMap<ToolReceipt, Map<number, CachedPreview>>();
 
 	constructor(private readonly state: PhiState) {}
 
@@ -26,7 +34,7 @@ export class TranscriptView implements Component {
 		const currentKeys = new Set<string>();
 
 		for (const block of this.state.conversationBlocks) {
-			const display = this.displayConversationBlock(block);
+			const display = this.displayConversationBlock(block, width);
 			if (!display) continue;
 			this.appendBlock(lines, display, width, currentKeys);
 		}
@@ -84,7 +92,7 @@ export class TranscriptView implements Component {
 		return component;
 	}
 
-	private displayConversationBlock(block: ConversationBlock): DisplayBlock | undefined {
+	private displayConversationBlock(block: ConversationBlock, width: number): DisplayBlock | undefined {
 		if (typeof block.content === "string") {
 			return { key: block.id, role: block.role === "assistant" ? "Phi" : "You", text: block.content, markdown: block.role === "assistant" };
 		}
@@ -104,7 +112,7 @@ export class TranscriptView implements Component {
 			return {
 				key: block.id,
 				role: "Tool",
-				text: formatToolReceipt(block.content, receipt),
+				text: formatToolReceipt(block.content, receipt, receipt ? this.toolResultPreview(receipt, width) : undefined),
 				markdown: false,
 			};
 		}
@@ -125,6 +133,26 @@ export class TranscriptView implements Component {
 		return { key: block.id, role: "Content", text: `[${type || "unknown"} block]`, markdown: false };
 	}
 
+	private toolResultPreview(receipt: ToolReceipt, width: number): string | undefined {
+		const source = receipt.resultPreview;
+		if (!source) return undefined;
+
+		let byWidth = this.toolResultPreviews.get(receipt);
+		const cached = byWidth?.get(width);
+		if (cached?.source === source) return cached.text;
+
+		const rendered = new Text(source, 0, 0).render(Math.max(1, width - 2));
+		const text = rendered.length <= MAX_TOOL_RESULT_DISPLAY_LINES
+			? source
+			: `${rendered.slice(0, MAX_TOOL_RESULT_DISPLAY_LINES - 1).join("\n")}\n…`;
+		if (!byWidth) {
+			byWidth = new Map<number, CachedPreview>();
+			this.toolResultPreviews.set(receipt, byWidth);
+		}
+		byWidth.set(width, { source, text });
+		return text;
+	}
+
 	private displayProvisionalBlock(block: ProvisionalBlock): DisplayBlock | undefined {
 		if (block.contentType === "text") {
 			return { key: `partial:${block.id}`, role: "Phi · streaming", text: block.text, markdown: true };
@@ -143,11 +171,10 @@ export class TranscriptView implements Component {
 	}
 }
 
-function formatToolReceipt(content: unknown, receipt: ToolReceipt | undefined): string {
+function formatToolReceipt(content: unknown, receipt: ToolReceipt | undefined, preview: string | undefined): string {
 	const name = getStringProperty(content, "name") ?? receipt?.toolName ?? "Unknown tool";
 	const input = getProperty(content, "input") ?? receipt?.input;
 	const state = receipt?.executionState ?? "requested";
-	const preview = receipt?.resultPreview;
 	return [
 		`${name} · ${state}`,
 		input === undefined ? "" : boundedPreviewValue(input),
