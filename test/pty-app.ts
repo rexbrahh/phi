@@ -172,6 +172,20 @@ async function run(): Promise<void> {
 				if (result?.action !== expectedAction) throw new Error(`${requestId} returned ${result?.action ?? "no result"}`);
 				record("dialog-result", { requestId, action: result.action });
 			}
+			const visibleCancellation = onElicitation({
+				serverName: "pty-test-server",
+				message: "Cancel this visible request only",
+				mode: "url",
+				url: "https://example.invalid/pty-visible-cancel",
+			}, { requestId: "pty-visible-cancel", signal: new AbortController().signal });
+			await waitFor(() => controller.views.dialogs.requestId === "pty-visible-cancel", "visible cancellation dialog");
+			const cancelled = await visibleCancellation;
+			if (cancelled?.action !== "cancel") throw new Error(`visible request returned ${cancelled?.action ?? "no result"}`);
+			record("dialog-result", { requestId: "pty-visible-cancel", action: cancelled.action });
+			await fake.waitForInputCount(1);
+			if (fake.receivedMessages[0]?.message.content !== "continued after cancellation") {
+				throw new Error("continued input was not submitted after the visible request was cancelled");
+			}
 			record("dialogs-complete");
 		}
 

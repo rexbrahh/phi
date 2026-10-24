@@ -8,13 +8,15 @@ import type { InspectorPanel } from "./inspectors.js";
 export interface AppKeyboardActions {
 	dialogVisible(): boolean;
 	handleDialogInput(data: string): void;
+	exitConfirmationVisible(): boolean;
+	handleExitConfirmationInput(data: string): void;
 	hideDialog(): void;
 	reopenDialog(): void;
 	leaveShellMode(): void;
 	interruptForeground(): void;
 	backgroundTasks(): void;
 	stopSelectedTask(): void;
-	close(): void;
+	requestUserExit(): void;
 	suspendTerminal(): void;
 	refreshWorkspace(): void;
 	showInspector(panel: InspectorPanel | null): void;
@@ -41,7 +43,8 @@ export class AppKeyboardController {
 		if (this.actions.dialogVisible()) {
 			this.discardPartialPaste();
 			if (matchesKey(data, Key.ctrl("c"))) {
-				this.actions.close();
+				this.actions.handleDialogInput(data);
+				this.actions.render();
 				return { consume: true };
 			}
 			if (matchesKey(data, Key.escape)) {
@@ -50,6 +53,11 @@ export class AppKeyboardController {
 			}
 			this.actions.handleDialogInput(data);
 			this.actions.render();
+			return { consume: true };
+		}
+		if (this.actions.exitConfirmationVisible()) {
+			this.discardPartialPaste();
+			this.actions.handleExitConfirmationInput(data);
 			return { consume: true };
 		}
 		if (this.shell.mode) this.discardPartialPaste();
@@ -74,7 +82,7 @@ export class AppKeyboardController {
 		if (matchesKey(data, Key.ctrl("c"))) {
 			if (this.shell.running) this.shell.cancel();
 			else if (this.state.effectiveStatus.foreground === "running") this.actions.interruptForeground();
-			else this.actions.close();
+			else this.actions.requestUserExit();
 			return { consume: true };
 		}
 		if (matchesKey(data, Key.ctrl("b"))) {

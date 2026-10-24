@@ -194,7 +194,7 @@ export async function dispatchLocalCommand(command: LocalCommand, app: AppContro
 		return;
 	}
 	if (command.kind === "quit") {
-		await app.close(0);
+		app.requestUserExit();
 		return;
 	}
 	if (command.kind === "new" || command.kind === "resume" || command.kind === "fork") {

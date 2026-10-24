@@ -19,6 +19,7 @@ import { InteractionQueue } from "../interactions.js";
 import { startSession, type Session } from "../session.js";
 import { createState, resetStateForProcess, type PhiState } from "../state.js";
 import { AppAttachmentController } from "./app-attachments.js";
+import { AppExitConfirmationController } from "./app-exit-confirmation.js";
 import { AppKeyboardController } from "./app-keyboard.js";
 import { AppDialogController } from "./app-dialogs.js";
 import { AppInspectorController } from "./app-inspectors.js";
@@ -87,6 +88,7 @@ export class AppController {
 	private readonly dependencies: AppDependencies;
 	private readonly shell: AppShellController;
 	private readonly attachmentController: AppAttachmentController;
+	private readonly exitConfirmation: AppExitConfirmationController;
 	private readonly keyboard: AppKeyboardController;
 	private readonly dialogController: AppDialogController;
 	private readonly submission: AppSubmissionController;
@@ -142,6 +144,12 @@ export class AppController {
 		tui.setFocus(editor);
 		this.views = new ControllerViews(tui, screen, editor, transcript, dialogs, inspectors);
 		this.dialogController = dialogController;
+		this.exitConfirmation = new AppExitConfirmationController(
+			tui,
+			editor,
+			() => { void this.close(0); },
+			() => this.render(),
+		);
 		this.attachmentController = new AppAttachmentController({
 			dependencies: this.dependencies,
 			editor,
@@ -163,13 +171,15 @@ export class AppController {
 		this.keyboard = new AppKeyboardController(this.views, this.state, this.shell, this.attachmentController, {
 			dialogVisible: () => this.dialogController.visible,
 			handleDialogInput: (data) => this.dialogController.handleKey(data),
+			exitConfirmationVisible: () => this.exitConfirmation.visible,
+			handleExitConfirmationInput: (data) => this.exitConfirmation.handleInput(data),
 			hideDialog: () => this.dialogController.hide(),
 			reopenDialog: () => this.dialogController.reopen(),
 			leaveShellMode: () => this.shell.leave(),
 			interruptForeground: () => { void this.interruptForeground(); },
 			backgroundTasks: () => { void this.backgroundTasks(); },
 			stopSelectedTask: () => { void this.stopSelectedTask(); },
-			close: () => void this.close(0),
+			requestUserExit: () => this.requestUserExit(),
 			suspendTerminal: () => this.suspendTerminal(),
 			refreshWorkspace: () => void this.refreshWorkspace(this.state.cwd),
 			showInspector: (panel) => this.showInspector(panel),
@@ -238,6 +248,16 @@ export class AppController {
 	close(exitCode = 0): Promise<void> {
 		this.requestExit(exitCode);
 		return this.runPromise?.then(() => undefined) ?? Promise.resolve();
+	}
+
+	requestUserExit(): void {
+		const draft = this.views.editor.getExpandedText().trim().length > 0 || this.attachments.length > 0;
+		const work = this.hasActiveWork();
+		if (draft || work) {
+			this.exitConfirmation.show({ draft, work });
+			return;
+		}
+		void this.close(0);
 	}
 
 	showInspector(panel: InspectorPanel | null): void {

@@ -264,12 +264,13 @@ test("session closing cancels pending native interaction requests", async () => 
 	assert.equal(await running, 0);
 });
 
-test("Ctrl+C closes an open dialog through session cancellation without answering it", async () => {
+test("Ctrl+C cancels only a visible native request and keeps input live", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
 	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
 	const running = controller.run();
 	await waitFor(() => controller.ready !== undefined);
+	terminal.input("draft survives cancellation");
 	const callback = fake.parameters?.options?.canUseTool;
 	assert.ok(callback);
 	const response = callback("Read", {}, {
@@ -277,10 +278,66 @@ test("Ctrl+C closes an open dialog through session cancellation without answerin
 		toolUseID: "tool-interrupt",
 		signal: new AbortController().signal,
 	} as Parameters<NonNullable<Options["canUseTool"]>>[2]);
-	await waitFor(() => controller.interactions.pending.length === 1);
+	await waitFor(() => controller.views.dialogs.requestId === "permission-interrupt");
 	terminal.input("\u0003");
 	assert.equal((await response)?.behavior, "deny");
 	assert.equal(controller.interactions.pending.length, 0);
+	assert.equal(fake.closeCalls, 0);
+	assert.equal(terminal.stopCalls, 0);
+	assert.equal(controller.views.editor.getText(), "draft survives cancellation");
+
+	terminal.input(" with continued input");
+	terminal.input("\r");
+	await fake.waitForInputCount(1);
+	assert.equal(fake.receivedMessages[0]?.message.content, "draft survives cancellation with continued input");
+	assert.equal(fake.closeCalls, 0);
+	assert.equal(terminal.stopCalls, 0);
+
+	await controller.close(0);
+	assert.equal(await running, 0);
+});
+
+test("Ctrl+C interrupts foreground work without closing Phi", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const running = controller.run();
+	await waitFor(() => controller.ready !== undefined);
+	controller.state.effectiveStatus.foreground = "running";
+
+	terminal.input("\u0003");
+	await waitFor(() => fake.interruptCalls === 1);
+	assert.equal(fake.closeCalls, 0);
+	assert.equal(terminal.stopCalls, 0);
+	controller.state.effectiveStatus.foreground = "idle";
+
+	await controller.close(0);
+	assert.equal(await running, 0);
+});
+
+test("Ctrl+C requires confirmation before discarding a composer draft", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const running = controller.run();
+	await waitFor(() => controller.ready !== undefined);
+	terminal.input("unsent draft");
+	terminal.input("\u0003");
+	await waitFor(() => terminal.output.includes("Exit Phi?"));
+	assert.equal(fake.closeCalls, 0);
+	assert.equal(terminal.stopCalls, 0);
+	assert.equal(controller.views.editor.getText(), "unsent draft");
+	assert.match(terminal.output, /Keep Phi open/u);
+
+	terminal.input("\u001b");
+	assert.equal(controller.views.editor.getText(), "unsent draft");
+	assert.equal(fake.closeCalls, 0);
+	terminal.input(" stays");
+	terminal.input("\r");
+	await fake.waitForInputCount(1);
+	assert.equal(fake.receivedMessages[0]?.message.content, "unsent draft stays");
+
+	await controller.close(0);
 	assert.equal(await running, 0);
 });
 
@@ -441,7 +498,7 @@ test("a delayed image result is discarded when the composer draft changes", asyn
 		.includes("composer draft changed"));
 	assert.equal(controller.attachments.length, 0);
 	assert.equal(controller.views.editor.getText(), "new composer draft");
-	terminal.input("\u0003");
+	await controller.close(0);
 	assert.equal(await running, 0);
 });
 
@@ -463,7 +520,7 @@ test("a late image failure cannot restore its command over a newer composer draf
 	await waitFor(() => terminal.output.includes("Could not attach image: late image failure"));
 
 	assert.equal(controller.views.editor.getText(), "new composer draft");
-	terminal.input("\u0003");
+	await controller.close(0);
 	assert.equal(await running, 0);
 });
 

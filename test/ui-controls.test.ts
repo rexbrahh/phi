@@ -190,6 +190,27 @@ test("/phi quit closes the SDK session and restores the terminal", async () => {
 	assert.equal(terminal.stopCalls, 1);
 });
 
+test("/phi quit shows a stop-and-exit confirmation while work remains", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const running = controller.run();
+	await waitFor(() => controller.ready !== undefined);
+	controller.state.liveBackgroundTaskIds.add("background-before-exit");
+
+	terminal.input("/phi quit");
+	terminal.input("\r");
+	await waitFor(() => terminal.output.includes("Exit Phi?"));
+	assert.equal(fake.closeCalls, 0);
+	assert.equal(terminal.stopCalls, 0);
+	assert.match(terminal.output, /Stop work and exit Phi/u);
+
+	terminal.input("\r");
+	assert.equal(await running, 0);
+	assert.equal(fake.closeCalls, 1);
+	assert.equal(terminal.stopCalls, 1);
+});
+
 test("session switch blocks prompts and literal sends across target replacement", async () => {
 	const terminal = new FakeTerminal();
 	const first = new FakeQueryHarness();
