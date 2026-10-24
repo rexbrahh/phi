@@ -286,6 +286,8 @@ async function main(): Promise<void> {
 			deadline,
 			"first main turn result",
 		);
+		reportedSpend = firstTurn.total_cost_usd;
+		console.log(`Reported session spend after initial turn: $${reportedSpend.toFixed(4)} USD.`);
 		assert.equal(firstTurn.session_id, sessionId);
 		assert.equal(firstTurn.is_error, false, "initial native session turn must succeed");
 		assert.equal(findToolUses(events.messages, "Edit").length, 1, "the fixture must produce exactly one native Edit call");
@@ -336,10 +338,10 @@ async function main(): Promise<void> {
 			!hasTaskNotification(events.messages, secondAgentTaskId, "completed"),
 			"the main session must accept input while the other Workflow agent remains active",
 		);
-		const remainingBudgetUsd = maxBudgetUsd - continuedTurn.total_cost_usd;
-		assert.ok(remainingBudgetUsd > 0, "reported initial spend leaves room inside the requested total budget for resume");
 		reportedSpend = continuedTurn.total_cost_usd;
 		console.log(`Reported session spend before resume: $${reportedSpend.toFixed(4)} USD.`);
+		const remainingBudgetUsd = maxBudgetUsd - reportedSpend;
+		assert.ok(remainingBudgetUsd > 0, "reported initial spend leaves room inside the requested total budget for resume");
 
 		await waitFor(
 			() => hasTaskNotification(events.messages, mainBashTaskId, "completed"),
@@ -403,14 +405,14 @@ async function main(): Promise<void> {
 			"resumed session result",
 		);
 		assert.equal(resumedResult.session_id, sessionId, "native session resume must retain the original session id");
+		reportedSpend = resumedResult.total_cost_usd;
+		console.log(`Reported session spend after resume: $${reportedSpend.toFixed(4)} USD.`);
 		assert.equal(resumedResult.is_error, false);
 		if (resumedResult.subtype !== "success") {
 			throw new Error(`Native session resume ended with ${resumedResult.subtype}`);
 		}
 		const expectedResumeMarker = extractResumeMarker(events.messages, checkpointId);
 		assert.ok(resumedResult.result.includes(expectedResumeMarker), "resumed conversation must retain its earlier user context");
-		reportedSpend = resumedResult.total_cost_usd;
-		console.log(`Reported session spend after resume: $${reportedSpend.toFixed(4)} USD.`);
 		assert.ok(reportedSpend <= maxBudgetUsd, "reported session spend must remain within the requested budget");
 
 		console.log(`Native SDK acceptance scenario completed. Reported session spend: $${reportedSpend.toFixed(4)} USD.`);
