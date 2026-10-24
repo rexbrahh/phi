@@ -38,6 +38,10 @@ export class AppKeyboardController {
 	onInput(data: string): { consume?: boolean } | undefined {
 		this.captureInlinePaste(data);
 		if (this.actions.dialogVisible()) {
+			if (matchesKey(data, Key.ctrl("c"))) {
+				this.actions.close();
+				return { consume: true };
+			}
 			if (matchesKey(data, Key.escape)) {
 				this.actions.hideDialog();
 				return { consume: true };

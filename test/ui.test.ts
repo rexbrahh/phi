@@ -178,6 +178,26 @@ test("session closing cancels pending native interaction requests", async () => 
 	assert.equal(await running, 0);
 });
 
+test("Ctrl+C closes an open dialog through session cancellation without answering it", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const running = controller.run();
+	await waitFor(() => controller.ready !== undefined);
+	const callback = fake.parameters?.options?.canUseTool;
+	assert.ok(callback);
+	const response = callback("Read", {}, {
+		requestId: "permission-interrupt",
+		toolUseID: "tool-interrupt",
+		signal: new AbortController().signal,
+	} as Parameters<NonNullable<Options["canUseTool"]>>[2]);
+	await waitFor(() => controller.interactions.pending.length === 1);
+	terminal.input("\u0003");
+	assert.equal((await response)?.behavior, "deny");
+	assert.equal(controller.interactions.pending.length, 0);
+	assert.equal(await running, 0);
+});
+
 test("native question and MCP URL callbacks use the pending dialog", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
