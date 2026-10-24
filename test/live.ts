@@ -332,14 +332,14 @@ async function main(): Promise<void> {
 			deadline,
 			"continued main input while a Workflow agent is active",
 		);
+		reportedSpend = continuedTurn.total_cost_usd;
+		console.log(`Reported session spend before resume: $${reportedSpend.toFixed(4)} USD.`);
 		assert.equal(continuedTurn.session_id, sessionId);
 		assert.equal(continuedTurn.is_error, false);
 		assert.ok(
 			!hasTaskNotification(events.messages, secondAgentTaskId, "completed"),
 			"the main session must accept input while the other Workflow agent remains active",
 		);
-		reportedSpend = continuedTurn.total_cost_usd;
-		console.log(`Reported session spend before resume: $${reportedSpend.toFixed(4)} USD.`);
 		const remainingBudgetUsd = maxBudgetUsd - reportedSpend;
 		assert.ok(remainingBudgetUsd > 0, "reported initial spend leaves room inside the requested total budget for resume");
 
