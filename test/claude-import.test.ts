@@ -65,6 +65,7 @@ test("imports named customizations, filters auth and history, and remaps plugin 
 				ANTHROPIC_API_KEY: "synthetic-api-secret",
 				ANTHROPIC_AUTH_TOKEN: "synthetic-token-secret",
 				CLAUDE_CODE_OAUTH_TOKEN: "synthetic-oauth-secret",
+			CLAUDE_CODE_API_KEY_HELPER_TTL_MS: "3600000",
 				CLAUDE_CONFIG_DIR: source,
 				CLAUDE_CODE_PLUGIN_CACHE_DIR: join(source, "plugins", "cache"),
 				ANTHROPIC_BASE_URL: "https://synthetic.invalid",
