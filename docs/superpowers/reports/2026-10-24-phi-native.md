@@ -1,0 +1,41 @@
+# Conservative native acceptance attempt
+
+Date: 2026-10-24. Source: `40741182ad6de93b9595534f40fbbc04a462a9f6`.
+
+The native fixture failed while waiting for a Workflow launch result. Native acceptance remains incomplete. This attempt did not establish a production Workflow defect or its cause.
+
+## Cost and credentials
+
+The user requested the cheapest Anthropic API model and conservative use of the saved key. Current official pricing and an authenticated Models API response identified `claude-haiku-5-5` as the cheapest active model available to the account. Model discovery submitted no inference request.
+
+The fixture pins that model for its initial query, resume, and both Workflow children. It accepts a total SDK budget of at most $0.10, bounds output and turns, disables API retries, and configures no model fallback. The key entered only the child environment. A private wrapper redacted captured output before saving it.
+
+The latest observed SDK `total_cost_usd` was **$0.0050**. This is an SDK estimate, not a billing statement or remaining-credit balance. The result model-usage assertions were not reached. A configured SDK budget does not guarantee a hard billing stop for in-flight requests.
+
+## Actual result
+
+The attempt ran from 23:42:15 to 23:45:15 UTC and exited with status 1. Its diagnostic was:
+
+> Timed out waiting for native Workflow launch result; latest total_cost_usd=$0.0050 USD; cleanup termination observed=yes
+
+The outer 240-second watchdog did not fire. The fixture observed SDK query termination and removed its disposable workspace. No imported user hooks or customizations ran. No paid rerun followed this failure.
+
+| Gate | Evidence | Result |
+| --- | --- | --- |
+| Native API route and key source | Their assertions precede the reached Workflow wait. | Passed for the initial session. |
+| Fixture skill discovery | The initialized-command assertion precedes the reached wait. | Passed. Skill execution was not yet asserted. |
+| Foreground Bash and background control | The exact Bash call, successful background request, and task-start assertions precede the reached wait. | Passed for the synthetic command. |
+| Workflow launch | The required launch result did not arrive before the deadline. | Failed. The cause remains unverified. |
+| Remaining native checks | Later result/model, edit/hook, parallel-child/phase, stop, continuation, resume, and checkpoint assertions were not reached. | Incomplete. |
+
+## Offline evidence
+
+The combined build and 21 focused checks passed before this run. Tests cover the budget refusal, pinned model declarations, query-creation tripwire, bounded/redacted failure diagnostics, session lifecycle, and app diagnostic redaction. They use synthetic keys.
+
+All four source commits have signature headers. Each changes fewer than 400 added-plus-deleted lines. The latest source adds no production model default or user configuration change.
+
+The SDK documents its tool list at turn start, so pre-prompt tool availability was not established. The native failure log preserves the wait label, observed cost, and termination result. It does not preserve the original model output or full tool events. Those missing observations limit diagnosis.
+
+An offline investigation follows. It must distinguish a fixture/parser issue from an unavailable tool or model behavior. It must retain the required native assertions. Ghostty acceptance also remains pending because the user has not opened Phi yet.
+
+Primary references: [Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing), [Haiku 5.5](https://platform.claude.com/docs/en/models/haiku-5-5/overview), [SDK dynamic workflows](https://platform.claude.com/cookbook/claude-agent-sdk-08-dynamic-workflows), and [runtime environment variables](https://code.claude.com/docs/en/env-vars).
