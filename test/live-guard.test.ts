@@ -23,6 +23,26 @@ type HarnessAssertions = {
 		timeoutMs: number,
 		label: string,
 	): Promise<{ terminated: boolean; error?: unknown }>;
+	waitFor<T>(
+		read: () => T | undefined | Promise<T | undefined>,
+		events: { messages: unknown[]; errors: unknown[] },
+		deadline: number,
+		label: string,
+		session: { done: Promise<void>; close(): Promise<void> },
+	): Promise<T>;
+}
+
+type DiagnosticHarness = {
+	formatLiveFailureDiagnostic(
+		error: unknown,
+		options?: {
+			latestObservedTotalCostUsd?: number;
+			cleanupTerminationObserved?: boolean;
+			cleanupErrors?: unknown[];
+			selectedApiKey?: string;
+		},
+	): string;
+	observedResultTotalCostUsd(message: unknown): number | undefined;
 };
 
 const runner = join(dirname(fileURLToPath(import.meta.url)), "live.js");
@@ -49,6 +69,89 @@ test("the runner and both native Workflow agents stay pinned to Haiku 5.5", () =
 	const workflowSource = readFileSync(workflowPath, "utf8");
 	assert.match(workflowSource, new RegExp(`const LIVE_MODEL = "${LIVE_MODEL}";`));
 	assert.equal((workflowSource.match(/model: LIVE_MODEL/g) ?? []).length, 2);
+});
+
+test("failure diagnostics retain bounded nested causes and redact the selected key", async () => {
+	const harness = await import("./live.js") as unknown as DiagnosticHarness;
+	const syntheticKey = "offline-synthetic-key-nested";
+	const failure = new Error("wait failed", {
+		cause: new Error(`native callback rejected with ${syntheticKey}`),
+	});
+	const diagnostic = harness.formatLiveFailureDiagnostic(failure, {
+		latestObservedTotalCostUsd: 0.125,
+		cleanupTerminationObserved: true,
+		selectedApiKey: syntheticKey,
+	});
+
+	assert.match(diagnostic, /Error: wait failed/);
+	assert.match(diagnostic, /native callback rejected with \[redacted API key\]/);
+	assert.match(diagnostic, /latest total_cost_usd=\$0\.1250 USD/);
+	assert.match(diagnostic, /cleanup termination observed=yes/);
+	assert.ok(diagnostic.length <= 1_200, "failure diagnostics must stay bounded");
+	assert.equal(diagnostic.includes(syntheticKey), false);
+
+	const longDiagnostic = harness.formatLiveFailureDiagnostic(new Error("x".repeat(5_000)), {
+		latestObservedTotalCostUsd: 0.5,
+		cleanupTerminationObserved: false,
+	});
+	assert.ok(longDiagnostic.length <= 1_200);
+	assert.match(longDiagnostic, /latest total_cost_usd=\$0\.5000 USD/);
+	assert.match(longDiagnostic, /cleanup termination observed=no/);
+});
+
+test("waitFor preserves callback errors as causes and reports them without the synthetic key", async () => {
+	const harness = await import("./live.js") as unknown as HarnessAssertions & DiagnosticHarness;
+	const syntheticKey = "offline-synthetic-key-callback";
+	const callbackError = new Error(`native SDK callback failed with ${syntheticKey}`);
+	let waitFailure: unknown;
+	await assert.rejects(
+		harness.waitFor(
+			() => undefined,
+			{ messages: [], errors: [callbackError] },
+			Date.now() + 1_000,
+			"callback result",
+			{ done: Promise.resolve(), close: async () => undefined },
+		),
+		(error: unknown) => {
+			waitFailure = error;
+			return error instanceof Error && error.cause === callbackError;
+		},
+	);
+	assert.ok(waitFailure instanceof Error);
+	const diagnostic = harness.formatLiveFailureDiagnostic(waitFailure, {
+		latestObservedTotalCostUsd: 0.25,
+		cleanupTerminationObserved: true,
+		selectedApiKey: syntheticKey,
+	});
+	assert.match(diagnostic, /SDK reported an error while waiting for callback result/);
+	assert.match(diagnostic, /native SDK callback failed with \[redacted API key\]/);
+	assert.equal(diagnostic.includes(syntheticKey), false);
+});
+
+test("cleanup diagnostics retain cleanup errors and report unobserved termination without the key", async () => {
+	const harness = await import("./live.js") as unknown as DiagnosticHarness;
+	const syntheticKey = "offline-synthetic-key-cleanup";
+	const failure = new Error("fixture assertion failed", {
+		cause: new Error(`nested failure with ${syntheticKey}`),
+	});
+	const diagnostic = harness.formatLiveFailureDiagnostic(failure, {
+		cleanupTerminationObserved: false,
+		cleanupErrors: [new Error(`query close failed with ${syntheticKey}`)],
+		selectedApiKey: syntheticKey,
+	});
+
+	assert.match(diagnostic, /nested failure with \[redacted API key\]/);
+	assert.match(diagnostic, /latest total_cost_usd=not observed/);
+	assert.match(diagnostic, /cleanup termination observed=no/);
+	assert.match(diagnostic, /cleanup error: Error: query close failed with \[redacted API key\]/);
+	assert.equal(diagnostic.includes(syntheticKey), false);
+});
+
+test("result callbacks expose the latest cumulative SDK spend for failure diagnostics", async () => {
+	const harness = await import("./live.js") as unknown as DiagnosticHarness;
+	assert.equal(harness.observedResultTotalCostUsd({ type: "assistant" }), undefined);
+	assert.equal(harness.observedResultTotalCostUsd({ type: "result", total_cost_usd: 0.375 }), 0.375);
+	assert.equal(harness.observedResultTotalCostUsd({ type: "result", total_cost_usd: Number.NaN }), undefined);
 });
 
 test("tool assertions constrain Edit, Workflow, active tasks, and fixture skill evidence", async () => {

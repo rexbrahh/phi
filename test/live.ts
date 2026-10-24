@@ -7,6 +7,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Options, SDKMessage, SDKResultMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { WorkflowOutput } from "../src/workflows.js";
+import { formatErrorText } from "../src/ui/error-text.js";
 
 const SKILL_NAME = "phi-live-acceptance";
 export const LIVE_MODEL = "claude-haiku-5-5";
@@ -20,6 +21,11 @@ const INITIAL_BUDGET_SHARE = 0.75;
 const MAX_TOTAL_TIME_MS = 180_000;
 const STEP_TIMEOUT_MS = 60_000;
 const TERMINATION_TIMEOUT_MS = 15_000;
+const MAX_FAILURE_DIAGNOSTIC_CHARS = 1_200;
+const MAX_CAUSE_DETAILS = 4;
+const MAX_CAUSE_MESSAGE_CHARS = 220;
+
+let failureDiagnosticEmitted = false;
 
 export interface LiveQueryLifecycle {
 	done: Promise<void>;
@@ -29,6 +35,13 @@ export interface LiveQueryLifecycle {
 export interface LiveCloseOutcome {
 	terminated: boolean;
 	error?: unknown;
+}
+
+export interface LiveFailureDiagnosticOptions {
+	latestObservedTotalCostUsd?: number;
+	cleanupTerminationObserved?: boolean;
+	cleanupErrors?: unknown[];
+	selectedApiKey?: string;
 }
 
 export class LiveRunRefusal extends Error {
@@ -129,6 +142,80 @@ interface EventLog {
 	errors: unknown[];
 }
 
+export function observedResultTotalCostUsd(message: SDKMessage): number | undefined {
+	if (message.type !== "result" || !Number.isFinite(message.total_cost_usd)) return undefined;
+	return message.total_cost_usd;
+}
+
+export function formatLiveFailureDiagnostic(
+	error: unknown,
+	options: LiveFailureDiagnosticOptions = {},
+): string {
+	const key = options.selectedApiKey;
+	const cause = describeDiagnosticCause(error, key);
+	const spend = Number.isFinite(options.latestObservedTotalCostUsd)
+		? `$${options.latestObservedTotalCostUsd?.toFixed(4)} USD`
+		: "not observed";
+	const termination = options.cleanupTerminationObserved === undefined
+		? "not observed"
+		: options.cleanupTerminationObserved ? "yes" : "no";
+	const cleanupErrors = (options.cleanupErrors ?? [])
+		.slice(0, 2)
+		.map((cleanupError) => describeDiagnosticCause(cleanupError, key))
+		.filter(Boolean);
+	const omittedCleanupErrors = (options.cleanupErrors?.length ?? 0) > cleanupErrors.length;
+	const cleanupDetail = cleanupErrors.length > 0
+		? `; cleanup error: ${cleanupErrors.join("; ")}${omittedCleanupErrors ? "; additional cleanup errors omitted" : ""}`
+		: "";
+	const safeCleanupDetail = boundedDiagnosticText(cleanupDetail, key, 300);
+	const prefix = "Live fixture failure: ";
+	const summary = `; latest total_cost_usd=${spend}; cleanup termination observed=${termination}${safeCleanupDetail}`;
+	const causeLimit = Math.max(0, MAX_FAILURE_DIAGNOSTIC_CHARS - prefix.length - summary.length);
+	const diagnostic = `${prefix}${boundedDiagnosticText(cause, key, causeLimit)}${summary}`;
+	return boundedDiagnosticText(diagnostic, key, MAX_FAILURE_DIAGNOSTIC_CHARS);
+}
+
+function describeDiagnosticCause(error: unknown, selectedApiKey?: string): string {
+	const pending: unknown[] = [error];
+	const seen = new Set<unknown>();
+	const details: string[] = [];
+	while (pending.length > 0 && details.length < MAX_CAUSE_DETAILS) {
+		const current = pending.shift();
+		if (seen.has(current)) continue;
+		seen.add(current);
+		const name = current instanceof Error ? current.name || "Error" : current === null ? "null" : typeof current;
+		const message = current instanceof Error
+			? current.message
+			: typeof current === "string" ? current : current === null ? "null" : current === undefined ? "undefined" : "(non-Error thrown value)";
+		const safeName = boundedDiagnosticText(name, selectedApiKey, 64);
+		const safeMessage = boundedDiagnosticText(message, selectedApiKey, MAX_CAUSE_MESSAGE_CHARS);
+		details.push(`${safeName}: ${safeMessage || "(empty message)"}`);
+		if (current instanceof Error) {
+			if (current.cause !== undefined) pending.unshift(current.cause);
+			if (current instanceof AggregateError) pending.push(...Array.from(current.errors).slice(0, 2));
+		}
+	}
+	if (pending.length > 0) details.push("additional causes omitted");
+	return details.join(" caused by ");
+}
+
+function boundedDiagnosticText(value: string, selectedApiKey?: string, limit = MAX_FAILURE_DIAGNOSTIC_CHARS): string {
+	const oneLine = formatErrorText(value, selectedApiKey)
+		.replace(/[\u0000-\u001f\u007f]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (oneLine.length <= limit) return oneLine;
+	return `${oneLine.slice(0, Math.max(0, limit - 1))}…`;
+}
+
+function reportLiveFailureDiagnostic(error: unknown, options: LiveFailureDiagnosticOptions = {}): void {
+	failureDiagnosticEmitted = true;
+	console.error(formatLiveFailureDiagnostic(error, {
+		...options,
+		selectedApiKey: options.selectedApiKey ?? process.env.ANTHROPIC_API_KEY,
+	}));
+}
+
 async function main(): Promise<void> {
 	const maxBudgetUsd = validateLiveInvocation(process.env, process.argv.slice(2));
 	const deadline = Date.now() + MAX_TOTAL_TIME_MS;
@@ -150,10 +237,13 @@ async function main(): Promise<void> {
 	const environment = createFixtureEnvironment(fixture);
 	const sessions: Array<ReturnType<typeof startSession>> = [];
 	let reportedSpend: number | undefined;
+	let latestObservedTotalCostUsd: number | undefined;
 	let sessionId: string | undefined;
 	let workflowTaskId: string | undefined;
 	let workflowRunId: string | undefined;
 
+	let scenarioFailed = false;
+	let scenarioFailure: unknown;
 	try {
 		const firstBudgetUsd = maxBudgetUsd * INITIAL_BUDGET_SHARE;
 		const initialLaunch = parseArgs([
@@ -186,6 +276,8 @@ async function main(): Promise<void> {
 		const session = createFixtureSession(firstOptions, {
 			onMessage(message) {
 				events.messages.push(message);
+				const totalCostUsd = observedResultTotalCostUsd(message);
+				if (totalCostUsd !== undefined) latestObservedTotalCostUsd = totalCostUsd;
 			},
 			onError(error) {
 				events.errors.push(error);
@@ -441,6 +533,8 @@ async function main(): Promise<void> {
 		const resumed = createFixtureSession(resumeOptions, {
 			onMessage(message) {
 				resumedEvents.messages.push(message);
+				const totalCostUsd = observedResultTotalCostUsd(message);
+				if (totalCostUsd !== undefined) latestObservedTotalCostUsd = totalCostUsd;
 			},
 			onError(error) {
 				resumedEvents.errors.push(error);
@@ -479,20 +573,50 @@ async function main(): Promise<void> {
 		console.log(
 			`Session ${sessionId}; Workflow task ${workflowTaskId}; Workflow run ${workflowRunId}; checkpoint message ${checkpointUserMessageUuid}.`,
 		);
+	} catch (error) {
+		scenarioFailed = true;
+		scenarioFailure = error;
+		throw error;
 	} finally {
-		const closeOutcomes = await Promise.all(
-			sessions.reverse().map((session) => closeSession(session, TERMINATION_TIMEOUT_MS, "final session cleanup")),
-		);
+		const closeOutcomes = await Promise.all(sessions.reverse().map(async (session) => {
+			try {
+				return await closeSession(session, TERMINATION_TIMEOUT_MS, "final session cleanup");
+			} catch (error) {
+				return { terminated: false, error };
+			}
+		}));
 		const cleanupFailure = closeOutcomes.find((outcome) => outcome.error !== undefined || !outcome.terminated);
 		if (cleanupFailure) {
-			console.error("Native SDK session cleanup did not complete cleanly.");
 			process.exitCode = process.exitCode || 1;
 		}
-		if (closeOutcomes.every((outcome) => outcome.terminated)) {
-			await rm(fixture.root, { recursive: true, force: true });
+		const allQueriesTerminated = closeOutcomes.every((outcome) => outcome.terminated);
+		let fixtureCleanupError: unknown;
+		if (allQueriesTerminated) {
+			try {
+				await rm(fixture.root, { recursive: true, force: true });
+			} catch (error) {
+				fixtureCleanupError = error;
+				process.exitCode = process.exitCode || 1;
+			}
 		} else {
-			console.error("Retained the synthetic fixture because query termination was not observed.");
 			process.exitCode = process.exitCode || 1;
+		}
+
+		const cleanupErrors = closeOutcomes
+			.map((outcome) => outcome.error)
+			.filter((error) => error !== undefined);
+		if (fixtureCleanupError !== undefined) cleanupErrors.push(fixtureCleanupError);
+		const cleanupDidFail = cleanupFailure !== undefined || fixtureCleanupError !== undefined;
+		if (scenarioFailed || cleanupDidFail) {
+			const diagnosticFailure = scenarioFailed
+				? scenarioFailure
+				: cleanupErrors[0] ?? new Error("Query termination was not observed");
+			reportLiveFailureDiagnostic(diagnosticFailure, {
+				latestObservedTotalCostUsd,
+				cleanupTerminationObserved: closeOutcomes.length === 0 ? undefined : allQueriesTerminated,
+				cleanupErrors: scenarioFailed ? cleanupErrors : cleanupErrors.slice(1),
+				selectedApiKey: process.env.ANTHROPIC_API_KEY,
+			});
 		}
 	}
 }
@@ -809,7 +933,7 @@ function resultForMessage(messages: SDKMessage[], userMessageId: UUID): SDKResul
 	return undefined;
 }
 
-async function waitFor<T>(
+export async function waitFor<T>(
 	read: () => T | undefined | Promise<T | undefined>,
 	events: EventLog,
 	deadline: number,
@@ -820,7 +944,9 @@ async function waitFor<T>(
 		while (Date.now() < deadline) {
 			const value = await read();
 			if (value !== undefined) return value;
-			if (events.errors.length > 0) throw new Error(`SDK reported an error while waiting for ${label}`);
+			if (events.errors.length > 0) {
+				throw new Error(`SDK reported an error while waiting for ${label}`, { cause: events.errors[0] });
+			}
 			await delay(100);
 		}
 		throw new DeadlineExceededError(`Timed out waiting for ${label}`);
@@ -952,17 +1078,16 @@ function delay(ms: number): Promise<void> {
 if (isMainModule()) {
 	void main().catch((error: unknown) => {
 		if (error instanceof LiveRunRefusal) {
-			console.error(error.message);
+			if (!failureDiagnosticEmitted) reportLiveFailureDiagnostic(error);
 			process.exitCode = 2;
 			return;
 		}
 		if (error instanceof QueryCreationTripwireError) {
-			console.error(error.message);
+			if (!failureDiagnosticEmitted) reportLiveFailureDiagnostic(error);
 			process.exitCode = 86;
 			return;
 		}
-		const errorName = error instanceof Error ? error.name : "UnknownError";
-		console.error(`Native SDK acceptance scenario failed (${errorName}); no credential values were printed.`);
+		if (!failureDiagnosticEmitted) reportLiveFailureDiagnostic(error);
 		process.exitCode = 1;
 	});
 }
