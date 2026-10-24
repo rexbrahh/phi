@@ -2,6 +2,8 @@
 
 Phi is a local coding terminal built with the Claude Agent SDK and pi-tui.
 
+Read the [v1 implementation and acceptance report](docs/superpowers/reports/2026-10-24-phi-v1.md) for checked behavior and pending native/terminal acceptance.
+
 ## Requirements
 
 - Use Node.js 22.19 or newer.
