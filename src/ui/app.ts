@@ -123,7 +123,7 @@ export class AppController {
 	private draftRevision = 0;
 
 	constructor(private launch: LaunchOptions, dependencies: Partial<AppDependencies> = {}) {
-		this.dependencies = { ...createDefaultDependencies(), ...dependencies };
+		this.dependencies = { ...createDefaultDependencies(launch.home), ...dependencies, configRoot: launch.home };
 		this.state = createState(launch.cwd);
 		this.exitPromise = new Promise((resolve) => {
 			this.resolveExit = resolve;
@@ -176,6 +176,7 @@ export class AppController {
 			(message) => this.showNotice(message),
 			(receipt, preview, command, cwd, sessionId) => this.submission.sendShellReceipt(receipt, preview, command, cwd, sessionId),
 			() => this.processGeneration,
+			launch.home,
 		);
 		this.keyboard = new AppKeyboardController(this.views, this.state, this.shell, this.attachmentController, {
 			dialogVisible: () => this.dialogController.visible,
@@ -316,7 +317,7 @@ export class AppController {
 		return this.views.inspectors.refreshWorkspace(cwd);
 	}
 
-	async listSessions(options: Parameters<AppDependencies["listSessions"]>[0]) {
+	async listSessions(options: Parameters<NonNullable<AppDependencies["listSessions"]>>[0]) {
 		return this.views.inspectors.listSessions(options);
 	}
 
@@ -533,10 +534,19 @@ export class AppController {
 		try {
 			this.startTerminal();
 			this.registerSignals();
-			this.launch = await this.dependencies.resolveLaunchOptions(
-				this.launch,
-				this.dependencies.listSessions,
-			);
+			const lookupReader = this.launch.continue && !this.dependencies.listSessions
+				? this.dependencies.createHistoryReader(this.launch.home)
+				: undefined;
+			try {
+				this.launch = await this.dependencies.resolveLaunchOptions(
+					this.launch,
+					this.dependencies.listSessions ?? (lookupReader
+						? (options) => lookupReader.list(options)
+						: async () => []),
+				);
+			} finally {
+				await lookupReader?.close();
+			}
 			if (!this.exitRequested) {
 				this.resetSessionControls(this.launch);
 				const generation = ++this.processGeneration;
@@ -581,7 +591,7 @@ export class AppController {
 			canUseTool: callbacks.canUseTool,
 			onElicitation: callbacks.onElicitation,
 			hooks: callbacks.hooks,
-		});
+		}, this.dependencies.environment);
 		this.sessionId = launch.sessionId ?? launch.resume ?? options.sessionId;
 		this.views.inspectors.setSession(this.sessionId ?? "", generation, launch.cwd, true);
 		this.session = startSession(options, callbacks, this.dependencies.createQuery);

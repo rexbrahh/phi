@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { SDKSessionInfo, SessionMessage } from "@anthropic-ai/claude-agent-sdk";
-import { parseArgs } from "../src/config.js";
+import type { ListSessionsOptions, SDKSessionInfo, SessionMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { HistoryReader } from "../src/history.js";
 import { AppController } from "../src/ui/app.js";
 import { FakeQueryHarness } from "./helpers/fake-query.js";
 import { FakeTerminal } from "./helpers/terminal.js";
-import { appDependencies, waitFor } from "./helpers/ui-app.js";
+import { appDependencies, uiEnvironment, waitFor, testLaunch } from "./helpers/ui-app.js";
 
 const RESUME_ID = "00000000-0000-4000-8000-000000000901";
 
@@ -20,6 +19,56 @@ function deferred<T>() {
 	return { promise, resolve, reject };
 }
 
+test("startup --continue lists from Phi home and opens the selected SDK session there", async () => {
+	const launch = testLaunch(["--continue"]);
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	const environment: NodeJS.ProcessEnv = { ...uiEnvironment, ANTHROPIC_API_KEY: "synthetic-api-key" };
+	let readerRoot: string | undefined;
+	let listOptions: ListSessionsOptions | undefined;
+	let closeCount = 0;
+	const history: HistoryReader = {
+		list: async (options) => {
+			listOptions = options;
+			return [
+				{ sessionId: "older-session", summary: "older", lastModified: 1 },
+				{ sessionId: RESUME_ID, summary: "newer", lastModified: 2, cwd: "/project/cwd" },
+			];
+		},
+		messages: async (): Promise<SessionMessage[]> => [],
+		agents: async () => [],
+		agentMessages: async () => [],
+		close: async () => { closeCount += 1; },
+	};
+	const controller = new AppController(launch, appDependencies(fake, terminal, {
+		environment,
+		createHistoryReader: (home) => {
+			readerRoot = home;
+			return history;
+		},
+	}));
+	const running = controller.run();
+	try {
+		await waitFor(() => controller.ready !== undefined);
+		assert.equal(readerRoot, launch.home);
+		assert.deepEqual(listOptions, {
+			dir: launch.cwd,
+			includeWorktrees: false,
+			includeProgrammatic: true,
+		});
+		assert.equal(controller.currentSessionId, RESUME_ID);
+		assert.equal(fake.parameters?.options?.resume, RESUME_ID);
+		assert.equal(fake.parameters?.options?.cwd, launch.cwd);
+		assert.equal(fake.parameters?.options?.env?.ANTHROPIC_API_KEY, "synthetic-api-key");
+		assert.equal(fake.parameters?.options?.env?.CLAUDE_CONFIG_DIR, launch.home);
+		assert.equal(fake.parameters?.options?.env?.CLAUDE_CODE_PLUGIN_CACHE_DIR, `${launch.home}/plugins/cache`);
+		assert.equal(closeCount, 1);
+	} finally {
+		await controller.close(0);
+		await running;
+	}
+});
+
 test("resume reports local session metadata failure and keeps the SDK target visible", async () => {
 	const terminal = new FakeTerminal();
 	const first = new FakeQueryHarness();
@@ -32,7 +81,7 @@ test("resume reports local session metadata failure and keeps the SDK target vis
 		agentMessages: async (): Promise<SessionMessage[]> => [],
 		close: async () => undefined,
 	};
-	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(first, terminal, {
 		createQuery: (parameters) => {
 			queryCount += 1;
 			return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);
@@ -78,7 +127,7 @@ test("resume lookup resolving or rejecting after close cannot create a query aft
 			agentMessages: async (): Promise<SessionMessage[]> => [],
 			close: async () => undefined,
 		};
-		const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+		const controller = new AppController(testLaunch(), appDependencies(first, terminal, {
 			createQuery: (parameters) => {
 				queryCount += 1;
 				return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);
@@ -132,7 +181,7 @@ test("resume finds the target session after the first all-project history page",
 		close: async () => undefined,
 	};
 	let queryCount = 0;
-	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(first, terminal, {
 		createQuery: (parameters) => {
 			queryCount += 1;
 			return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);
@@ -184,7 +233,7 @@ test("resume history lookup stops before the next page after shutdown", async ()
 		close: async () => undefined,
 	};
 	let queryCount = 0;
-	controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+	controller = new AppController(testLaunch(), appDependencies(first, terminal, {
 		createQuery: (parameters) => {
 			queryCount += 1;
 			return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);

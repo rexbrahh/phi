@@ -101,6 +101,8 @@ class PTYChild:
 		self.cwd.mkdir()
 		self.home = directory / "home"
 		self.home.mkdir()
+		self.phi_home = directory / "phi-home"
+		self.phi_home.mkdir()
 		self.config = directory / "config"
 		self.config.mkdir()
 		self.markers_path = directory / "markers.jsonl"
@@ -198,6 +200,7 @@ class PTYChild:
 				"LANG": os.environ.get("LANG", "C.UTF-8"),
 				"TERM": "xterm-256color",
 				"PI_PROGRAM_STATUS": "0",
+				"PHI_HOME": str(self.phi_home),
 				"CLAUDE_CONFIG_DIR": str(self.config),
 				"PHI_PTY_MARKERS": str(self.markers_path),
 				"PHI_PTY_START_GATE": str(self.start_gate),

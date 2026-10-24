@@ -74,7 +74,6 @@ async function run(): Promise<void> {
 	const dependencies: Partial<AppDependencies> = {
 		createQuery: fake.createQuery,
 		terminal,
-		configRoot: cwd,
 		readClipboardImage: async () => null,
 		copyText: async () => undefined,
 	};

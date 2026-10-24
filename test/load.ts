@@ -6,13 +6,12 @@ import test from "node:test";
 import { performance } from "node:perf_hooks";
 import { Worker } from "node:worker_threads";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { parseArgs } from "../src/config.js";
 import { AppController } from "../src/ui/app.js";
 import { LOAD_TOOL_CALLS, LOAD_CHILD_CONVERSATIONS, LOAD_OVERSIZED_BYTES, LOAD_RESULT_BYTES, loadToolUseId } from "./helpers/load-events.js";
 import { fullRedrawCount, percentile, retainedStateCounts, waitForCondition, type LoadStateCounts } from "./helpers/load-assertions.js";
 import { FakeQueryHarness, type FakeQuerySampleGroup } from "./helpers/fake-query.js";
 import { LoadTerminal } from "./helpers/load-terminal.js";
-import { appDependencies } from "./helpers/ui-app.js";
+import { appDependencies, testLaunch } from "./helpers/ui-app.js";
 
 const EXPECTED_UNIQUE_EVENTS = 2 * LOAD_TOOL_CALLS + 5 * LOAD_CHILD_CONVERSATIONS + 1;
 const EXPECTED_DELIVERIES = 2 * EXPECTED_UNIQUE_EVENTS + 1;
@@ -83,7 +82,7 @@ test("load acceptance: 7,000 tool calls, 200 child histories, native tasks, and 
 	const cwd = await realpath(tempDirectory);
 	const fake = new FakeQueryHarness();
 	const terminal = new LoadTerminal();
-	const controller = new AppController(parseArgs(["--cwd", cwd]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(["--cwd", cwd]), appDependencies(fake, terminal, {
 		resolveLaunchOptions: async (launch) => launch,
 		readWorkspace: async (cwd) => ({ kind: "not-repository", cwd }),
 	}));

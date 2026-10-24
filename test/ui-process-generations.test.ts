@@ -2,14 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Options, SessionMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ImageAttachment } from "../src/attachments.js";
-import { parseArgs } from "../src/config.js";
 import type { HistoryReader } from "../src/history.js";
 import type { ShellReceipt } from "../src/shell.js";
 import type { WorkspaceInfo } from "../src/workspace.js";
 import { AppController } from "../src/ui/app.js";
 import { FakeQueryHarness } from "./helpers/fake-query.js";
 import { FakeTerminal } from "./helpers/terminal.js";
-import { appDependencies, historyMessage, waitFor } from "./helpers/ui-app.js";
+import { appDependencies, historyMessage, waitFor, testLaunch } from "./helpers/ui-app.js";
 
 async function waitForOutput(terminal: FakeTerminal, text: string): Promise<void> {
 	try {
@@ -36,7 +35,7 @@ test("process generations discard late query callbacks, history, image, cwd, and
 	const terminal = new FakeTerminal();
 	const first = new FakeQueryHarness();
 	const second = new FakeQueryHarness();
-	const launch = parseArgs([]);
+	const launch = testLaunch();
 	let sessionId: string | undefined;
 	let historyReads = 0;
 	const oldHistory = deferred<SessionMessage[]>();

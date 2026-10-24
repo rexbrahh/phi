@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { parseArgs } from "../src/config.js";
 import { AppController } from "../src/ui/app.js";
 import { FakeQueryHarness, initializedResponse } from "./helpers/fake-query.js";
 import { FakeTerminal } from "./helpers/terminal.js";
-import { appDependencies, waitFor } from "./helpers/ui-app.js";
+import { appDependencies, waitFor, testLaunch } from "./helpers/ui-app.js";
 
 function deferred<T>() {
 	let resolve!: (value: T) => void;
@@ -22,7 +21,7 @@ async function withController(
 	terminal: FakeTerminal,
 	action: (controller: AppController) => Promise<void>,
 ): Promise<void> {
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
 	const running = controller.run();
 	try {
 		await waitFor(() => controller.ready !== undefined);
@@ -89,7 +88,7 @@ test("Ctrl+Shift+P routes palette choices and preserves the composer draft", asy
 	const initialization = initializedResponse();
 	initialization.commands = [{ name: "initial-native", description: "Initial SDK command", argumentHint: "" }];
 	const fake = new FakeQueryHarness(Promise.resolve(initialization));
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
 	const running = controller.run();
 	try {
 		await waitFor(() => controller.ready !== undefined);
@@ -223,7 +222,7 @@ test("failed native settings keep prior selections and report the SDK error", as
 test("/phi quit closes the SDK session and restores the terminal", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
 	const running = controller.run();
 	await waitFor(() => controller.ready !== undefined);
 	controller.submitPrompt("/phi quit");
@@ -235,7 +234,7 @@ test("/phi quit closes the SDK session and restores the terminal", async () => {
 test("/phi quit shows a stop-and-exit confirmation while work remains", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
 	const running = controller.run();
 	await waitFor(() => controller.ready !== undefined);
 	controller.state.liveBackgroundTaskIds.add("background-before-exit");
@@ -263,7 +262,7 @@ test("session switch blocks prompts and literal sends across target replacement"
 		return interrupt.promise;
 	};
 	let queryCount = 0;
-	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(first, terminal, {
 		createQuery: (parameters) => {
 			queryCount += 1;
 			return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);
@@ -310,7 +309,7 @@ test("failed session stop blocks queued literal sends and preserves both drafts"
 		return stop.promise;
 	};
 	let queryCount = 0;
-	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(first, terminal, {
 		createQuery: (parameters) => {
 			queryCount += 1;
 			return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);

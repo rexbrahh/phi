@@ -127,6 +127,12 @@ async function main(): Promise<void> {
 		});
 
 	const fixture = await createFixture();
+	const environment: NodeJS.ProcessEnv = {
+		...process.env,
+		PHI_HOME: fixture.configRoot,
+		CLAUDE_CONFIG_DIR: join(fixture.root, "legacy-claude-config"),
+		CLAUDE_CODE_PLUGIN_CACHE_DIR: join(fixture.root, "legacy-plugin-cache"),
+	};
 	const sessions: Array<ReturnType<typeof startSession>> = [];
 	let reportedSpend: number | undefined;
 	let sessionId: string | undefined;
@@ -139,15 +145,14 @@ async function main(): Promise<void> {
 			"--cwd", fixture.repository,
 			"--permission-mode", "acceptEdits",
 			"--max-budget-usd", String(firstBudgetUsd),
-		]);
-		const firstOptions = buildOptions(initialLaunch, fixtureCallbacks(fixture));
+		], environment);
+		const firstOptions = buildOptions(initialLaunch, fixtureCallbacks(fixture), environment);
 		firstOptions.maxTurns = 3;
 		firstOptions.disallowedTools = ["WebFetch", "WebSearch"];
 		firstOptions.mcpServers = {};
 		firstOptions.strictMcpConfig = true;
 		firstOptions.env = {
 			...firstOptions.env,
-			CLAUDE_CONFIG_DIR: fixture.configRoot,
 			CLAUDE_CODE_MAX_TURNS: "2",
 			CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "2",
 		};
@@ -382,8 +387,9 @@ async function main(): Promise<void> {
 				"--resume", sessionId,
 				"--permission-mode", "acceptEdits",
 				"--max-budget-usd", String(remainingBudgetUsd),
-			]),
+			], environment),
 			fixtureCallbacks(fixture),
+			environment,
 		);
 		resumeOptions.maxTurns = 1;
 		resumeOptions.disallowedTools = ["WebFetch", "WebSearch"];
@@ -391,7 +397,6 @@ async function main(): Promise<void> {
 		resumeOptions.strictMcpConfig = true;
 		resumeOptions.env = {
 			...resumeOptions.env,
-			CLAUDE_CONFIG_DIR: fixture.configRoot,
 			CLAUDE_CODE_MAX_TURNS: "2",
 			CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "2",
 		};

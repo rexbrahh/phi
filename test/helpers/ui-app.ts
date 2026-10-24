@@ -1,7 +1,24 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SessionMessage } from "@anthropic-ai/claude-agent-sdk";
+import { parseArgs } from "../../src/config.js";
 import type { AppDependencies } from "../../src/ui/app.js";
 import type { FakeQueryHarness } from "./fake-query.js";
 import { FakeSignals, FakeTerminal } from "./terminal.js";
+
+const uiHome = mkdtempSync(join(tmpdir(), "phi-ui-home-"));
+
+export const uiEnvironment: NodeJS.ProcessEnv = {
+	...process.env,
+	PHI_HOME: uiHome,
+	CLAUDE_CONFIG_DIR: join(uiHome, "legacy-config"),
+	CLAUDE_CODE_PLUGIN_CACHE_DIR: join(uiHome, "legacy-plugin-cache"),
+};
+
+export function testLaunch(argv: string[] = []) {
+	return parseArgs(argv, uiEnvironment);
+}
 
 export function appDependencies(
 	fake: FakeQueryHarness,
@@ -9,6 +26,7 @@ export function appDependencies(
 	additional: Partial<AppDependencies> = {},
 ): Partial<AppDependencies> {
 	return {
+		environment: uiEnvironment,
 		createQuery: fake.createQuery,
 		terminal,
 		readClipboardImage: async () => null,

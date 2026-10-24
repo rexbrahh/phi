@@ -1,12 +1,5 @@
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { spawn } from "node:child_process";
-import {
-	query as sdkQuery,
-	listSessions,
-	type ListSessionsOptions,
-	type SDKSessionInfo,
-} from "@anthropic-ai/claude-agent-sdk";
+import { query as sdkQuery, type ListSessionsOptions, type SDKSessionInfo } from "@anthropic-ai/claude-agent-sdk";
 import {
 	copyText,
 	loadImage,
@@ -40,17 +33,19 @@ export interface AppDependencies {
 		sessionId: string,
 		signal: AbortSignal,
 		onUpdate: (preview: ShellPreview) => void,
+		home?: string,
 	): ShellJob;
 	resolveLaunchOptions: typeof resolveLaunchOptions;
-	listSessions(options: ListSessionsOptions): Promise<SDKSessionInfo[]>;
+	listSessions?(options: ListSessionsOptions): Promise<SDKSessionInfo[]>;
 	isInteractive(): boolean;
 	signals: SignalSource;
 	suspendProcess(): void;
 	openUrl(url: string): void;
 	configRoot: string;
+	environment: NodeJS.ProcessEnv;
 }
 
-export function createDefaultDependencies(): AppDependencies {
+export function createDefaultDependencies(home: string): AppDependencies {
 	return {
 		createQuery: sdkQuery,
 		terminal: new ProcessTerminal(),
@@ -62,7 +57,7 @@ export function createDefaultDependencies(): AppDependencies {
 		readWorkspace,
 		runUserShell,
 		resolveLaunchOptions,
-		listSessions,
+		environment: process.env,
 		isInteractive: () => Boolean(process.stdin.isTTY && process.stdout.isTTY),
 		signals: {
 			on: (signal, listener) => process.on(signal, listener),
@@ -72,7 +67,7 @@ export function createDefaultDependencies(): AppDependencies {
 			if (process.platform !== "win32") process.kill(process.pid, "SIGTSTP");
 		},
 		openUrl: openExternalUrl,
-		configRoot: process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"),
+		configRoot: home,
 	};
 }
 

@@ -31,6 +31,7 @@ export class AppShellController {
 		private readonly onNotice: (message: string) => void,
 		private readonly onReceipt: (receipt: ShellReceipt, preview: ShellPreview | undefined, command: string, cwd: string, sessionId: string) => void,
 		private readonly currentProcessGeneration: () => number,
+		private readonly home: string,
 	) {}
 
 	get running(): boolean {
@@ -75,7 +76,7 @@ export class AppShellController {
 				if (this.active?.job.jobId !== jobId || processGeneration !== this.currentProcessGeneration()) return;
 				this.active.preview = preview;
 				this.onChange();
-			});
+			}, this.home);
 			jobId = job.jobId;
 			const active: ActiveShellJob = {
 				controller,

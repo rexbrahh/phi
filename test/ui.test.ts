@@ -3,7 +3,6 @@ import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import type { ImageAttachment } from "../src/attachments.js";
-import { parseArgs } from "../src/config.js";
 import { applySdkMessage, createState } from "../src/state.js";
 import { AppController, runApp, type AppDependencies } from "../src/ui/app.js";
 import { sanitizeTerminalText } from "../src/ui/safe-text.js";
@@ -11,7 +10,7 @@ import { TranscriptView } from "../src/ui/transcript.js";
 import { FakeQueryHarness, initializedResponse } from "./helpers/fake-query.js";
 import { assistantMessage, textBlock } from "./helpers/sdk-events.js";
 import { FakeSignals, FakeTerminal } from "./helpers/terminal.js";
-import { appDependencies, waitFor } from "./helpers/ui-app.js";
+import { appDependencies, waitFor, testLaunch } from "./helpers/ui-app.js";
 import type { ShellReceipt } from "../src/shell.js";
 
 test("terminal sanitization removes ANSI, OSC, and disallowed controls", () => {
@@ -41,7 +40,7 @@ test("transcript rendering keeps Unicode safe at narrow widths", () => {
 test("runApp submits multiline text and restores the terminal on Ctrl+C", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const running = runApp(parseArgs([]), appDependencies(fake, terminal));
+	const running = runApp(testLaunch(), appDependencies(fake, terminal));
 	await waitFor(() => terminal.startCalls === 1);
 	await waitFor(() => fake.mcpStatusCalls === 1);
 
@@ -63,7 +62,7 @@ test("runApp submits multiline text and restores the terminal on Ctrl+C", async 
 test("runApp resolves launch options before it creates the SDK query", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const launch = parseArgs([]);
+	const launch = testLaunch();
 	const order: string[] = [];
 	const resolved = { ...launch, cwd: "/resolved/launch", model: "resolved-model" };
 	const running = runApp(launch, appDependencies(fake, terminal, {
@@ -95,7 +94,7 @@ test("bracketed paste expands through the editor and never selects shell mode", 
 			throw new Error("shell mode must not start for a paste");
 		}) as unknown as NonNullable<AppDependencies["runUserShell"]>,
 	});
-	const running = runApp(parseArgs([]), dependencies);
+	const running = runApp(testLaunch(), dependencies);
 	await waitFor(() => terminal.startCalls === 1);
 	await waitFor(() => fake.mcpStatusCalls === 1);
 
@@ -113,7 +112,7 @@ test("bracketed paste expands through the editor and never selects shell mode", 
 test("a paste received by a native dialog is not attached to the next prompt", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
 	const running = controller.run();
 	await waitFor(() => controller.ready !== undefined);
 	const canUseTool = fake.parameters?.options?.canUseTool;
@@ -141,7 +140,7 @@ test("a paste received by a native dialog is not attached to the next prompt", a
 test("paste metadata is discarded by local commands and shell jobs", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		runUserShell: (command, cwd, sessionId) => {
 			const receipt: ShellReceipt = {
 				jobId: "shell-paste-job",
@@ -181,7 +180,7 @@ test("paste metadata is discarded by local commands and shell jobs", async () =>
 test("replacing the editor prompt discards its prior paste metadata", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
 	const running = controller.run();
 	await waitFor(() => controller.ready !== undefined);
 
@@ -202,7 +201,7 @@ test("a rejected submit restores the editor draft", async () => {
 		apiProvider: "firstParty",
 		apiKeySource: "oauth",
 	})));
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
 	const running = controller.run();
 	await waitFor(() => terminal.startCalls === 1);
 	await waitFor(() => controller.ready !== undefined);
@@ -219,7 +218,7 @@ test("a rejected submit restores the editor draft", async () => {
 test("hiding a pending permission dialog preserves its request and editor draft", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
 	const running = controller.run();
 	await waitFor(() => terminal.startCalls === 1 && controller.ready !== undefined);
 
@@ -252,7 +251,7 @@ test("hiding a pending permission dialog preserves its request and editor draft"
 test("session closing cancels pending native interaction requests", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
 	const running = controller.run();
 	await waitFor(() => controller.ready !== undefined);
 	const callback = fake.parameters?.options?.canUseTool;
@@ -272,7 +271,7 @@ test("session closing cancels pending native interaction requests", async () => 
 test("Ctrl+C cancels only a visible native request and keeps input live", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
 	const running = controller.run();
 	await waitFor(() => controller.ready !== undefined);
 	terminal.input("draft survives cancellation");
@@ -305,7 +304,7 @@ test("Ctrl+C cancels only a visible native request and keeps input live", async 
 test("Ctrl+C interrupts foreground work without closing Phi", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
 	const running = controller.run();
 	await waitFor(() => controller.ready !== undefined);
 	controller.state.effectiveStatus.foreground = "running";
@@ -323,7 +322,7 @@ test("Ctrl+C interrupts foreground work without closing Phi", async () => {
 test("Ctrl+C requires confirmation before discarding a composer draft", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
 	const running = controller.run();
 	await waitFor(() => controller.ready !== undefined);
 	terminal.input("unsent draft");
@@ -349,7 +348,7 @@ test("Ctrl+C requires confirmation before discarding a composer draft", async ()
 test("Ctrl+O opens transcript and /phi questions reopens a hidden native question", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		createHistoryReader: () => ({
 			list: async () => [],
 			messages: async () => [],
@@ -391,7 +390,7 @@ test("native question and MCP URL callbacks use the pending dialog", async () =>
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
 	const openedUrls: string[] = [];
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		openUrl: (url) => openedUrls.push(url),
 	}));
 	const running = controller.run();
@@ -432,7 +431,7 @@ test("native question and MCP URL callbacks use the pending dialog", async () =>
 test("Escape closes an inspector before it interrupts foreground work", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
 	const running = controller.run();
 	await waitFor(() => terminal.startCalls === 1 && controller.ready !== undefined);
 	controller.state.effectiveStatus.foreground = "running";
@@ -453,14 +452,14 @@ test("typed bang snapshots the shell cwd and sends one bounded no-turn receipt a
 	const fake = new FakeQueryHarness();
 	const signals = new FakeSignals();
 	let resolveShell!: (receipt: ShellReceipt) => void;
-	let shellCall: { command: string; cwd: string; signal: AbortSignal } | undefined;
+	let shellCall: { command: string; cwd: string; signal: AbortSignal; home?: string } | undefined;
 	const shellDone = new Promise<ShellReceipt>((resolve) => {
 		resolveShell = resolve;
 	});
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		signals,
-		runUserShell: (command, cwd, _sessionId, signal, onUpdate) => {
-			shellCall = { command, cwd, signal };
+		runUserShell: (command, cwd, _sessionId, signal, onUpdate, home) => {
+			shellCall = { command, cwd, signal, home };
 			onUpdate({
 				stdout: "x".repeat(20_000),
 				stderr: "y".repeat(20_000),
@@ -480,14 +479,15 @@ test("typed bang snapshots the shell cwd and sends one bounded no-turn receipt a
 	terminal.input("\r");
 	await waitFor(() => shellCall !== undefined);
 	assert.equal(shellCall?.command, "pwd");
-	assert.equal(shellCall?.cwd, parseArgs([]).cwd);
+	assert.equal(shellCall?.cwd, testLaunch().cwd);
+	assert.equal(shellCall?.home, testLaunch().home);
 	terminal.input("\u0003");
 	assert.equal(shellCall?.signal.aborted, true);
 	resolveShell({
 		jobId: "local-shell-1",
 		sessionId: controller.currentSessionId ?? "",
 		command: "pwd",
-		cwd: parseArgs([]).cwd,
+		cwd: testLaunch().cwd,
 		exitCode: null,
 		signal: "SIGTERM",
 		aborted: true,
@@ -528,7 +528,7 @@ test("a delayed image result is discarded when the composer draft changes", asyn
 		mediaType: "image/png",
 		block: { type: "image", source: { type: "base64", media_type: "image/png", data: "YQ==" } },
 	};
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		loadImage: async () => imagePromise,
 	}));
 	const running = controller.run();
@@ -552,7 +552,7 @@ test("a late image failure cannot restore its command over a newer composer draf
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
 	let rejectImage!: (error: Error) => void;
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		loadImage: async () => new Promise((_resolve, reject) => { rejectImage = reject; }),
 	}));
 	const running = controller.run();
@@ -574,7 +574,7 @@ test("a late image failure cannot restore a command after the session changes", 
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
 	let rejectImage!: (error: Error) => void;
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		loadImage: async () => new Promise((_resolve, reject) => { rejectImage = reject; }),
 	}));
 	const running = controller.run();
@@ -610,7 +610,7 @@ test("exit aborts and drains a pending image load without attaching its late res
 	};
 	let loadSignal: AbortSignal | undefined;
 	let cancelled = false;
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		loadImage: (_path, signal) => new Promise((resolve) => {
 			loadSignal = signal;
 			signal?.addEventListener("abort", () => {
@@ -636,7 +636,7 @@ test("SIGTERM and Ctrl+Z restore the terminal and SIGCONT restarts it", async ()
 	const fake = new FakeQueryHarness();
 	const signals = new FakeSignals();
 	let suspendCalls = 0;
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		signals,
 		suspendProcess: () => { suspendCalls += 1; },
 	}));
@@ -655,7 +655,7 @@ test("SIGINT closes the session and returns the interrupt exit code", async () =
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
 	const signals = new FakeSignals();
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, { signals }));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, { signals }));
 	const running = controller.run();
 	await waitFor(() => controller.ready !== undefined);
 	signals.emit("SIGINT");
@@ -667,7 +667,7 @@ test("SIGINT closes the session and returns the interrupt exit code", async () =
 test("runApp refuses non-TTY startup and closes the terminal after SDK initialization failure", async () => {
 	const nonInteractiveTerminal = new FakeTerminal();
 	const nonInteractiveQuery = new FakeQueryHarness();
-	const code = await runApp(parseArgs([]), appDependencies(nonInteractiveQuery, nonInteractiveTerminal, {
+	const code = await runApp(testLaunch(), appDependencies(nonInteractiveQuery, nonInteractiveTerminal, {
 		isInteractive: () => false,
 	}));
 	assert.equal(code, 2);
@@ -676,7 +676,7 @@ test("runApp refuses non-TTY startup and closes the terminal after SDK initializ
 
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness(Promise.reject(new Error("initialization failed")));
-	const failedRun = runApp(parseArgs([]), appDependencies(fake, terminal));
+	const failedRun = runApp(testLaunch(), appDependencies(fake, terminal));
 	assert.equal(await failedRun, 1);
 	assert.equal(fake.closeCalls, 1);
 	assert.equal(terminal.stopCalls, 1);
@@ -696,7 +696,7 @@ test("startup diagnostic render failure still closes the query and restores the 
 
 	const terminal = new DiagnosticFailureTerminal();
 	const fake = new FakeQueryHarness(Promise.reject(new Error("initialization failed")));
-	await assert.rejects(runApp(parseArgs([]), appDependencies(fake, terminal)), /diagnostic rendering failed/);
+	await assert.rejects(runApp(testLaunch(), appDependencies(fake, terminal)), /diagnostic rendering failed/);
 	assert.equal(diagnosticRenderAttempted, true);
 	assert.deepEqual([fake.closeCalls, terminal.stopCalls], [1, 1]);
 });

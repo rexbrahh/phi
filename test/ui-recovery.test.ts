@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Options, SDKControlInitializeResponse, SDKMessage, SDKSessionInfo, SessionMessage } from "@anthropic-ai/claude-agent-sdk";
-import { parseArgs } from "../src/config.js";
 import type { HistoryReader } from "../src/history.js";
 import type { ShellReceipt } from "../src/shell.js";
 import { AppController } from "../src/ui/app.js";
 import { backgroundTasksChanged, conversationReset, userTextMessage } from "./helpers/sdk-events.js";
 import { FakeQueryHarness, initializedResponse } from "./helpers/fake-query.js";
 import { FakeTerminal } from "./helpers/terminal.js";
-import { appDependencies, historyMessage, waitFor } from "./helpers/ui-app.js";
+import { appDependencies, historyMessage, waitFor, testLaunch } from "./helpers/ui-app.js";
 
 const RESUME_ID = "00000000-0000-4000-8000-000000000901";
 
@@ -68,7 +67,7 @@ test("context, permissions, MCP reconnect, reload, sessions, and local views use
 	fake.supportedCommandsResult = [{ name: "fresh-native", description: "fresh", argumentHint: "" }];
 	const copied: string[] = [];
 	const sessions: SDKSessionInfo[] = [{ sessionId: RESUME_ID, summary: "project session", lastModified: 1, cwd: "/repo" }];
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		copyText: async (text) => { copied.push(text); },
 		createHistoryReader: () => makeHistoryReader(sessions),
 	}));
@@ -161,10 +160,12 @@ test("new, fork, and resume stop old work and open SDK sessions in order", async
 		},
 		createHistoryReader: () => history,
 	});
-	const controller = new AppController(parseArgs([]), dependencies);
+	const launch = testLaunch();
+	const controller = new AppController(launch, dependencies);
 	const running = controller.run();
 	try {
 		await waitFor(() => controller.ready !== undefined);
+		assert.equal(first.parameters?.options?.env?.CLAUDE_CONFIG_DIR, launch.home);
 		const firstPermission = first.parameters?.options?.canUseTool;
 		assert.ok(firstPermission);
 		const oldPermission = firstPermission("Read", {}, {
@@ -197,6 +198,7 @@ test("new, fork, and resume stop old work and open SDK sessions in order", async
 		assert.equal(second.parameters?.options?.resume, undefined);
 		assert.equal(second.parameters?.options?.forkSession, undefined);
 		assert.ok(second.parameters?.options?.sessionId);
+		assert.equal(second.parameters?.options?.env?.CLAUDE_CONFIG_DIR, launch.home);
 		assert.equal(controller.state.liveBackgroundTaskIds.size, 0);
 		assert.equal((await waitForResult(oldPermission, "old permission cancellation"))?.behavior, "deny");
 
@@ -230,6 +232,7 @@ test("new, fork, and resume stop old work and open SDK sessions in order", async
 		assert.equal(third.parameters?.options?.resume, newSessionId);
 		assert.equal(third.parameters?.options?.forkSession, true);
 		assert.notEqual(third.parameters?.options?.sessionId, newSessionId);
+		assert.equal(third.parameters?.options?.env?.CLAUDE_CONFIG_DIR, launch.home);
 
 		const thirdQuestion = third.parameters?.options?.canUseTool;
 		assert.ok(thirdQuestion);
@@ -261,6 +264,7 @@ test("new, fork, and resume stop old work and open SDK sessions in order", async
 		assert.equal(fourth.parameters?.options?.resume, RESUME_ID);
 		assert.equal(fourth.parameters?.options?.cwd, "/target/project");
 		assert.equal(fourth.parameters?.options?.forkSession, undefined);
+		assert.equal(fourth.parameters?.options?.env?.CLAUDE_CONFIG_DIR, launch.home);
 		assert.equal((await history.list({})).some((session) => session.sessionId === RESUME_ID), true);
 
 		const resumedElicitation = fourth.parameters?.options?.onElicitation;
@@ -293,7 +297,7 @@ test("failed stop or target resume keeps the current target and reports the fail
 		createQuery: first.createQuery,
 		createHistoryReader: () => makeHistoryReader([{ sessionId: RESUME_ID, summary: "target", lastModified: 1, cwd: "/target" }]),
 	});
-	const controller = new AppController(parseArgs([]), dependencies);
+	const controller = new AppController(testLaunch(), dependencies);
 	const running = controller.run();
 	try {
 		await waitFor(() => controller.ready !== undefined);
@@ -319,7 +323,7 @@ test("failed stop or target resume keeps the current target and reports the fail
 	const failedQuery = new FakeQueryHarness(failedInitialization);
 	const queries = [oldQuery, failedQuery];
 	let index = 0;
-	const failedController = new AppController(parseArgs([]), appDependencies(oldQuery, failedTerminal, {
+	const failedController = new AppController(testLaunch(), appDependencies(oldQuery, failedTerminal, {
 		createQuery: (parameters) => {
 			const query = queries[index++];
 			assert.ok(query);
@@ -349,7 +353,7 @@ test("failed query cleanup leaves the old target visible as an error and does no
 	const second = new FakeQueryHarness();
 	first.closeError = new Error("close refused");
 	let queryCount = 0;
-	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(first, terminal, {
 		createQuery: (parameters) => {
 			queryCount += 1;
 			return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);
@@ -377,7 +381,7 @@ test("rewind takes a fresh dry run and needs a second explicit command", async (
 	const fake = new FakeQueryHarness();
 	fake.rewindDryRunResult = { canRewind: true, filesChanged: ["src/file.ts"], insertions: 2, deletions: 1 };
 	fake.rewindApplyResult = { canRewind: true, filesChanged: ["src/file.ts"], skippedLinks: 1 };
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
 	const running = controller.run();
 	try {
 		await waitFor(() => controller.ready !== undefined);
@@ -411,7 +415,7 @@ test("rewind takes a fresh dry run and needs a second explicit command", async (
 	const unavailableTerminal = new FakeTerminal();
 	const unavailable = new FakeQueryHarness();
 	unavailable.rewindDryRunResult = { canRewind: false, error: "checkpoint expired" };
-	const unavailableController = new AppController(parseArgs([]), appDependencies(unavailable, unavailableTerminal));
+	const unavailableController = new AppController(testLaunch(), appDependencies(unavailable, unavailableTerminal));
 	const unavailableRun = unavailableController.run();
 	try {
 		await waitFor(() => unavailableController.ready !== undefined);
@@ -436,7 +440,7 @@ test("conversation reset retains tasks; shutdown drains SDK, shell, history, and
 	fake.events = events;
 	let shellStarted = false;
 	const history = makeHistoryReader([], events);
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		createHistoryReader: () => history,
 		runUserShell: (_command, cwd, sessionId, signal) => ({
 			jobId: "shell-1",
@@ -495,7 +499,7 @@ test("shutdown during a confirmed interrupt prevents a late target query", async
 		return interrupt.promise;
 	};
 	let queryCount = 0;
-	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(first, terminal, {
 		createQuery: (parameters) => {
 			queryCount += 1;
 			return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);
@@ -533,7 +537,7 @@ test("shutdown waits for cleanup of a target query opened before initialization 
 	const targetInitialization = deferred<SDKControlInitializeResponse>();
 	const second = new FakeQueryHarness(targetInitialization.promise);
 	let queryCount = 0;
-	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(first, terminal, {
 		createQuery: (parameters) => {
 			queryCount += 1;
 			return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);
@@ -570,7 +574,7 @@ test("shutdown during old query close prevents opening the transition target", a
 	const second = new FakeQueryHarness();
 	first.query.close = () => { first.closeCalls += 1; };
 	let queryCount = 0;
-	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(first, terminal, {
 		createQuery: (parameters) => {
 			queryCount += 1;
 			return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);

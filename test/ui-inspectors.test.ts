@@ -6,11 +6,10 @@ import test from "node:test";
 import type { AutocompleteProvider } from "@earendil-works/pi-tui";
 import type { SessionMessage } from "@anthropic-ai/claude-agent-sdk";
 import { loadImage as loadImageFile } from "../src/attachments.js";
-import { parseArgs } from "../src/config.js";
 import { AppController } from "../src/ui/app.js";
 import { FakeQueryHarness } from "./helpers/fake-query.js";
 import { FakeTerminal } from "./helpers/terminal.js";
-import { appDependencies, historyMessage, waitFor } from "./helpers/ui-app.js";
+import { appDependencies, historyMessage, waitFor, testLaunch } from "./helpers/ui-app.js";
 import type { WorkspaceInfo } from "../src/workspace.js";
 
 test("history page generations reject an older response and close the reader", async () => {
@@ -27,7 +26,7 @@ test("history page generations reject an older response and close the reader", a
 		agentMessages: async () => [],
 		close: async () => { closeCalls += 1; },
 	};
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		createHistoryReader: () => reader,
 	}));
 	const running = controller.run();
@@ -56,7 +55,7 @@ test("active History refreshes and clears transient state after a same-ID resume
 	let resolveStaleHistory: ((messages: SessionMessage[]) => void) | undefined;
 	const staleHistory = new Promise<SessionMessage[]>((resolve) => { resolveStaleHistory = resolve; });
 	const reader = {
-		list: async () => sessionId ? [{ sessionId, summary: "current session", lastModified: 1, cwd: parseArgs([]).cwd }] : [],
+		list: async () => sessionId ? [{ sessionId, summary: "current session", lastModified: 1, cwd: testLaunch().cwd }] : [],
 		messages: async (id: string) => {
 			historyReads.push(id);
 			if (historyReads.length === 1) return staleHistory;
@@ -66,7 +65,7 @@ test("active History refreshes and clears transient state after a same-ID resume
 		agentMessages: async () => [],
 		close: async () => undefined,
 	};
-	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(first, terminal, {
 		createQuery: (parameters) => (queryCount++ === 0 ? first : second).createQuery(parameters),
 		createHistoryReader: () => reader,
 	}));
@@ -103,7 +102,7 @@ test("active Tasks refreshes child transcripts and drops stale loading state aft
 	let childReads = 0;
 	let resolveStaleChild: ((messages: SessionMessage[]) => void) | undefined;
 	const reader = {
-		list: async () => sessionId ? [{ sessionId, summary: "current session", lastModified: 1, cwd: parseArgs([]).cwd }] : [],
+		list: async () => sessionId ? [{ sessionId, summary: "current session", lastModified: 1, cwd: testLaunch().cwd }] : [],
 		messages: async () => [],
 		agents: async () => agentReads++ === 0 ? ["old-child"] : ["resumed-child"],
 		agentMessages: async () => {
@@ -113,7 +112,7 @@ test("active Tasks refreshes child transcripts and drops stale loading state aft
 		},
 		close: async () => undefined,
 	};
-	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(first, terminal, {
 		createQuery: (parameters) => (queryCount++ === 0 ? first : second).createQuery(parameters),
 		createHistoryReader: () => reader,
 	}));
@@ -148,19 +147,19 @@ test("CwdChanged refreshes the displayed workspace and rejects the previous cwd 
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
 	const reads: Array<{ cwd: string; resolve(value: WorkspaceInfo): void }> = [];
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		readWorkspace: (cwd) => new Promise((resolve) => reads.push({ cwd, resolve })),
 	}));
 	const running = controller.run();
 	await waitFor(() => controller.ready !== undefined && reads.length === 1);
 	const hook = fake.parameters?.options?.hooks?.CwdChanged?.[0]?.hooks[0];
 	assert.ok(hook);
-	await hook({ hook_event_name: "CwdChanged", old_cwd: parseArgs([]).cwd, new_cwd: "/new/cwd" } as never, undefined, { signal: new AbortController().signal });
+	await hook({ hook_event_name: "CwdChanged", old_cwd: testLaunch().cwd, new_cwd: "/new/cwd" } as never, undefined, { signal: new AbortController().signal });
 	assert.equal(controller.state.cwd, "/new/cwd");
 	await waitFor(() => reads.length === 2);
 	reads[1]?.resolve({ kind: "not-repository", cwd: "/new/cwd" });
 	await waitFor(() => controller.views.inspectors.model.workspace?.cwd === "/new/cwd");
-	reads[0]?.resolve({ kind: "not-repository", cwd: parseArgs([]).cwd });
+	reads[0]?.resolve({ kind: "not-repository", cwd: testLaunch().cwd });
 	await new Promise<void>((resolve) => setTimeout(resolve, 15));
 	assert.equal(controller.views.inspectors.model.workspace?.cwd, "/new/cwd");
 	terminal.input("\u0003");
@@ -181,7 +180,7 @@ test("CwdChanged refreshes relative completion and image attachment paths", asyn
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
 	const loadedPaths: string[] = [];
-	const controller = new AppController(parseArgs(["--cwd", launchCwd]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(["--cwd", launchCwd]), appDependencies(fake, terminal, {
 		loadImage: async (path, signal) => {
 			loadedPaths.push(path);
 			return loadImageFile(path, signal);
@@ -238,14 +237,14 @@ test("a failed workspace read is ignored after cwd changes but before its deboun
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
 	const reads: Array<{ cwd: string; reject(error: Error): void }> = [];
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		readWorkspace: (cwd) => new Promise((_resolve, reject) => reads.push({ cwd, reject })),
 	}));
 	const running = controller.run();
 	await waitFor(() => controller.ready !== undefined && reads.length === 1);
 	const hook = fake.parameters?.options?.hooks?.CwdChanged?.[0]?.hooks[0];
 	assert.ok(hook);
-	await hook({ hook_event_name: "CwdChanged", old_cwd: parseArgs([]).cwd, new_cwd: "/new/cwd" } as never, undefined, { signal: new AbortController().signal });
+	await hook({ hook_event_name: "CwdChanged", old_cwd: testLaunch().cwd, new_cwd: "/new/cwd" } as never, undefined, { signal: new AbortController().signal });
 	assert.equal(controller.state.cwd, "/new/cwd");
 	reads[0]?.reject(new Error("old cwd read failed"));
 	await new Promise<void>((resolve) => setTimeout(resolve, 15));
@@ -265,6 +264,7 @@ test("workflow journal phases remain observations and do not complete an SDK tas
 	}) => void;
 	let journalReads = 0;
 	let historyClosed = false;
+	let workflowRoot: string | undefined;
 	const historyReader = {
 		list: async () => [],
 		messages: async () => [],
@@ -272,10 +272,12 @@ test("workflow journal phases remain observations and do not complete an SDK tas
 		agentMessages: async () => [],
 		close: async () => { historyClosed = true; },
 	};
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const launch = testLaunch();
+	const controller = new AppController(launch, appDependencies(fake, terminal, {
 		createHistoryReader: () => historyReader,
-		readWorkflowJournal: async () => {
+		readWorkflowJournal: async (reference) => {
 			journalReads += 1;
+			workflowRoot = reference.configRoot;
 			return new Promise((resolve) => { resolvePage = resolve; });
 		},
 	}));
@@ -302,6 +304,7 @@ test("workflow journal phases remain observations and do not complete an SDK tas
 	} as never);
 	controller.showInspector("tasks");
 	await waitFor(() => journalReads === 1);
+	assert.equal(workflowRoot, launch.home);
 	resolvePage?.({
 		metadata: { records: [{ type: "result", taskId: "workflow-task", phase: "build" }] },
 		warnings: [],
@@ -319,7 +322,7 @@ test("workflow journal phases remain observations and do not complete an SDK tas
 test("selected workflow details render and sanitize the SDK script path", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
 	const running = controller.run();
 	try {
 		await waitFor(() => controller.ready !== undefined);
@@ -358,7 +361,7 @@ test("a stale workflow failure cannot overwrite the selected task's journal stat
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
 	let rejectJournal!: (error: Error) => void;
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		createHistoryReader: () => ({
 			list: async () => [],
 			messages: async () => [],
@@ -410,7 +413,7 @@ test("child selection survives History/Tasks navigation without changing copied 
 	const fake = new FakeQueryHarness();
 	let journalReads = 0;
 	const copied: string[] = [];
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		createHistoryReader: () => ({
 			list: async () => [],
 			messages: async () => [],
@@ -483,7 +486,7 @@ test("Ctrl+Y copies complete native tool-result text from the loaded history pag
 	const sentinel = "NATIVE_TOOL_RESULT_END";
 	const resultText = "r".repeat(37 * 1024 - sentinel.length) + sentinel;
 	const copied: string[] = [];
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		createHistoryReader: () => historyReaderWithMessages([nativeToolResultMessage("native-result", resultText)]),
 		copyText: async (text) => { copied.push(text); },
 	}));
@@ -506,7 +509,7 @@ test("Ctrl+Y copies complete native tool-result text from the loaded history pag
 test("native history tool-result text is sanitized before rendering", () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
 	controller.views.inspectors.model.panel = "history";
 	controller.views.inspectors.model.historyMessages = [
 		nativeToolResultMessage("unsafe-native-result", "before\u001b[2Jafter"),
@@ -523,7 +526,7 @@ test("history search finds native text beyond the preview cap and copies its vis
 	const sentinel = "NATIVE_TOOL_RESULT_END";
 	const resultText = "r".repeat(37 * 1024 - sentinel.length) + sentinel;
 	const copied: string[] = [];
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		createHistoryReader: () => ({
 			...historyReaderWithMessages([
 				nativeToolResultMessage("native-result", resultText),
@@ -569,7 +572,7 @@ test("history search finds native text beyond the preview cap and copies its vis
 test("task and child identifiers and types are sanitized before inspector rendering", () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
 	const taskId = "task-\u001b[2J";
 	const taskType = "workflow-\u001b]0;owned-title\u0007";
 	const childId = "child-\u001b[31m";
@@ -593,7 +596,7 @@ test("task and child identifiers and types are sanitized before inspector render
 test("history instructions name the Tasks panel for Tab child selection", () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
-	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal, {
 		createHistoryReader: () => ({
 			list: async () => [],
 			messages: async () => [],
