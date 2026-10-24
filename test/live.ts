@@ -554,6 +554,7 @@ async function createFixture(): Promise<HarnessFixture> {
 		await Promise.all([
 			mkdir(repository, { recursive: true, mode: 0o700 }),
 			mkdir(configRoot, { recursive: true, mode: 0o700 }),
+			mkdir(join(configRoot, "tmp"), { recursive: true, mode: 0o700 }),
 			mkdir(homeRoot, { recursive: true, mode: 0o700 }),
 			mkdir(tempRoot, { recursive: true, mode: 0o700 }),
 			mkdir(pluginCacheRoot, { recursive: true, mode: 0o700 }),
