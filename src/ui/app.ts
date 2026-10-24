@@ -104,6 +104,7 @@ export class AppController {
 	private transitionTail: Promise<void> = Promise.resolve();
 	private localCommandTail: Promise<void> = Promise.resolve();
 	private pendingTransition: PendingSessionTransition | undefined;
+	private sessionTransitionInProgress = false;
 	private sessionError: string | undefined;
 	private pendingRewindId: string | undefined;
 	private userInteractionVersion = 0;
@@ -183,6 +184,7 @@ export class AppController {
 			shell: this.shell,
 			session: () => this.session,
 			sessionId: () => this.sessionId,
+			isSessionTransitionInProgress: () => this.sessionTransitionInProgress,
 			leaveShellMode: () => this.shell.leave(),
 			dispatchLocalCommand: (command) => this.queueLocalCommand(command),
 			onPromptSubmitted: () => this.notePromptSubmitted(),
@@ -303,6 +305,13 @@ export class AppController {
 	private queueLocalCommand(command: LocalCommand): void {
 		if (command.kind === "attach") {
 			// Capture the current draft and process generation before the next input event.
+			void dispatchLocalCommand(command, this).catch((error: unknown) => {
+				this.showNotice(`Could not run /phi ${command.kind}: ${errorText(error)}`);
+			});
+			return;
+		}
+		if (command.kind === "send") {
+			// Let the transition guard see the literal input at submission time.
 			void dispatchLocalCommand(command, this).catch((error: unknown) => {
 				this.showNotice(`Could not run /phi ${command.kind}: ${errorText(error)}`);
 			});
@@ -472,7 +481,8 @@ export class AppController {
 	}
 
 	private async openSession(launch: LaunchOptions, generation: number, replacement: boolean): Promise<void> {
-		const isCurrent = (): boolean => generation === this.processGeneration && !this.closing;
+		const isCurrent = (): boolean => generation === this.processGeneration && !this.exitRequested && !this.closing;
+		if (!isCurrent()) return;
 		const observer = new AppSessionObserver(
 			this.state,
 			this.interactions,
@@ -564,13 +574,17 @@ export class AppController {
 	}
 
 	private async replaceSessionNow(command: SessionTransition): Promise<void> {
+		let generation = this.processGeneration;
+		const isCurrent = (): boolean => generation === this.processGeneration && !this.exitRequested && !this.closing;
+		if (!isCurrent()) return;
 		let target: PendingSessionTransition | undefined;
 		const key = command.kind === "resume" ? `resume:${command.sessionId}` : command.kind;
 		if (this.pendingTransition?.key === key && this.pendingTransition.expiresAt >= Date.now()) {
 			target = this.pendingTransition;
 		} else {
-			target = await this.createSessionTarget(command, key);
+			target = await this.createSessionTarget(command, key, isCurrent);
 		}
+		if (!target || !isCurrent()) return;
 		const confirmed = this.pendingTransition?.key === key && this.pendingTransition.expiresAt >= Date.now();
 		this.pendingTransition = undefined;
 		if (this.hasActiveWork() && !confirmed) {
@@ -579,60 +593,79 @@ export class AppController {
 			return;
 		}
 
-		const oldSession = this.session;
-		const oldQuery = oldSession?.query;
-		if (oldQuery) {
+		this.sessionTransitionInProgress = true;
+		try {
+			const oldSession = this.session;
+			const oldQuery = oldSession?.query;
+			if (oldQuery) {
+				try {
+					if (this.state.effectiveStatus.foreground === "running") {
+						await oldQuery.interrupt();
+						if (!isCurrent()) return;
+					}
+					for (const taskId of this.tasksToStopBeforeSwitch()) {
+						await oldQuery.stopTask(taskId);
+						if (!isCurrent()) return;
+					}
+				} catch (error) {
+					if (isCurrent()) this.showNotice(`Could not stop current SDK work; ${target.sessionId} was not opened: ${errorText(error)}`);
+					return;
+				}
+			}
+
+			this.interactions.cancelAll("Session switch requested");
+			generation = ++this.processGeneration;
+			this.views.inspectors.setSession(this.sessionId ?? "", generation, this.state.cwd);
+			await this.shell.stop();
+			if (!isCurrent()) return;
+			this.shell.leave();
 			try {
-				if (this.state.effectiveStatus.foreground === "running") await oldQuery.interrupt();
-				for (const taskId of this.tasksToStopBeforeSwitch()) await oldQuery.stopTask(taskId);
+				await oldSession?.close();
 			} catch (error) {
-				this.showNotice(`Could not stop current SDK work; ${target.sessionId} was not opened: ${errorText(error)}`);
+				if (!isCurrent()) return;
+				if (this.session === oldSession) this.session = undefined;
+				this.ready = undefined;
+				this.sessionError = `Could not close the current SDK query; ${target.sessionId} was not opened: ${errorText(error)}`;
+				this.showNotice(this.sessionError);
 				return;
 			}
-		}
-
-		this.interactions.cancelAll("Session switch requested");
-		const generation = ++this.processGeneration;
-		this.views.inspectors.setSession(this.sessionId ?? "", generation, this.state.cwd);
-		await this.shell.stop();
-		this.shell.leave();
-		try {
-			await oldSession?.close();
-		} catch (error) {
+			if (!isCurrent()) return;
 			if (this.session === oldSession) this.session = undefined;
 			this.ready = undefined;
-			this.sessionError = `Could not close the current SDK query; ${target.sessionId} was not opened: ${errorText(error)}`;
-			this.showNotice(this.sessionError);
-			return;
-		}
-		if (this.session === oldSession) this.session = undefined;
-		this.ready = undefined;
-		this.sessionError = undefined;
-		this.lastCheckpointId = undefined;
-		this.reportedModelValueOverride = undefined;
-		this.state.cwd = target.launch.cwd;
-		resetStateForProcess(this.state, target.launch.cwd);
-		this.sessionId = target.sessionId;
-		this.launch = target.launch;
-		this.resetSessionControls(target.launch);
-		this.userInteractionVersion = 0;
-		this.completedInteractionVersion = -1;
-		this.pendingRewindId = undefined;
-		this.showNotice(target.cwdWarning
-			? `Opening session ${target.sessionId} with working directory ${target.launch.cwd}. ${target.cwdWarning}`
-			: `Opening session ${target.sessionId}.`);
-		try {
-			await this.openSession(target.launch, generation, true);
-			if (!this.exitRequested && generation === this.processGeneration) void this.refreshWorkspace(target.launch.cwd);
-		} catch (error) {
-			if (generation === this.processGeneration && !this.sessionError) {
-				this.sessionError = `Could not open session ${target.sessionId}: ${errorText(error)}`;
-				this.showNotice(this.sessionError);
+			this.sessionError = undefined;
+			this.lastCheckpointId = undefined;
+			this.reportedModelValueOverride = undefined;
+			this.state.cwd = target.launch.cwd;
+			resetStateForProcess(this.state, target.launch.cwd);
+			this.sessionId = target.sessionId;
+			this.launch = target.launch;
+			this.resetSessionControls(target.launch);
+			this.userInteractionVersion = 0;
+			this.completedInteractionVersion = -1;
+			this.pendingRewindId = undefined;
+			this.showNotice(target.cwdWarning
+				? `Opening session ${target.sessionId} with working directory ${target.launch.cwd}. ${target.cwdWarning}`
+				: `Opening session ${target.sessionId}.`);
+			try {
+				await this.openSession(target.launch, generation, true);
+				if (!this.exitRequested && generation === this.processGeneration) void this.refreshWorkspace(target.launch.cwd);
+			} catch (error) {
+				if (generation === this.processGeneration && !this.sessionError) {
+					this.sessionError = `Could not open session ${target.sessionId}: ${errorText(error)}`;
+					this.showNotice(this.sessionError);
+				}
 			}
+		} finally {
+			this.sessionTransitionInProgress = false;
 		}
 	}
 
-	private async createSessionTarget(command: SessionTransition, key: string): Promise<PendingSessionTransition> {
+	private async createSessionTarget(
+		command: SessionTransition,
+		key: string,
+		isCurrent: () => boolean,
+	): Promise<PendingSessionTransition | undefined> {
+		if (!isCurrent()) return undefined;
 		if (command.kind === "new") {
 			const sessionId = randomUUID();
 			return {
@@ -656,14 +689,19 @@ export class AppController {
 		let cwdWarning: string | undefined;
 		try {
 			const sessions = await this.listAllSessions({ limit: 1_000, offset: 0 });
+			if (!isCurrent()) return undefined;
 			const session = sessions.find((candidate) => candidate.sessionId === command.sessionId);
 			if (session?.cwd) sessionCwd = session.cwd;
-			else cwdWarning = session
-				? `Local history did not report a working directory for ${command.sessionId}; this resume uses the current directory.`
-				: `Local history did not contain ${command.sessionId}; this resume uses the current directory.`;
+			else if (session) {
+				cwdWarning = `Local history did not report a working directory for ${command.sessionId}; this resume uses the current directory.`;
+			} else {
+				cwdWarning = `Local history did not contain ${command.sessionId}; this resume uses the current directory.`;
+			}
 		} catch (error) {
+			if (!isCurrent()) return undefined;
 			cwdWarning = `Local session metadata could not be read (${errorText(error)}); this resume uses the current directory.`;
 		}
+		if (!isCurrent()) return undefined;
 		return {
 			key,
 			expiresAt: Date.now() + 30_000,

@@ -7,6 +7,16 @@ import { FakeQueryHarness, initializedResponse } from "./helpers/fake-query.js";
 import { FakeTerminal } from "./helpers/terminal.js";
 import { appDependencies, waitFor } from "./helpers/ui-app.js";
 
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	let reject!: (error: Error) => void;
+	const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise;
+		reject = rejectPromise;
+	});
+	return { promise, resolve, reject };
+}
+
 async function withController(
 	fake: FakeQueryHarness,
 	terminal: FakeTerminal,
@@ -178,4 +188,101 @@ test("/phi quit closes the SDK session and restores the terminal", async () => {
 	assert.equal(await running, 0);
 	assert.equal(fake.closeCalls, 1);
 	assert.equal(terminal.stopCalls, 1);
+});
+
+test("session switch blocks prompts and literal sends across target replacement", async () => {
+	const terminal = new FakeTerminal();
+	const first = new FakeQueryHarness();
+	const second = new FakeQueryHarness();
+	const interrupt = deferred<Awaited<ReturnType<typeof first.query.interrupt>>>();
+	first.query.interrupt = () => {
+		first.interruptCalls += 1;
+		return interrupt.promise;
+	};
+	let queryCount = 0;
+	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+		createQuery: (parameters) => {
+			queryCount += 1;
+			return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);
+		},
+	}));
+	const running = controller.run();
+	try {
+		await waitFor(() => controller.ready !== undefined);
+		controller.state.effectiveStatus.foreground = "running";
+		controller.submitPrompt("/phi new");
+		controller.submitPrompt("/phi new");
+		await waitFor(() => first.interruptCalls === 1);
+
+		controller.submitPrompt("keep ordinary draft");
+		const draftPreserved = controller.views.editor.getText() === "keep ordinary draft";
+		controller.submitPrompt("/phi send   literal draft");
+		const literalDraftPreserved = controller.views.editor.getText() === "  literal draft";
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		const messagesWhileInterruptPending = first.receivedMessages.length;
+
+		interrupt.resolve(undefined);
+		await waitFor(() => second.parameters !== undefined && controller.ready !== undefined);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(draftPreserved, true);
+		assert.equal(literalDraftPreserved, true);
+		assert.equal(messagesWhileInterruptPending, 0);
+		assert.equal(first.receivedMessages.length, 0);
+		assert.equal(second.receivedMessages.length, 0);
+		assert.equal(controller.views.editor.getText(), "  literal draft");
+	} finally {
+		interrupt.resolve(undefined);
+		await controller.close(0);
+		await running;
+	}
+});
+
+test("failed session stop blocks queued literal sends and preserves both drafts", async () => {
+	const terminal = new FakeTerminal();
+	const first = new FakeQueryHarness();
+	const second = new FakeQueryHarness();
+	const stop = deferred<void>();
+	first.query.stopTask = (taskId) => {
+		first.stopTaskCalls.push(taskId);
+		return stop.promise;
+	};
+	let queryCount = 0;
+	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+		createQuery: (parameters) => {
+			queryCount += 1;
+			return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);
+		},
+	}));
+	const running = controller.run();
+	try {
+		await waitFor(() => controller.ready !== undefined);
+		const originalSessionId = controller.currentSessionId;
+		controller.state.liveBackgroundTaskIds.add("background-1");
+		controller.submitPrompt("/phi new");
+		controller.submitPrompt("/phi new");
+		await waitFor(() => first.stopTaskCalls.length === 1);
+
+		controller.submitPrompt("ordinary draft");
+		const ordinaryDraftPreserved = controller.views.editor.getText() === "ordinary draft";
+		controller.submitPrompt("/phi send   literal draft");
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		const messagesWhileStopPending = first.receivedMessages.length;
+		const literalDraftPreserved = controller.views.editor.getText() === "  literal draft";
+		assert.equal(second.receivedMessages.length, 0);
+
+		stop.reject(new Error("stop denied"));
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(messagesWhileStopPending, 0);
+		assert.equal(ordinaryDraftPreserved, true);
+		assert.equal(literalDraftPreserved, true);
+		assert.equal(first.receivedMessages.length, 0);
+		assert.equal(first.closeCalls, 0);
+		assert.equal(second.parameters, undefined);
+		assert.equal(controller.currentSessionId, originalSessionId);
+		assert.equal(controller.views.editor.getText(), "  literal draft");
+	} finally {
+		stop.resolve();
+		await controller.close(0);
+		await running;
+	}
 });

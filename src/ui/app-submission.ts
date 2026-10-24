@@ -19,6 +19,7 @@ export interface AppSubmissionOptions {
 	shell: AppShellController;
 	session(): Session | undefined;
 	sessionId(): string | undefined;
+	isSessionTransitionInProgress(): boolean;
 	leaveShellMode(): void;
 	dispatchLocalCommand(command: LocalCommand): void;
 	onPromptSubmitted(): void;
@@ -61,6 +62,11 @@ export class AppSubmissionController {
 	}
 
 	private sendPrompt(text: string): void {
+		if (this.options.isSessionTransitionInProgress()) {
+			this.options.editor.setText(text);
+			this.options.showNotice("A session switch is in progress. Your draft is still in the composer.");
+			return;
+		}
 		const session = this.options.session();
 		const sessionId = this.options.sessionId();
 		if (sessionId === undefined || !session) {

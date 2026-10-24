@@ -1,16 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { SDKMessage, SDKSessionInfo, SessionMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { SDKControlInitializeResponse, SDKMessage, SDKSessionInfo, SessionMessage } from "@anthropic-ai/claude-agent-sdk";
 import { parseArgs } from "../src/config.js";
 import type { HistoryReader } from "../src/history.js";
 import type { ShellReceipt } from "../src/shell.js";
 import { AppController } from "../src/ui/app.js";
 import { backgroundTasksChanged, conversationReset, userTextMessage } from "./helpers/sdk-events.js";
-import { FakeQueryHarness } from "./helpers/fake-query.js";
+import { FakeQueryHarness, initializedResponse } from "./helpers/fake-query.js";
 import { FakeTerminal } from "./helpers/terminal.js";
 import { appDependencies, historyMessage, waitFor } from "./helpers/ui-app.js";
 
 const RESUME_ID = "00000000-0000-4000-8000-000000000901";
+
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	let reject!: (error: Error) => void;
+	const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise;
+		reject = rejectPromise;
+	});
+	return { promise, resolve, reject };
+}
 
 async function waitForOutput(terminal: FakeTerminal, text: string): Promise<void> {
 	try {
@@ -381,6 +391,85 @@ test("conversation reset retains tasks; shutdown drains SDK, shell, history, and
 		const terminalStop = events.indexOf("terminal-stop");
 		assert.ok(queryClose >= 0 && shellStop > queryClose && historyClose > shellStop && terminalStop > historyClose, events.join(", "));
 	} finally {
+		await controller.close(0);
+		await running;
+	}
+});
+
+test("shutdown during a confirmed interrupt prevents a late target query", async () => {
+	const terminal = new FakeTerminal();
+	const first = new FakeQueryHarness();
+	const second = new FakeQueryHarness();
+	const interrupt = deferred<Awaited<ReturnType<typeof first.query.interrupt>>>();
+	first.query.interrupt = () => {
+		first.interruptCalls += 1;
+		return interrupt.promise;
+	};
+	let queryCount = 0;
+	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+		createQuery: (parameters) => {
+			queryCount += 1;
+			return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);
+		},
+	}));
+	const running = controller.run();
+	let switching: Promise<void> | undefined;
+	try {
+		await waitFor(() => controller.ready !== undefined);
+		controller.state.effectiveStatus.foreground = "running";
+		await controller.replaceSession({ kind: "new" });
+		switching = controller.replaceSession({ kind: "new" });
+		await waitFor(() => first.interruptCalls === 1);
+
+		await controller.close(0);
+		assert.equal(await running, 0);
+		assert.equal(terminal.stopCalls, 1);
+		interrupt.resolve(undefined);
+		await switching;
+
+		assert.equal(queryCount, 1);
+		assert.equal(second.parameters, undefined);
+		assert.equal(first.closeCalls, 1);
+	} finally {
+		interrupt.resolve(undefined);
+		if (switching) await switching;
+		await controller.close(0);
+		await running;
+	}
+});
+
+test("shutdown waits for cleanup of a target query opened before initialization completes", async () => {
+	const terminal = new FakeTerminal();
+	const first = new FakeQueryHarness();
+	const targetInitialization = deferred<SDKControlInitializeResponse>();
+	const second = new FakeQueryHarness(targetInitialization.promise);
+	let queryCount = 0;
+	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+		createQuery: (parameters) => {
+			queryCount += 1;
+			return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);
+		},
+	}));
+	const running = controller.run();
+	let switching: Promise<void> | undefined;
+	try {
+		await waitFor(() => controller.ready !== undefined);
+		switching = controller.replaceSession({ kind: "new" });
+		await waitFor(() => second.parameters !== undefined);
+
+		const closing = controller.close(0);
+		await waitFor(() => second.closeCalls === 1);
+		targetInitialization.resolve(initializedResponse());
+		await closing;
+		assert.equal(await running, 0);
+		await switching;
+
+		assert.equal(queryCount, 2);
+		assert.equal(second.closeCalls, 1);
+		assert.equal(terminal.stopCalls, 1);
+	} finally {
+		targetInitialization.resolve(initializedResponse());
+		if (switching) await switching;
 		await controller.close(0);
 		await running;
 	}
