@@ -64,6 +64,27 @@ test("CwdChanged refreshes the displayed workspace and rejects the previous cwd 
 	assert.equal(await running, 0);
 });
 
+test("a failed workspace read is ignored after cwd changes but before its debounce fires", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	const reads: Array<{ cwd: string; reject(error: Error): void }> = [];
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+		readWorkspace: (cwd) => new Promise((_resolve, reject) => reads.push({ cwd, reject })),
+	}));
+	const running = controller.run();
+	await waitFor(() => controller.ready !== undefined && reads.length === 1);
+	const hook = fake.parameters?.options?.hooks?.CwdChanged?.[0]?.hooks[0];
+	assert.ok(hook);
+	await hook({ hook_event_name: "CwdChanged", old_cwd: parseArgs([]).cwd, new_cwd: "/new/cwd" } as never, undefined, { signal: new AbortController().signal });
+	assert.equal(controller.state.cwd, "/new/cwd");
+	reads[0]?.reject(new Error("old cwd read failed"));
+	await new Promise<void>((resolve) => setTimeout(resolve, 15));
+
+	assert.equal(controller.views.inspectors.model.workspace, undefined);
+	await controller.close(0);
+	assert.equal(await running, 0);
+});
+
 test("workflow journal phases remain observations and do not complete an SDK task", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
@@ -173,4 +194,113 @@ test("a stale workflow failure cannot overwrite the selected task's journal stat
 	assert.deepEqual(controller.views.inspectors.model.workflowWarnings, []);
 	await controller.close(0);
 	assert.equal(await running, 0);
+});
+
+test("selecting a child clears task output and stops its workflow polling", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	let journalReads = 0;
+	const copied: string[] = [];
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+		createHistoryReader: () => ({
+			list: async () => [],
+			messages: async () => [],
+			agents: async () => ["child-agent"],
+			agentMessages: async () => [historyMessage("child-message", "child transcript output")],
+			close: async () => undefined,
+		}),
+		readWorkflowJournal: async () => {
+			journalReads += 1;
+			return {
+				metadata: { records: [{ type: "result", taskId: "workflow-task", phase: "build" }] },
+				warnings: [],
+				reset: false,
+			};
+		},
+		copyText: async (text) => { copied.push(text); },
+	}));
+	const running = controller.run();
+	await waitFor(() => controller.ready !== undefined);
+	const sessionId = controller.currentSessionId ?? "selection-session";
+	controller.views.inspectors.setSession(sessionId);
+	controller.state.tasks.set("workflow-task", {
+		taskId: "workflow-task",
+		taskType: "local_workflow",
+		description: "task output",
+		status: "running",
+		ambient: false,
+	});
+	controller.views.inspectors.onSdkMessage({
+		type: "user",
+		message: { role: "user", content: "" },
+		parent_tool_use_id: "tool-1",
+		session_id: sessionId,
+		tool_use_result: {
+			status: "async_launched",
+			taskId: "workflow-task",
+			runId: "workflow-run",
+			transcriptDir: "/reported/workflow/run",
+		},
+	} as never);
+	controller.showInspector("tasks");
+	await waitFor(() => journalReads === 1 && controller.views.inspectors.model.childAgentIds.includes("child-agent"));
+	await controller.selectChild("child-agent");
+	assert.equal(controller.views.inspectors.model.selectedTaskId, undefined);
+	assert.equal(controller.views.inspectors.model.selectedChildId, "child-agent");
+	controller.views.inspectors.onSdkMessage({ type: "tool_progress", tool_use_id: "unrelated-tool" } as never);
+	assert.equal(controller.views.inspectors.model.selectedTaskId, undefined);
+
+	terminal.input("\u0019");
+	await waitFor(() => copied.length === 1);
+	assert.equal(copied[0], "child transcript output");
+	await new Promise<void>((resolve) => setTimeout(resolve, 1_050));
+	assert.equal(journalReads, 1);
+
+	await controller.selectTask("workflow-task");
+	assert.equal(controller.views.inspectors.model.selectedChildId, undefined);
+	await controller.close(0);
+	assert.equal(await running, 0);
+});
+
+test("task and child identifiers and types are sanitized before inspector rendering", () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const taskId = "task-\u001b[2J";
+	const taskType = "workflow-\u001b]0;owned-title\u0007";
+	const childId = "child-\u001b[31m";
+	controller.state.tasks.set(taskId, {
+		taskId,
+		taskType,
+		status: "running",
+		ambient: false,
+	});
+	controller.views.inspectors.model.panel = "tasks";
+	controller.views.inspectors.model.selectedTaskId = taskId;
+	controller.views.inspectors.model.childAgentIds = [childId];
+	controller.views.inspectors.model.selectedChildId = childId;
+
+	const rendered = controller.views.inspectors.view.render(100).join("\n");
+	assert.doesNotMatch(rendered, /\u001b\[2J/);
+	assert.doesNotMatch(rendered, /\u001b\]0;owned-title\u0007/);
+	assert.doesNotMatch(rendered, /child-\u001b\[31m/);
+});
+
+test("history instructions name the Tasks panel for Tab child selection", () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+		createHistoryReader: () => ({
+			list: async () => [],
+			messages: async () => [],
+			agents: async () => [],
+			agentMessages: async () => [],
+			close: async () => undefined,
+		}),
+	}));
+	controller.views.inspectors.setSession("history-session");
+	controller.showInspector("history");
+
+	const rendered = controller.views.inspectors.view.render(100).join("\n");
+	assert.match(rendered, /Children: open Tasks \(Ctrl\+T\); Tab selects the next task or child transcript\./);
 });

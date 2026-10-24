@@ -152,6 +152,7 @@ export class AppController {
 		});
 		editor.onChange = () => {
 			this.draftRevision += 1;
+			this.keyboard.editorChanged();
 			this.render();
 		};
 		editor.onSubmit = (text) => this.submission.submit(text);
@@ -201,10 +202,12 @@ export class AppController {
 	}
 
 	setDraft(text: string): void {
+		this.keyboard.clearInlinePastes();
 		this.views.editor.setText(text);
 	}
 
 	submitPrompt(text: string): void {
+		this.keyboard.clearInlinePastes();
 		this.views.editor.setText(text);
 		this.views.editor.setText("");
 		this.submission.submit(text);

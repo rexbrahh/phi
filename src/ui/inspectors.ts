@@ -65,8 +65,9 @@ export class InspectorView implements Component {
 		const selectedTask = this.model.selectedTaskId ? this.state.tasks.get(this.model.selectedTaskId) : undefined;
 		if (selectedTask) {
 			lines.push("");
-			lines.push(theme.accent(`Selected task · ${selectedTask.taskId}`));
-			lines.push(`Status: ${selectedTask.status}${selectedTask.taskType ? ` · ${selectedTask.taskType}` : ""}`);
+			lines.push(theme.accent(`Selected task · ${sanitizeTerminalText(selectedTask.taskId)}`));
+			const taskType = selectedTask.taskType ? ` · ${sanitizeTerminalText(selectedTask.taskType)}` : "";
+			lines.push(`Status: ${selectedTask.status}${taskType}`);
 			if (selectedTask.description) lines.push(...new Text(sanitizeTerminalText(selectedTask.description)).render(width));
 			if (selectedTask.progressSummary) lines.push(...new Text(sanitizeTerminalText(selectedTask.progressSummary)).render(width));
 			if (selectedTask.error) lines.push(...new Text(theme.dim(`Error: ${sanitizeTerminalText(selectedTask.error)}`)).render(width));
@@ -96,15 +97,17 @@ export class InspectorView implements Component {
 			lines.push(`${selected}${sanitizeTerminalText(childId)}`);
 		}
 		if (this.model.selectedChildId) {
-			lines.push(...this.renderMessages(this.model.childMessages, width, `Child ${this.model.selectedChildId}`));
+			lines.push(...this.renderMessages(this.model.childMessages, width, `Child ${sanitizeTerminalText(this.model.selectedChildId)}`));
 		}
 		return lines;
 	}
 
 	private renderTaskRow(task: TaskRecord, width: number): string[] {
 		const selected = task.taskId === this.model.selectedTaskId ? "› " : "  ";
-		const description = task.description ? ` · ${task.description}` : "";
-		return new Text(`${selected}${task.status} · ${task.taskType ?? "task"} · ${task.taskId}${description}`).render(width)
+		const taskType = sanitizeTerminalText(task.taskType ?? "task");
+		const taskId = sanitizeTerminalText(task.taskId);
+		const description = task.description ? ` · ${sanitizeTerminalText(task.description)}` : "";
+		return new Text(`${selected}${task.status} · ${taskType} · ${taskId}${description}`).render(width)
 			.map(sanitizeTerminalText);
 	}
 
@@ -115,7 +118,7 @@ export class InspectorView implements Component {
 		if (this.model.historyError) lines.push(theme.dim(`History unavailable: ${sanitizeTerminalText(this.model.historyError)}`));
 		if (this.model.searchText) lines.push(`Search: ${sanitizeTerminalText(this.model.searchText)}`);
 		lines.push(...this.renderMessages(this.model.historyMessages, width, "Transcript"));
-		lines.push("Children: Tab cycles a reported child transcript.");
+		lines.push("Children: open Tasks (Ctrl+T); Tab selects the next task or child transcript.");
 		return lines;
 	}
 

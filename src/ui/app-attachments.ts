@@ -98,7 +98,13 @@ export class AppAttachmentController {
 				this.options.showNotice(`Attached ${attachment.name}.`);
 			} catch (error) {
 				if (!controller.signal.aborted && !this.options.isClosing()) {
-					if (restoreDraft !== undefined) this.options.editor.setText(restoreDraft);
+					if (
+						restoreDraft !== undefined
+						&& draftRevision === this.options.draftRevision()
+						&& sessionId === this.options.sessionId()
+					) {
+						this.options.editor.setText(restoreDraft);
+					}
 					this.options.showNotice(`Could not attach image: ${errorText(error)}`);
 				}
 			} finally {

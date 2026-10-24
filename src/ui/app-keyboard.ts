@@ -36,8 +36,8 @@ export class AppKeyboardController {
 	) {}
 
 	onInput(data: string): { consume?: boolean } | undefined {
-		this.captureInlinePaste(data);
 		if (this.actions.dialogVisible()) {
+			this.discardPartialPaste();
 			if (matchesKey(data, Key.ctrl("c"))) {
 				this.actions.close();
 				return { consume: true };
@@ -50,6 +50,8 @@ export class AppKeyboardController {
 			this.actions.render();
 			return { consume: true };
 		}
+		if (this.shell.mode) this.discardPartialPaste();
+		else this.captureInlinePaste(data);
 		if (matchesKey(data, Key.escape)) {
 			if (this.views.editor.isShowingAutocomplete()) return undefined;
 			if (this.shell.mode) {
@@ -146,6 +148,20 @@ export class AppKeyboardController {
 
 	clearInlinePastes(): void {
 		this.inlinePastes.length = 0;
+		this.discardPartialPaste();
+	}
+
+	editorChanged(): void {
+		const text = this.views.editor.getExpandedText();
+		if (!text) {
+			queueMicrotask(() => {
+				if (!this.views.editor.getExpandedText()) this.clearInlinePastes();
+			});
+			return;
+		}
+		for (let index = this.inlinePastes.length - 1; index >= 0; index -= 1) {
+			if (!text.includes(this.inlinePastes[index] ?? "")) this.inlinePastes.splice(index, 1);
+		}
 	}
 
 	private captureInlinePaste(data: string): void {
@@ -169,6 +185,11 @@ export class AppKeyboardController {
 			this.capturingPaste = false;
 			cursor = endAt + end.length;
 		}
+	}
+
+	private discardPartialPaste(): void {
+		this.currentPaste = "";
+		this.capturingPaste = false;
 	}
 
 	private toggleInspector(panel: InspectorPanel): void {

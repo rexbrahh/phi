@@ -29,10 +29,14 @@ export class AppSubmissionController {
 	submit(text: string): void {
 		const content = text.trim();
 		if (!content && this.options.attachments.length === 0) {
-			if (this.options.shell.mode) this.options.leaveShellMode();
+			if (this.options.shell.mode) {
+				this.options.keyboard.clearInlinePastes();
+				this.options.leaveShellMode();
+			}
 			return;
 		}
 		if (this.options.shell.mode) {
+			this.options.keyboard.clearInlinePastes();
 			const cwd = this.options.shell.cwdSnapshot ?? this.options.state.cwd;
 			this.options.leaveShellMode();
 			if (content && !this.options.shell.start(content, cwd, this.options.sessionId())) {
@@ -41,6 +45,7 @@ export class AppSubmissionController {
 			return;
 		}
 		if (content === "/phi" || content.startsWith("/phi ")) {
+			this.options.keyboard.clearInlinePastes();
 			this.dispatchLocalCommand(content);
 			return;
 		}

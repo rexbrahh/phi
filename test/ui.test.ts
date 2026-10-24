@@ -110,6 +110,92 @@ test("bracketed paste expands through the editor and never selects shell mode", 
 	assert.equal(await running, 0);
 });
 
+test("a paste received by a native dialog is not attached to the next prompt", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const running = controller.run();
+	await waitFor(() => controller.ready !== undefined);
+	const canUseTool = fake.parameters?.options?.canUseTool;
+	assert.ok(canUseTool);
+	const response = canUseTool("Read", {}, {
+		requestId: "paste-dialog",
+		toolUseID: "paste-dialog-tool",
+		signal: new AbortController().signal,
+	} as Parameters<NonNullable<Options["canUseTool"]>>[2]);
+	await waitFor(() => controller.interactions.pending.length === 1);
+
+	terminal.input("\u001b[200~dialog-only paste\u001b[201~");
+	terminal.input("\u001b");
+	terminal.input("prompt after dialog");
+	terminal.input("\r");
+	await fake.waitForInputCount(1);
+
+	assert.equal(fake.receivedMessages[0]?.message.content, "prompt after dialog");
+	assert.equal(fake.receivedMessages[0]?.inline_pastes, undefined);
+	await controller.close(0);
+	assert.equal((await response)?.behavior, "deny");
+	assert.equal(await running, 0);
+});
+
+test("paste metadata is discarded by local commands and shell jobs", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+		runUserShell: (command, cwd, sessionId) => {
+			const receipt: ShellReceipt = {
+				jobId: "shell-paste-job",
+				sessionId,
+				command,
+				cwd,
+				exitCode: 0,
+				signal: null,
+				aborted: false,
+				outputFiles: {},
+			};
+			return { jobId: receipt.jobId, done: Promise.resolve(receipt) };
+		},
+	}));
+	const running = controller.run();
+	await waitFor(() => controller.ready !== undefined);
+
+	terminal.input("\u001b[200~/phi help\u001b[201~");
+	terminal.input("\r");
+	assert.equal(fake.receivedMessages.length, 0);
+	terminal.input("!");
+	terminal.input("\u001b[200~pwd\u001b[201~");
+	terminal.input("\r");
+	await fake.waitForInputCount(1);
+	assert.equal(fake.receivedMessages[0]?.origin?.kind, "unclassified");
+	assert.equal(fake.receivedMessages[0]?.inline_pastes, undefined);
+
+	terminal.input("prompt after local work");
+	terminal.input("\r");
+	await fake.waitForInputCount(2);
+	assert.equal(fake.receivedMessages[1]?.message.content, "prompt after local work");
+	assert.equal(fake.receivedMessages[1]?.inline_pastes, undefined);
+	terminal.input("\u0003");
+	assert.equal(await running, 0);
+});
+
+test("replacing the editor prompt discards its prior paste metadata", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal));
+	const running = controller.run();
+	await waitFor(() => controller.ready !== undefined);
+
+	terminal.input("\u001b[200~old pasted text\u001b[201~");
+	controller.setDraft("replacement prompt");
+	terminal.input("\r");
+	await fake.waitForInputCount(1);
+
+	assert.equal(fake.receivedMessages[0]?.message.content, "replacement prompt");
+	assert.equal(fake.receivedMessages[0]?.inline_pastes, undefined);
+	terminal.input("\u0003");
+	assert.equal(await running, 0);
+});
+
 test("a rejected submit restores the editor draft", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness(Promise.resolve(initializedResponse({
@@ -351,6 +437,57 @@ test("a delayed image result is discarded when the composer draft changes", asyn
 	await waitFor(() => terminal.output.includes("composer draft changed"));
 	assert.equal(controller.attachments.length, 0);
 	assert.equal(controller.views.editor.getText(), "new composer draft");
+	terminal.input("\u0003");
+	assert.equal(await running, 0);
+});
+
+test("a late image failure cannot restore its command over a newer composer draft", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	let rejectImage!: (error: Error) => void;
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+		loadImage: async () => new Promise((_resolve, reject) => { rejectImage = reject; }),
+	}));
+	const running = controller.run();
+	await waitFor(() => controller.ready !== undefined);
+
+	terminal.input("/phi attach image.png");
+	terminal.input("\r");
+	await waitFor(() => rejectImage !== undefined);
+	terminal.input("new composer draft");
+	rejectImage(new Error("late image failure"));
+	await waitFor(() => terminal.output.includes("Could not attach image: late image failure"));
+
+	assert.equal(controller.views.editor.getText(), "new composer draft");
+	terminal.input("\u0003");
+	assert.equal(await running, 0);
+});
+
+test("a late image failure cannot restore a command after the session changes", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	let rejectImage!: (error: Error) => void;
+	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
+		loadImage: async () => new Promise((_resolve, reject) => { rejectImage = reject; }),
+	}));
+	const running = controller.run();
+	await waitFor(() => controller.ready !== undefined);
+
+	terminal.input("/phi attach image.png");
+	terminal.input("\r");
+	await waitFor(() => rejectImage !== undefined);
+	fake.pushMessage({
+		type: "user",
+		message: { role: "user", content: "next session" },
+		parent_tool_use_id: null,
+		uuid: "next-session-message",
+		session_id: "next-session",
+	} as never);
+	await waitFor(() => controller.currentSessionId === "next-session");
+	rejectImage(new Error("late image failure"));
+	await waitFor(() => terminal.output.includes("Could not attach image: late image failure"));
+
+	assert.equal(controller.views.editor.getText(), "");
 	terminal.input("\u0003");
 	assert.equal(await running, 0);
 });

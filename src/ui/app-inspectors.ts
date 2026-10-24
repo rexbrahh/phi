@@ -65,7 +65,7 @@ export class AppInspectorController {
 				this.stopWorkflowPolling();
 			}
 		}
-		if (this.model.panel === "tasks" && !this.model.selectedTaskId) {
+		if (this.model.panel === "tasks" && !this.model.selectedTaskId && !this.model.selectedChildId) {
 			const firstTask = [...this.state.tasks.values()].find((task) => !task.ambient);
 			if (firstTask) void this.selectTask(firstTask.taskId);
 		}
@@ -123,8 +123,14 @@ export class AppInspectorController {
 	async selectChild(agentId: string): Promise<void> {
 		const sessionId = this.sessionId;
 		if (!sessionId || !this.model.childAgentIds.includes(agentId)) return;
+		this.workflowGeneration += 1;
+		this.model.selectedTaskId = undefined;
 		this.model.selectedChildId = agentId;
 		this.model.childMessages = [];
+		this.model.workflowRecords = [];
+		this.model.workflowWarnings = [];
+		this.model.workflowUnavailable = undefined;
+		this.stopWorkflowPolling();
 		this.model.historyLoading = true;
 		const generation = ++this.historyGeneration;
 		this.onChange();
@@ -190,7 +196,7 @@ export class AppInspectorController {
 			this.model.workspace = workspace;
 			this.onChange();
 		} catch (error) {
-			if (generation !== this.workspaceGeneration) return;
+			if (this.closed || generation !== this.workspaceGeneration || this.state.cwd !== cwd) return;
 			this.model.workspace = { kind: "error", cwd, error: errorText(error) };
 			this.onChange();
 		}
@@ -229,6 +235,10 @@ export class AppInspectorController {
 	}
 
 	selectedOutput(): string | undefined {
+		if (this.model.selectedChildId) {
+			const last = this.model.childMessages.at(-1);
+			return last ? messagePreview(last.message) : undefined;
+		}
 		if (this.model.selectedTaskId) {
 			const task = this.state.tasks.get(this.model.selectedTaskId);
 			if (task) return task.progressSummary ?? task.error ?? task.description ?? task.outputFile;

@@ -10,6 +10,8 @@ import {
 	runSubprocess,
 	type SubprocessRequest,
 } from "../src/attachments.js";
+import { AppAttachmentController } from "../src/ui/app-attachments.js";
+import type { Editor } from "@earendil-works/pi-tui";
 
 const imageFixtures = [
 	{
@@ -133,6 +135,45 @@ test("aggregate attachment validation allows 20 MB and rejects excess or oversiz
 		() => assertAttachmentTotalWithinLimit([{ sizeBytes: 5_000_001 }]),
 		/5,000,000-byte image limit/,
 	);
+});
+
+test("late image failures restore a command only for the same draft and session", async () => {
+	let editorText = "";
+	let draftRevision = 1;
+	let sessionId: string | undefined = "session-one";
+	let rejectImage: ((error: Error) => void) | undefined;
+	const notices: Array<string | undefined> = [];
+	const controller = new AppAttachmentController({
+		dependencies: {
+			readClipboardImage: async () => null,
+			copyText: async () => undefined,
+			loadImage: () => new Promise((_resolve, reject) => { rejectImage = reject; }),
+		},
+		editor: { setText: (text: string) => { editorText = text; } } as unknown as Editor,
+		draftRevision: () => draftRevision,
+		sessionId: () => sessionId,
+		selectedOutput: () => undefined,
+		isClosing: () => false,
+		showNotice: (message) => { notices.push(message); },
+	});
+
+	controller.loadImage("draft.png", "/phi attach draft.png");
+	assert.ok(rejectImage);
+	editorText = "newer composer draft";
+	draftRevision += 1;
+	rejectImage(new Error("late draft failure"));
+	await new Promise<void>((resolve) => setTimeout(resolve, 0));
+	assert.equal(editorText, "newer composer draft");
+	assert.match(notices.at(-1) ?? "", /late draft failure/);
+
+	controller.loadImage("session.png", "/phi attach session.png");
+	assert.ok(rejectImage);
+	sessionId = "session-two";
+	rejectImage(new Error("late session failure"));
+	await new Promise<void>((resolve) => setTimeout(resolve, 0));
+	assert.equal(editorText, "newer composer draft");
+	assert.match(notices.at(-1) ?? "", /late session failure/);
+	await controller.close();
 });
 
 test("clipboard image reading uses injected osascript and returns a typed image block", async () => {
