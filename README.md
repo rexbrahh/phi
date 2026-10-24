@@ -53,21 +53,43 @@ node "$PHI_CHECKOUT/dist/src/cli.js" --version
 
 `--resume` and `--continue` cannot be used together. Bypass mode requires both `--permission-mode bypassPermissions` and `--dangerously-skip-permissions`.
 
-## API credentials and route check
+## Home and authentication
 
-Configure one supported API key source before you start a session:
+Phi uses `~/.phi` as its home. Set `PHI_HOME` to an absolute, nonempty path to select another home. A relative or empty value is invalid. Phi uses this home as the SDK configuration root and for saved authentication and state. This does not change the project directory. Project `.claude` settings, `.mcp.json`, and `CLAUDE.md` stay in the project.
 
-- Set `ANTHROPIC_API_KEY` in the process environment.
-- Configure the SDK's `apiKeyHelper`.
-- Use a managed API key that the SDK reports as `/login managed key`.
+Phi sets the home directory mode to `0700`. It stores a saved API key as plaintext JSON in `<home>/auth.json` with mode `0600`. These permissions limit access to the file. They do not encrypt the key. Phi passes the selected key through the SDK child environment. It does not put the key in command arguments or application error messages.
 
-Phi checks the initialized account before it accepts a prompt. The SDK must report provider `firstParty` and one of those key sources. Phi blocks prompt submission when the provider or key source does not match. This check does not establish grant eligibility or account balance.
+Phi selects an API key in this order:
 
-Do not place key values in command examples, this repository, or chat. Help and version checks do not initialize the SDK.
+1. A valid inherited `ANTHROPIC_API_KEY`. Phi does not save this override. It takes precedence over a saved key.
+2. A saved Phi key in `<home>/auth.json`.
+3. A hidden prompt on an interactive coding launch. Phi saves the key after submission. Escape or Ctrl+C cancels the launch before Phi creates a Query.
+
+Use these commands to manage saved authentication:
+
+```sh
+phi auth login
+phi auth status
+phi auth logout
+```
+
+From this checkout, run the same commands with `node "$PHI_CHECKOUT/dist/src/cli.js"` in place of `phi`.
+
+`login` requires a terminal and saves or replaces the key. `status` reports the active source and auth path without showing the key. `logout` deletes only the saved Phi key. An inherited `ANTHROPIC_API_KEY` remains active after logout. These commands do not create a Query.
+
+Before Phi accepts a prompt, the SDK must report provider `firstParty` and a supported key source. Supported source values are `ANTHROPIC_API_KEY`, `apiKeyHelper`, and `/login managed key`. This route check does not establish credit eligibility or account balance. Do not place key values in command examples, this repository, or chat. Help and version checks do not initialize the SDK.
 
 ## Native configuration
 
-Phi asks the SDK to load the `user`, `project`, and `local` settings. It enables all discovered skills and uses the SDK's native tools and hooks. Use repeated `--plugin-dir` options to add local plugins. Use `/phi mcp` to inspect MCP servers or `/phi mcp <server>` to reconnect one. Use `/phi reload` to refresh native plugins, skills, output styles, and commands.
+Phi asks the SDK to load the `user`, `project`, and `local` settings. It enables all discovered skills and uses the SDK's native tools and hooks. Phi uses its home as the user configuration root. It keeps project configuration in the project.
+
+On the first interactive coding launch, Phi imports selected Claude Code customizations once. A nonempty `CLAUDE_CONFIG_DIR` selects the import source. If it is unset or empty, Phi uses `~/.claude`. Phi copies `settings.json`, `CLAUDE.md`, skills, agents, commands, hooks, rules, output styles, and selected plugin files and metadata. It copies only global `mcpServers` from `.claude.json`. It preserves existing files in the Phi home.
+
+The import excludes old sessions, transcripts, checkpoints, debug logs, credentials, and provider settings. It removes legacy authentication, provider, config-root, and temporary-directory settings from the copied `settings.json`. Phi does not execute imported code during the copy. Phi copies selected plugin entries under `<home>/plugins/`, including `cache/`, `marketplaces/`, `installed_plugins.json`, and `known_marketplaces.json`. The SDK plugin cache root is `<home>/plugins`. Imported `cache/` files sit inside that root.
+
+Phi routes SDK temporary files to `<home>/tmp` and prepares that directory with private permissions. This overrides an inherited `CLAUDE_CODE_TMPDIR`.
+
+Use repeated `--plugin-dir` options to add local plugins. Use `/phi mcp` to inspect MCP servers or `/phi mcp <server>` to reconnect one. Use `/phi reload` to refresh native plugins, skills, output styles, and commands.
 
 Phi does not provide full Claude Code parity.
 
@@ -120,7 +142,7 @@ Use `/phi sessions` to list sessions. Use `/phi new`, `/phi resume <id>`, or `/p
 
 Use `/phi rewind` only when the session is idle and Phi has an SDK checkpoint. Phi shows a fresh preview first. Run the command again to apply the preview. Rewind applies SDK file checkpoints. It does not undo Git or shell effects, and it is not a full task rollback.
 
-Local shell output appears in the transcript as a bounded preview. Phi stores full stdout and stderr files under `${XDG_STATE_HOME:-~/.local/state}/phi/<session-id>/shell/`. The session record contains their paths. Phi keeps these files after exit until you remove them.
+Local shell output appears in the transcript as a bounded preview. Phi stores full stdout and stderr files under `<home>/state/<session-id>/shell/`. The session record contains their paths. Phi keeps these files after exit until you remove them.
 
 ## Developer checks
 

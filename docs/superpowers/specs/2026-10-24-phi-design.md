@@ -58,13 +58,11 @@ Create one persistent `query()` connection with an open asynchronous input strea
 
 Run parallel interactive sessions in separate terminals. Within one Phi process, switching, clearing, or forking a session must not silently terminate background work. Require a deliberate stop-and-switch action while work remains. A session picker does not provide process detachment.
 
-Set the `claude_code` system-prompt preset and the `claude_code` tool preset. Load user, project, and local settings. Preserve `CLAUDE_CONFIG_DIR` when the user sets it. Enable discovered skills through the SDK. Retain existing hooks, plugins, MCP servers, rules, and agent definitions through supported SDK configuration.
-
-Current SDK defaults load filesystem settings. Older examples that describe isolation by default are stale. Explicit sources can document Phi's intended behavior. Do not clone the user's Claude configuration into a separate Phi configuration tree.
+Set the `claude_code` system-prompt preset and the `claude_code` tool preset. Use Phi's resolved home as the SDK configuration root. The default is `~/.phi`; `PHI_HOME` can select another absolute path. Load user, project, and local settings. Import selected user customizations into Phi's home. Keep project settings in the project. The README defines the current import and storage contract.
 
 Use `includePartialMessages: true` and `forwardSubagentText: true`. Enable file checkpointing for the rewind feature. Enable `perTaskStopAffordance` only when the individual task-stop UI works and its tests pass.
 
-Resolve API credentials through the user's existing environment or configured API-key helper. Never print or persist credential values. Check initialization account metadata before sending the first model prompt. If the effective provider or authentication does not match the intended Anthropic API route, show the mismatch and stop submission. Do not silently use a Claude subscription or another provider.
+Select a coding key from a valid inherited `ANTHROPIC_API_KEY`, then Phi's saved key, then a hidden prompt. Save a prompted key. Do not save an inherited override. Pass the selected key only through the SDK child environment. Cancel the launch before Query creation when the prompt is canceled. Check initialization account metadata before accepting the first model prompt. If the effective provider or authentication does not match the intended Anthropic API route, show the mismatch and stop submission. Do not silently use a Claude subscription or another provider.
 
 For the pinned SDK, accept provider `firstParty` with credential source `ANTHROPIC_API_KEY`, `apiKeyHelper`, or `/login managed key`. Reject `none`, legacy sources, and unknown sources. Stored Console keys are API credentials. This check does not prove which credit grant pays for usage.
 
@@ -154,7 +152,7 @@ Tool cards must support long commands, diffs, structured tool results, backgroun
 
 Support explicit user shell commands, matching the reference session's `!` usage. The pinned public `Query` API has no direct shell-execution method. V1 therefore uses a local child process for this user action. Preserve cwd, environment, exit status, cancellation, and output. Append its result with `shouldQuery: false`, without fabricating model tool calls. Mark this generated context as machine-authored. Interactive child programs run in another terminal. Pasted text cannot select shell mode by itself.
 
-Store large explicit-shell output in private files under the user's Phi state directory. These files contain output receipts, not a second conversation history. The guide must explain their location and retention. Do not delete them automatically when a session exits.
+Store large explicit-shell output in private files under `<home>/state/<session-id>/shell/`. These files contain output receipts, not a second conversation history. The guide must explain their location and retention. Do not delete them automatically when a session exits.
 
 Git expertise depends on the model, harness, instructions, environment, and evidence. Phi can preserve these and test workflows. It cannot guarantee staff-level judgment through interface features alone.
 
