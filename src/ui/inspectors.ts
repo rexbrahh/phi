@@ -2,7 +2,7 @@ import { Text, type Component } from "@earendil-works/pi-tui";
 import type { SessionMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { JournalPage, WorkflowJournalRecord } from "../workflows.js";
 import type { PhiState, TaskRecord } from "../state.js";
-import { getDisplayText, getProperty, getStringProperty, previewUnknown } from "../state-utils.js";
+import { boundedPreviewFromParts, boundedPreviewValue, getDisplayText, getProperty, getStringProperty } from "../state-utils.js";
 import type { WorkspaceInfo } from "../workspace.js";
 import { sanitizeTerminalText } from "./safe-text.js";
 import { theme } from "./theme.js";
@@ -154,14 +154,21 @@ export class InspectorView implements Component {
 }
 
 function messageText(message: unknown): string {
-	if (typeof message === "string") return message;
+	if (typeof message === "string") return boundedPreviewValue(message);
 	const content = getProperty(message, "content");
-	if (typeof content === "string") return content;
+	if (typeof content === "string") return boundedPreviewValue(content);
 	if (Array.isArray(content)) {
-		const text = content.map(getDisplayText).filter(Boolean).join("\n");
-		return text || previewUnknown(content);
+		const text = boundedPreviewFromParts(displayTextParts(content));
+		return text ?? boundedPreviewValue(content);
 	}
-	return previewUnknown(message);
+	return boundedPreviewValue(message);
+}
+
+function* displayTextParts(content: unknown[]): Iterable<string> {
+	for (const item of content) {
+		const text = getDisplayText(item);
+		if (text) yield text;
+	}
 }
 
 function formatWorkflowRecord(record: WorkflowJournalRecord): string {

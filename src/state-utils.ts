@@ -3,6 +3,9 @@ import type { PhiState, TaskRecord } from "./state.js";
 
 const MAX_PREVIEW_CHARS = 8_192;
 const MAX_PREVIEW_LINES = 12;
+const MAX_PREVIEW_DEPTH = 2;
+const MAX_PREVIEW_FIELDS = 11;
+const MAX_PREVIEW_KEYS_TO_INSPECT = 44;
 
 export function addNotice(state: PhiState, message: SDKMessage, text: string): void {
 	const type = typeof message === "object" && message !== null && "type" in message
@@ -117,6 +120,91 @@ export function boundedPreviewFromParts(parts: Iterable<string>): string | undef
 	}
 
 	return hasPart ? boundedPreview(preview) : undefined;
+}
+
+export function boundedPreviewValue(value: unknown): string {
+	try {
+		return boundedPreviewFromParts(previewValueParts(value)) ?? "";
+	} catch {
+		return "[unavailable]";
+	}
+}
+
+function* previewValueParts(value: unknown, depth = 0, indent = "", label = ""): Generator<string> {
+	const scalar = previewScalar(value);
+	if (scalar !== undefined) {
+		yield `${indent}${label}${scalar}`;
+		return;
+	}
+	if (typeof value !== "object" || value === null) {
+		yield `${indent}${label}[unsupported]`;
+		return;
+	}
+	if (depth >= MAX_PREVIEW_DEPTH) {
+		yield `${indent}${label}${Array.isArray(value) ? "[array]" : "[object]"}`;
+		return;
+	}
+	if (Array.isArray(value)) {
+		if (value.length === 0) {
+			yield `${indent}${label}[]`;
+			return;
+		}
+		yield `${indent}${label}[`;
+		const visibleItems = Math.min(value.length, MAX_PREVIEW_FIELDS);
+		for (let index = 0; index < visibleItems; index += 1) {
+			let item: unknown;
+			try {
+				item = value[index];
+			} catch {
+				yield `${indent}  ${index}: [unavailable]`;
+				continue;
+			}
+			yield* previewValueParts(item, depth + 1, `${indent}  `, `${index}: `);
+		}
+		if (value.length > visibleItems) yield `${indent}  …`;
+		yield `${indent}]`;
+		return;
+	}
+
+	yield `${indent}${label}{`;
+	let visibleFields = 0;
+	let inspectedKeys = 0;
+	for (const key in value) {
+		if (inspectedKeys >= MAX_PREVIEW_KEYS_TO_INSPECT) {
+			yield `${indent}  …`;
+			break;
+		}
+		inspectedKeys += 1;
+		if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+		if (visibleFields >= MAX_PREVIEW_FIELDS) {
+			yield `${indent}  …`;
+			break;
+		}
+		visibleFields += 1;
+		const fieldName = boundedPreview(key).replace(/\n/g, " ");
+		let fieldValue: unknown;
+		try {
+			fieldValue = (value as Record<string, unknown>)[key];
+		} catch {
+			yield `${indent}  ${fieldName}: [unavailable]`;
+			continue;
+		}
+		yield* previewValueParts(fieldValue, depth + 1, `${indent}  `, `${fieldName}: `);
+	}
+	if (visibleFields === 0) yield `${indent}  (no enumerable fields)`;
+	yield `${indent}}`;
+}
+
+function previewScalar(value: unknown): string | undefined {
+	if (typeof value === "string") return boundedPreview(value);
+	if (value === null) return "null";
+	if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value);
+	if (typeof value === "undefined") return "undefined";
+	if (typeof value === "symbol") {
+		return value.description === undefined ? "Symbol()" : `Symbol(${boundedPreview(value.description)})`;
+	}
+	if (typeof value === "function") return "[function]";
+	return undefined;
 }
 
 export function addUnique(values: string[], value: string): string[] {

@@ -1,6 +1,6 @@
 import { Markdown, Text, type Component } from "@earendil-works/pi-tui";
 import type { ConversationBlock, PhiState, ProvisionalBlock, ToolReceipt } from "../state.js";
-import { getContentType, getDisplayText, getProperty, getStringProperty, previewUnknown } from "../state-utils.js";
+import { boundedPreviewValue, getContentType, getDisplayText, getProperty, getStringProperty } from "../state-utils.js";
 import { sanitizeTerminalText } from "./safe-text.js";
 import { markdownTheme } from "./theme.js";
 
@@ -135,7 +135,7 @@ export class TranscriptView implements Component {
 			return {
 				key: `partial:${block.id}`,
 				role: "Tool · streaming",
-				text: `${String(name)}\n${previewUnknown(input)}`,
+				text: `${String(name)}\n${boundedPreviewValue(input)}`,
 				markdown: false,
 			};
 		}
@@ -150,17 +150,17 @@ function formatToolReceipt(content: unknown, receipt: ToolReceipt | undefined): 
 	const preview = receipt?.resultPreview;
 	return [
 		`${name} · ${state}`,
-		input === undefined ? "" : previewUnknown(input),
+		input === undefined ? "" : boundedPreviewValue(input),
 		preview ? `\n${preview}` : "",
 	].filter(Boolean).join("\n");
 }
 
 function safeMessageDetails(message: PhiState["notices"][number]["sourceMessage"]): string {
 	if (message.type === "system" && (message.subtype === "hook_response" || message.subtype === "plugin_install")) {
-		return previewUnknown(message);
+		return boundedPreviewValue(message);
 	}
 	if (message.type === "system" && message.subtype === "informational") {
-		return previewUnknown(message);
+		return boundedPreviewValue(message);
 	}
 	return "";
 }

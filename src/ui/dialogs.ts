@@ -12,7 +12,7 @@ import type {
 	PendingInteraction,
 	PendingQuestionRequest,
 } from "../interaction-types.js";
-import { previewUnknown } from "../state-utils.js";
+import { boundedPreviewValue } from "../state-utils.js";
 import { sanitizeTerminalText } from "./safe-text.js";
 import { theme } from "./theme.js";
 
@@ -138,7 +138,7 @@ export class DialogView implements Component, Focusable {
 		if (request.kind === "permission") {
 			lines.push(theme.dim(sanitizeTerminalText(request.title ?? request.displayName ?? request.toolName)));
 			if (request.description) lines.push(sanitizeTerminalText(request.description));
-			lines.push(...new Text(sanitizeTerminalText(previewUnknown(request.input))).render(width));
+			lines.push(...new Text(sanitizeTerminalText(boundedPreviewValue(request.input))).render(width));
 			lines.push("1 Allow once · d Deny" + (request.canAlwaysAllow ? " · a Allow suggested" : ""));
 		} else if (request.kind === "question") {
 			const question = this.currentQuestion();
