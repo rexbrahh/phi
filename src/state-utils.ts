@@ -198,7 +198,7 @@ function* previewValueParts(value: unknown, depth = 0, indent = "", label = ""):
 function previewScalar(value: unknown): string | undefined {
 	if (typeof value === "string") return boundedPreview(value);
 	if (value === null) return "null";
-	if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value);
+	if (typeof value === "number" || typeof value === "boolean") return String(value);
 	if (typeof value === "undefined") return "undefined";
 	if (typeof value === "symbol") {
 		return value.description === undefined ? "Symbol()" : `Symbol(${boundedPreview(value.description)})`;

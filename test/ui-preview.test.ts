@@ -24,6 +24,7 @@ test("UI value previews bound output without invoking serializers or reading lat
 
 	const preview = boundedPreviewValue(input);
 	const largeStringPreview = boundedPreviewValue("x".repeat(20_000));
+	const bigIntPreview = boundedPreviewValue(123n);
 
 	assert.match(preview, /command/);
 	assert.match(preview, /  details: \{\n    path: \/repo\n  \}/);
@@ -31,6 +32,7 @@ test("UI value previews bound output without invoking serializers or reading lat
 	assert.ok(preview.split("\n").length <= 12);
 	assert.ok(largeStringPreview.length <= 8_192);
 	assert.ok(largeStringPreview.split("\n").length <= 12);
+	assert.equal(bigIntPreview, "[unsupported]");
 	assert.equal(serializerCalled, false);
 	assert.equal(lateFieldRead, false);
 });

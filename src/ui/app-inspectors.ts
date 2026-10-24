@@ -79,7 +79,7 @@ export class AppInspectorController {
 		if (panel === "tasks") {
 			void this.loadChildAgentIds();
 			const firstTask = [...this.state.tasks.values()].find((task) => !task.ambient);
-			if (firstTask && !this.model.selectedTaskId) void this.selectTask(firstTask.taskId);
+			if (firstTask && !this.model.selectedTaskId && !this.model.selectedChildId) void this.selectTask(firstTask.taskId);
 			else if (this.model.selectedTaskId) void this.selectTask(this.model.selectedTaskId);
 		}
 		if (panel === "workspace") void this.refreshWorkspace();

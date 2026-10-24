@@ -196,7 +196,7 @@ test("a stale workflow failure cannot overwrite the selected task's journal stat
 	assert.equal(await running, 0);
 });
 
-test("selecting a child clears task output and stops its workflow polling", async () => {
+test("child selection survives History/Tasks navigation without changing copied output or workflow polling", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
 	let journalReads = 0;
@@ -247,8 +247,14 @@ test("selecting a child clears task output and stops its workflow polling", asyn
 	await controller.selectChild("child-agent");
 	assert.equal(controller.views.inspectors.model.selectedTaskId, undefined);
 	assert.equal(controller.views.inspectors.model.selectedChildId, "child-agent");
+	controller.showInspector("history");
+	controller.showInspector("tasks");
+	assert.equal(controller.views.inspectors.model.selectedTaskId, undefined);
+	assert.equal(controller.views.inspectors.model.selectedChildId, "child-agent");
+	assert.equal(controller.views.inspectors.selectedOutput(), "child transcript output");
 	controller.views.inspectors.onSdkMessage({ type: "tool_progress", tool_use_id: "unrelated-tool" } as never);
 	assert.equal(controller.views.inspectors.model.selectedTaskId, undefined);
+	assert.equal(controller.views.inspectors.model.selectedChildId, "child-agent");
 
 	terminal.input("\u0019");
 	await waitFor(() => copied.length === 1);
