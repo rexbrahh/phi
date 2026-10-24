@@ -5,9 +5,16 @@ import type {
 	SDKMessage,
 	SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import { performance } from "node:perf_hooks";
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 
 type QueryParameters = Parameters<typeof sdkQuery>[0];
+export type FakeQuerySampleGroup = "unique" | "duplicate" | "oversized";
+
+interface FakeOutputMessage {
+	message: SDKMessage;
+	sampleGroup?: FakeQuerySampleGroup;
+}
 
 class AsyncQueue<T> implements AsyncIterableIterator<T> {
 	private readonly values: T[] = [];
@@ -83,6 +90,7 @@ export class FakeQueryHarness {
 	readonly inputDone: Promise<void>;
 	readonly query: Query;
 	readonly createQuery: (parameters: QueryParameters) => Query;
+	onMessageRead: ((message: SDKMessage, decodedAt: number, sampleGroup?: FakeQuerySampleGroup) => void) | undefined;
 	parameters?: QueryParameters;
 	closeCalls = 0;
 	interruptCalls = 0;
@@ -126,7 +134,7 @@ export class FakeQueryHarness {
 	};
 	supportedModelsResult: unknown[] = [];
 
-	private readonly output = new AsyncQueue<SDKMessage>();
+	private readonly output = new AsyncQueue<FakeOutputMessage>();
 	private readonly initialization: Promise<SDKControlInitializeResponse>;
 	private resolveInputDone!: () => void;
 	private readonly inputObservers: Array<{
@@ -223,8 +231,11 @@ export class FakeQueryHarness {
 		};
 	}
 
-	pushMessage(message: SDKMessage): void {
-		this.output.push(message);
+	pushMessage(
+		message: SDKMessage,
+		sampleGroup?: FakeQuerySampleGroup,
+	): void {
+		this.output.push({ message, sampleGroup });
 	}
 
 	finishOutput(): void {
@@ -246,7 +257,8 @@ export class FakeQueryHarness {
 		for (;;) {
 			const item = await this.output.next();
 			if (item.done) return;
-			yield item.value;
+			this.onMessageRead?.(item.value.message, performance.now(), item.value.sampleGroup);
+			yield item.value.message;
 		}
 	}
 
