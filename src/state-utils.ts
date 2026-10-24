@@ -58,17 +58,6 @@ export function getDisplayText(value: unknown): string {
 	return "";
 }
 
-export function previewUnknown(value: unknown): string {
-	if (typeof value === "string") return boundedPreview(value);
-	let serialized: string;
-	try {
-		serialized = JSON.stringify(value, null, 2) ?? String(value);
-	} catch {
-		serialized = String(value);
-	}
-	return boundedPreview(serialized);
-}
-
 export function boundedPreview(value: string): string {
 	const clippedByCharacters = value.length > MAX_PREVIEW_CHARS;
 	const characterBounded = clippedByCharacters ? value.slice(0, MAX_PREVIEW_CHARS) : value;
@@ -81,6 +70,53 @@ export function boundedPreview(value: string): string {
 		return `${preview}…`;
 	}
 	return `${preview}${preview.endsWith("\n") ? "" : "\n"}…`;
+}
+
+export function boundedPreviewFromParts(parts: Iterable<string>): string | undefined {
+	let preview = "";
+	let characters = 0;
+	let lines = 1;
+	let hasPart = false;
+	let clipped = false;
+
+	const append = (value: string): void => {
+		let offset = 0;
+		while (offset < value.length && !clipped) {
+			if (characters >= MAX_PREVIEW_CHARS + 1) {
+				clipped = true;
+				return;
+			}
+			const availableCharacters = MAX_PREVIEW_CHARS + 1 - characters;
+			const newline = value.indexOf("\n", offset);
+			if (newline === -1 || newline - offset >= availableCharacters) {
+				const end = Math.min(value.length, offset + availableCharacters);
+				const chunk = value.slice(offset, end);
+				preview += chunk;
+				characters += chunk.length;
+				if (end < value.length) clipped = true;
+				return;
+			}
+
+			const end = newline + 1;
+			const chunk = value.slice(offset, end);
+			preview += chunk;
+			characters += chunk.length;
+			lines += 1;
+			offset = end;
+			if (lines > MAX_PREVIEW_LINES) clipped = true;
+		}
+	};
+
+	for (const part of parts) {
+		if (!part) continue;
+		if (hasPart) append("\n");
+		if (clipped) break;
+		hasPart = true;
+		append(part);
+		if (clipped) break;
+	}
+
+	return hasPart ? boundedPreview(preview) : undefined;
 }
 
 export function addUnique(values: string[], value: string): string[] {

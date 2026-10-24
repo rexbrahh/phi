@@ -8,6 +8,7 @@ import type {
 import type { PhiState, ProvisionalBlock, ToolReceipt } from "./state.js";
 import {
 	addUnique,
+	addNotice,
 	boundedPreview,
 	getContentType,
 	getDisplayText,
@@ -15,7 +16,6 @@ import {
 	getProperty,
 	getStringProperty,
 	parseInputObject,
-	previewUnknown,
 } from "./state-utils.js";
 import {
 	attachWorkflowResult,
@@ -26,6 +26,7 @@ import {
 	isDetachedToolCall,
 	readToolResultIds,
 	readToolResultPreview,
+	readToolUseResultPreview,
 	readUserText,
 } from "./state-tools.js";
 import { markConsumedInputs } from "./state-inputs.js";
@@ -132,6 +133,11 @@ export function applyStreamEvent(state: PhiState, message: SDKPartialAssistantMe
 		return;
 	}
 	if (event.type === "content_block_delta") {
+		const deltaType = getContentType(event.delta);
+		if (!["text_delta", "thinking_delta", "input_json_delta"].includes(deltaType)) {
+			addNotice(state, message, `unknown stream event delta ${deltaType}`);
+			return;
+		}
 		const messageId = state.activeStreamMessageId;
 		const provisional = messageId ? state.provisionalBlocks.get(`${messageId}:${event.index}`) : undefined;
 		if (!provisional) return;
@@ -169,9 +175,12 @@ export function applyStreamEvent(state: PhiState, message: SDKPartialAssistantMe
 		}
 		return;
 	}
-	if (event.type === "message_stop" && state.activeStreamMessageId) {
-		state.activeStreamMessageId = undefined;
+	if (event.type === "message_delta") return;
+	if (event.type === "message_stop") {
+		if (state.activeStreamMessageId) state.activeStreamMessageId = undefined;
+		return;
 	}
+	addNotice(state, message, `unknown stream event ${getContentType(event)}`);
 }
 
 export function applyUserMessage(state: PhiState, message: SDKUserMessage): void {
@@ -181,7 +190,9 @@ export function applyUserMessage(state: PhiState, message: SDKUserMessage): void
 	}
 	const toolResultIds = readToolResultIds(message);
 	const detached = isDetachedToolCall(message.tool_use_result);
-	const structuredPreview = message.tool_use_result === undefined ? undefined : previewUnknown(message.tool_use_result);
+	const structuredPreview = message.tool_use_result === undefined
+		? undefined
+		: readToolUseResultPreview(message.tool_use_result);
 	const resultPreview = readToolResultPreview(message);
 
 	for (const toolUseId of toolResultIds) {

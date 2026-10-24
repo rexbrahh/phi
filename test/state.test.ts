@@ -90,6 +90,55 @@ test("a final block arriving before content_block_stop replaces its provisional 
 	assert.equal(state.provisionalBlocks.size, 0);
 });
 
+test("unknown stream events and deltas stay inspectable and replay only once", async () => {
+	const { createState, applySdkMessage } = await projectionApi();
+	const state = createState("/repo");
+	const unknownEvent = streamEvent({
+		envelopeId: "unknown-stream-event",
+		event: { type: "future_stream_event", payload: "inspect stream" } as never,
+	});
+	const unknownDelta = streamEvent({
+		envelopeId: "unknown-stream-delta",
+		event: {
+			type: "content_block_delta",
+			index: 0,
+			delta: { type: "future_delta", payload: "inspect delta" },
+		} as never,
+	});
+
+	applySdkMessage(state, unknownEvent);
+	applySdkMessage(state, unknownDelta);
+
+	assert.equal(state.notices.length, 2);
+	assert.match(state.notices[0]?.text ?? "", /unknown stream event future_stream_event/);
+	assert.match(state.notices[1]?.text ?? "", /unknown stream event delta future_delta/);
+	assert.equal(state.notices[0]?.sourceMessage, unknownEvent);
+	assert.equal(state.notices[1]?.sourceMessage, unknownDelta);
+
+	applySdkMessage(state, { ...unknownEvent });
+	applySdkMessage(state, { ...unknownDelta });
+	assert.equal(state.notices.length, 2);
+
+	for (const [index, event] of textStreamStart("known-stream").entries()) {
+		applySdkMessage(state, streamEvent({ envelopeId: `known-stream-${index}`, event }));
+	}
+	applySdkMessage(state, streamEvent({ envelopeId: "known-text-delta", event: textDelta(0, "known text") }));
+	applySdkMessage(state, streamEvent({
+		envelopeId: "known-message-delta",
+		event: { type: "message_delta" } as never,
+	}));
+	applySdkMessage(state, streamEvent({
+		envelopeId: "known-block-stop",
+		event: { type: "content_block_stop", index: 0 },
+	}));
+	applySdkMessage(state, streamEvent({ envelopeId: "known-message-stop", event: { type: "message_stop" } }));
+
+	assert.equal(state.notices.length, 2);
+	assert.equal(state.provisionalBlocks.get("known-stream:0")?.text, "known text");
+	assert.equal(state.provisionalBlocks.get("known-stream:0")?.closed, true);
+	assert.equal(state.activeStreamMessageId, undefined);
+});
+
 test("an empty skipped partial block does not duplicate the final block", async () => {
 	const { createState, applySdkMessage } = await projectionApi();
 	const state = createState("/repo");

@@ -150,6 +150,29 @@ test("tool previews retain at most twelve lines and 8192 characters", async () =
 	assert.ok(preview.split("\n").length <= 12);
 });
 
+test("structured tool previews extract known fields without serializing unknown payloads", async () => {
+	const { createState, applySdkMessage } = await projectionApi();
+	const state = createState("/repo");
+	applySdkMessage(state, toolResultMessage({
+		envelopeId: "structured-preview-result",
+		toolUseId: "structured-preview-tool",
+		text: "workflow launched",
+		toolUseResult: {
+			status: "async_launched",
+			taskId: "structured-preview-task",
+			runId: "structured-preview-run",
+			summary: "s".repeat(20_000),
+			unusedPayload: "x".repeat(100_000),
+		},
+	}));
+	const preview = state.toolReceipts.get("structured-preview-tool")?.resultPreview ?? "";
+
+	assert.ok(preview.startsWith("status: async_launched\ntaskId: structured-preview-task\nrunId: structured-preview-run"));
+	assert.ok(preview.length <= 8_192);
+	assert.ok(preview.split("\n").length <= 12);
+	assert.equal(preview.includes("unusedPayload"), false);
+});
+
 test("tool previews clip by line count when the character limit is not reached", async () => {
 	const { createState, applySdkMessage } = await projectionApi();
 	const state = createState("/repo");

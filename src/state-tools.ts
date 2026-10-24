@@ -3,12 +3,12 @@ import type { PhiState, ToolReceipt } from "./state.js";
 import {
 	addUnique,
 	boundedPreview,
+	boundedPreviewFromParts,
 	getContentType,
 	getDisplayText,
 	getOrCreateTask,
 	getProperty,
 	getStringProperty,
-	previewUnknown,
 } from "./state-utils.js";
 
 export function getOrCreateToolReceipt(state: PhiState, toolUseId: string): ToolReceipt {
@@ -38,19 +38,46 @@ export function readToolResultIds(message: SDKUserMessage): string[] {
 export function readToolResultPreview(message: SDKUserMessage): string | undefined {
 	const content = message.message.content;
 	if (typeof content === "string") return boundedPreview(content);
-	const parts: string[] = [];
+	return boundedPreviewFromParts(readToolResultTextParts(message));
+}
+
+export function readToolUseResultPreview(value: unknown): string | undefined {
+	if (typeof value === "string") return boundedPreview(value);
+	if (value === null) return "null";
+	if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+		return String(value);
+	}
+
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const result = value as Record<string, unknown>;
+	const fields: string[] = [];
+	if (result.detachedToolCall === true) fields.push("detachedToolCall: true");
+	for (const key of ["status", "taskId", "runId", "taskType", "workflowName", "summary", "error"]) {
+		const field = result[key];
+		if (typeof field === "string") fields.push(`${key}: ${boundedPreview(field)}`);
+		else if (typeof field === "number" || typeof field === "boolean") fields.push(`${key}: ${field}`);
+	}
+	return boundedPreviewFromParts(fields);
+}
+
+function* readToolResultTextParts(message: SDKUserMessage): Iterable<string> {
+	const content = message.message.content;
+	if (typeof content === "string") {
+		if (content) yield content;
+		return;
+	}
 	for (const block of content) {
 		if (getContentType(block) !== "tool_result") continue;
 		const result = getProperty(block, "content");
-		if (typeof result === "string") parts.push(result);
-		else if (Array.isArray(result)) {
+		if (typeof result === "string") {
+			if (result) yield result;
+		} else if (Array.isArray(result)) {
 			for (const item of result) {
 				const text = getStringProperty(item, "text");
-				if (text) parts.push(text);
+				if (text) yield text;
 			}
 		}
 	}
-	return parts.length ? boundedPreview(parts.join("\n")) : undefined;
 }
 
 export function hasToolResultError(message: SDKUserMessage, toolUseId: string): boolean {
