@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -21,6 +22,7 @@ PATH_PREFIX = "/opt/homebrew/bin"
 DA_QUERY = b"\x1b[c"
 DA_REPLY = b"\x1b[?1;2c"
 TIMEOUT = 5.0
+SETUP_TERMINATION_GRACE = 0.25
 
 
 def mode_snapshot(attributes: list[object]) -> dict[str, bool]:
@@ -30,6 +32,65 @@ def mode_snapshot(attributes: list[object]) -> dict[str, bool]:
 		"echo": bool(local & termios.ECHO),
 		"raw": not bool(local & termios.ICANON) and not bool(local & termios.ECHO),
 	}
+
+
+def _set_child_process_group(child_pid: int) -> None:
+	try:
+		os.setpgid(child_pid, child_pid)
+	except OSError as error:
+		if error.errno != errno.EACCES or os.getpgid(child_pid) != child_pid:
+			raise
+
+
+def _wait_child_until(child_pid: int, deadline: float) -> bool:
+	while True:
+		try:
+			waited_pid, _ = os.waitpid(child_pid, os.WNOHANG)
+		except InterruptedError:
+			continue
+		except ChildProcessError:
+			return True
+		if waited_pid == child_pid:
+			return True
+		remaining = deadline - time.monotonic()
+		if remaining <= 0:
+			return False
+		time.sleep(min(0.01, remaining))
+
+
+def _terminate_and_reap(child_pid: int) -> None:
+	if child_pid <= 0:
+		raise ValueError(f"expected an owned child PID, received {child_pid}")
+	try:
+		os.kill(child_pid, signal.SIGTERM)
+	except ProcessLookupError:
+		pass
+	if _wait_child_until(child_pid, time.monotonic() + SETUP_TERMINATION_GRACE):
+		return
+	try:
+		os.kill(child_pid, signal.SIGKILL)
+	except ProcessLookupError:
+		pass
+	while True:
+		try:
+			waited_pid, _ = os.waitpid(child_pid, 0)
+		except InterruptedError:
+			continue
+		except ChildProcessError:
+			return
+		if waited_pid == child_pid:
+			return
+
+
+def _setup_application_child(child_pid: int, slave_fd: int, pid_path: Path) -> None:
+	try:
+		_set_child_process_group(child_pid)
+		signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+		os.tcsetpgrp(slave_fd, child_pid)
+		pid_path.write_text(f"{child_pid}\n", encoding="utf-8")
+	except BaseException:
+		_terminate_and_reap(child_pid)
+		raise
 
 
 class PTYChild:
@@ -56,6 +117,8 @@ class PTYChild:
 		self.marker_line = 0
 		self.supervisor_event = 0
 		self.responded_queries = 0
+		self.stop_signal: int | None = None
+		self.continued_observed = False
 		self.supervisor_pid = os.fork()
 		if self.supervisor_pid == 0:
 			self._supervise()
@@ -83,23 +146,34 @@ class PTYChild:
 			node_pid = os.fork()
 			if node_pid == 0:
 				self._exec_node()
-			os.setpgid(node_pid, node_pid)
-			signal.signal(signal.SIGTTOU, signal.SIG_IGN)
-			os.tcsetpgrp(self.slave, node_pid)
-			self.node_pid_path.write_text(f"{node_pid}\n", encoding="utf-8")
+			_setup_application_child(node_pid, self.slave, self.node_pid_path)
+			stopped = False
+			terminal_restored_while_stopped = False
 			while True:
-				_, status = os.waitpid(node_pid, os.WUNTRACED | os.WCONTINUED)
-				if os.WIFSTOPPED(status):
-					self._record_supervisor("process-stopped", signal=os.WSTOPSIG(status))
-				elif os.WIFCONTINUED(status):
+				status = os.waitid(os.P_PID, node_pid, os.WEXITED | os.WSTOPPED | os.WCONTINUED | os.WNOHANG)
+				if status is not None and status.si_pid:
+					if status.si_code == os.CLD_STOPPED:
+						stopped = True
+						terminal_restored_while_stopped = termios.tcgetattr(self.slave) == self.original
+						self._record_supervisor("process-stopped", signal=status.si_status)
+					elif status.si_code == os.CLD_CONTINUED:
+						stopped = False
+						terminal_restored_while_stopped = False
+						self._record_supervisor("process-continued")
+					else:
+						break
+					continue
+				if stopped and terminal_restored_while_stopped and mode_snapshot(termios.tcgetattr(self.slave))["raw"]:
+					stopped = False
+					terminal_restored_while_stopped = False
 					self._record_supervisor("process-continued")
-				else:
-					break
+					continue
+				time.sleep(0.01)
 			os.tcsetpgrp(self.slave, os.getpgrp())
-			if os.WIFEXITED(status):
-				code = os.WEXITSTATUS(status)
+			if status.si_code == os.CLD_EXITED:
+				code = status.si_status
 			else:
-				code = 128 + os.WTERMSIG(status)
+				code = 128 + status.si_status
 			self._record_supervisor("process-exited", code=code)
 			while not self.finish_gate.exists():
 				time.sleep(0.01)
@@ -166,8 +240,10 @@ class PTYChild:
 			event = self.events[self.supervisor_event]
 			self.supervisor_event += 1
 			if event.get("event") == "process-stopped":
+				self.stop_signal = int(event["signal"])
 				self.stopped = True
 			elif event.get("event") == "process-continued":
+				self.continued_observed = True
 				self.stopped = False
 			elif event.get("event") == "process-exited":
 				self.node_exit_code = int(event["code"])
@@ -239,15 +315,27 @@ class PTYChild:
 			self.pump(0.005)
 		raise AssertionError(f"terminal raw mode did not become {raw}")
 
-	def wait_stopped(self, *, timeout: float = TIMEOUT) -> None:
+	def wait_stopped(self, *, timeout: float = TIMEOUT) -> int:
 		deadline = time.monotonic() + timeout
 		while time.monotonic() < deadline:
 			self.pump(0.02)
 			if self.stopped:
-				return
+				if self.stop_signal is None:
+					raise AssertionError("supervisor did not report the child's stop signal")
+				return self.stop_signal
 			if self.node_exit_code is not None:
 				raise AssertionError(f"child exited instead of suspending: {self.exit_code()}")
 		raise AssertionError("child did not stop after Ctrl+Z")
+
+	def wait_continued(self, *, timeout: float = TIMEOUT) -> None:
+		deadline = time.monotonic() + timeout
+		while time.monotonic() < deadline:
+			self.pump(0.02)
+			if self.continued_observed:
+				return
+			if self.node_exit_code is not None:
+				raise AssertionError(f"child exited before the supervisor observed SIGCONT: {self.exit_code()}")
+		raise AssertionError("supervisor did not observe the child continue after SIGCONT")
 
 	def wait_exit(self, *, timeout: float = TIMEOUT) -> int:
 		deadline = time.monotonic() + timeout

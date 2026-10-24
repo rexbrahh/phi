@@ -102,11 +102,14 @@ def run_dialog(child: PTYChild, issues: list[str]) -> None:
 
 def run_suspend(child: PTYChild, issues: list[str]) -> None:
 	child.send(b"\x1a")
-	child.wait_stopped()
+	stop_signal = child.wait_stopped()
+	check(issues, stop_signal == signal.SIGTSTP, f"Ctrl+Z stopped with signal {stop_signal}, expected SIGTSTP")
 	suspended = termios.tcgetattr(child.slave)
 	child.mode_history["suspended"] = mode_snapshot(suspended)
 	check(issues, child.mode_error(expect_restored=True) is None, "terminal was not restored while the process was suspended")
 	os.kill(child.pid, signal.SIGCONT)
+	child.wait_continued()
+	check(issues, child.continued_observed, "supervisor did not observe the child continue after SIGCONT")
 	child.wait_raw_mode(raw=True)
 	resumed = termios.tcgetattr(child.slave)
 	child.mode_history["resumed"] = mode_snapshot(resumed)
