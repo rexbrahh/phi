@@ -315,17 +315,25 @@ test("history search finds native text beyond the preview cap and copies its vis
 	const resultText = "r".repeat(37 * 1024 - sentinel.length) + sentinel;
 	const copied: string[] = [];
 	const controller = new AppController(parseArgs([]), appDependencies(fake, terminal, {
-		createHistoryReader: () => historyReaderWithMessages([
-			nativeToolResultMessage("native-result", resultText),
-			historyMessage("newer-unrelated", "newest unrelated message"),
-		]),
+		createHistoryReader: () => ({
+			...historyReaderWithMessages([
+				nativeToolResultMessage("native-result", resultText),
+				historyMessage("newer-unrelated", "newest unrelated message"),
+			]),
+			agents: async () => ["retained-child"],
+			agentMessages: async () => [historyMessage("retained-child-message", "retained child output")],
+		}),
 		copyText: async (text) => { copied.push(text); },
 	}));
 	const running = controller.run();
 	await waitFor(() => controller.ready !== undefined);
 	controller.views.inspectors.setSession("search-session");
+	controller.showInspector("tasks");
+	await waitFor(() => controller.views.inspectors.model.childAgentIds.includes("retained-child"));
+	await controller.selectChild("retained-child");
 	controller.showInspector("history");
 	await waitFor(() => controller.views.inspectors.model.historyMessages.length === 2);
+	assert.equal(controller.views.inspectors.model.selectedChildId, "retained-child");
 
 	assert.ok(resultText.indexOf(sentinel) > 8_192);
 	controller.views.inspectors.searchLoadedHistory(sentinel);
@@ -339,11 +347,11 @@ test("history search finds native text beyond the preview cap and copies its vis
 		.join("");
 	assert.equal(displayedResult, "r".repeat(8_191) + "…");
 	assert.equal(displayedResult.includes(sentinel), false);
-	assert.equal(controller.views.inspectors.selectedOutput(), resultText);
-
 	terminal.input("\u0019");
 	await waitFor(() => copied.length === 1);
+	assert.equal(copied[0]?.length, resultText.length);
 	assert.equal(copied[0], resultText);
+	assert.equal(controller.views.inspectors.selectedOutput(), resultText);
 
 	await controller.close(0);
 	assert.equal(await running, 0);

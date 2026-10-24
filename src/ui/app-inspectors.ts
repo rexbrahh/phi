@@ -235,6 +235,16 @@ export class AppInspectorController {
 	}
 
 	selectedOutput(): string | undefined {
+		const search = this.model.panel === "history" ? this.model.searchText?.toLocaleLowerCase() : undefined;
+		if (search) {
+			for (let index = this.model.historyMessages.length - 1; index >= 0; index -= 1) {
+				const candidate = this.model.historyMessages[index];
+				if (!candidate) continue;
+				const content = getHistoryMessageSearchText(candidate.message);
+				if (content.toLocaleLowerCase().includes(search)) return copiedMessageText(candidate.message);
+			}
+			return undefined;
+		}
 		if (this.model.selectedChildId) {
 			const last = this.model.childMessages.at(-1);
 			return last ? copiedMessageText(last.message) : undefined;
@@ -244,16 +254,6 @@ export class AppInspectorController {
 			if (task) return task.progressSummary ?? task.error ?? task.description ?? task.outputFile;
 		}
 		const messages = this.model.selectedChildId ? this.model.childMessages : this.model.historyMessages;
-		const search = this.model.panel === "history" ? this.model.searchText?.toLocaleLowerCase() : undefined;
-		if (search) {
-			for (let index = messages.length - 1; index >= 0; index -= 1) {
-				const candidate = messages[index];
-				if (!candidate) continue;
-				const content = getHistoryMessageSearchText(candidate.message);
-				if (content.toLocaleLowerCase().includes(search)) return copiedMessageText(candidate.message);
-			}
-			return undefined;
-		}
 		const last = messages.at(-1);
 		return last ? copiedMessageText(last.message) : undefined;
 	}
