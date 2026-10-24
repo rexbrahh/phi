@@ -87,6 +87,44 @@ export class FakeQueryHarness {
 	closeCalls = 0;
 	interruptCalls = 0;
 	mcpStatusCalls = 0;
+	backgroundTasksCalls = 0;
+	stopTaskCalls: string[] = [];
+	setModelCalls: Array<string | undefined> = [];
+	setPermissionModeCalls: string[] = [];
+	applyFlagSettingsCalls: Array<Record<string, unknown>> = [];
+	contextUsageCalls: Array<unknown> = [];
+	supportedModelsCalls = 0;
+	closeError: Error | undefined;
+	stopTaskError: Error | undefined;
+	backgroundTasksError: Error | undefined;
+	setModelError: Error | undefined;
+	applyFlagSettingsError: Error | undefined;
+	backgroundTasksResult = true;
+	events: string[] | undefined;
+	mcpStatusResult: unknown[] = [];
+	reconnectMcpServerCalls: string[] = [];
+	reloadPluginsCalls = 0;
+	reloadSkillsCalls = 0;
+	reloadOutputStylesCalls = 0;
+	reloadPluginsResult: unknown = { commands: [], agents: [], plugins: [], mcpServers: [], error_count: 0 };
+	reloadSkillsResult: unknown = { skills: [] };
+	reloadOutputStylesResult: unknown = { available_output_styles: [] };
+	rewindCalls: Array<{ userMessageId: string; dryRun: boolean }> = [];
+	rewindDryRunResult: unknown = { canRewind: true, filesChanged: [], insertions: 0, deletions: 0 };
+	rewindApplyResult: unknown = { canRewind: true, filesChanged: [], insertions: 0, deletions: 0 };
+	rewindError: Error | undefined;
+	supportedCommandsResult: unknown[] = [];
+	contextUsageResult: unknown = {
+		categories: [],
+		totalTokens: 0,
+		maxTokens: 200_000,
+		rawMaxTokens: 200_000,
+		percentage: 0,
+		gridRows: [],
+		model: "claude-sonnet-4-5",
+		memoryFiles: [],
+	};
+	supportedModelsResult: unknown[] = [];
 
 	private readonly output = new AsyncQueue<SDKMessage>();
 	private readonly initialization: Promise<SDKControlInitializeResponse>;
@@ -106,17 +144,70 @@ export class FakeQueryHarness {
 		const iterator = this.readOutput();
 		this.query = Object.assign(iterator, {
 			initializationResult: () => this.initialization,
+			supportedModels: async () => {
+				this.supportedModelsCalls += 1;
+				return this.supportedModelsResult;
+			},
+			getContextUsage: async (options: unknown) => {
+				this.contextUsageCalls.push(options);
+				return this.contextUsageResult;
+			},
+			setModel: async (model: string | undefined) => {
+				this.setModelCalls.push(model);
+				if (this.setModelError) throw this.setModelError;
+			},
+			setPermissionMode: async (mode: string) => {
+				this.setPermissionModeCalls.push(mode);
+			},
+			applyFlagSettings: async (settings: Record<string, unknown>) => {
+				this.applyFlagSettingsCalls.push(settings);
+				if (this.applyFlagSettingsError) throw this.applyFlagSettingsError;
+			},
 			mcpServerStatus: async () => {
 				this.mcpStatusCalls += 1;
-				return [];
+				return this.mcpStatusResult;
 			},
 			interrupt: async () => {
 				this.interruptCalls += 1;
 				return undefined;
 			},
+			backgroundTasks: async () => {
+				this.backgroundTasksCalls += 1;
+				if (this.backgroundTasksError) throw this.backgroundTasksError;
+				return this.backgroundTasksResult;
+			},
+			stopTask: async (taskId: string) => {
+				this.stopTaskCalls.push(taskId);
+				this.events?.push(`stop-task:${taskId}`);
+				if (this.stopTaskError) throw this.stopTaskError;
+			},
+			reconnectMcpServer: async (serverName: string) => {
+				this.reconnectMcpServerCalls.push(serverName);
+			},
+			reloadPlugins: async () => {
+				this.reloadPluginsCalls += 1;
+				return this.reloadPluginsResult;
+			},
+			reloadSkills: async () => {
+				this.reloadSkillsCalls += 1;
+				return this.reloadSkillsResult;
+			},
+			reloadOutputStyles: async () => {
+				this.reloadOutputStylesCalls += 1;
+				return this.reloadOutputStylesResult;
+			},
+			supportedCommands: async () => this.supportedCommandsResult,
+			rewindFiles: async (userMessageId: string, options?: { dryRun?: boolean }) => {
+				const dryRun = options?.dryRun ?? false;
+				this.rewindCalls.push({ userMessageId, dryRun });
+				if (this.rewindError) throw this.rewindError;
+				return dryRun ? this.rewindDryRunResult : this.rewindApplyResult;
+			},
 			close: () => {
 				this.closeCalls += 1;
+				this.events?.push("query-close");
 				this.output.close();
+				if (this.closeError) throw this.closeError;
 			},
 		}) as unknown as Query;
 

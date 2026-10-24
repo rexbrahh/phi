@@ -9,6 +9,7 @@ export class FakeTerminal implements Terminal {
 	stopCalls = 0;
 	programStatus: ProgramStatus | undefined;
 	progress = false;
+	events: string[] | undefined;
 
 	private inputHandler: ((data: string) => void) | undefined;
 	private resizeHandler: (() => void) | undefined;
@@ -21,6 +22,7 @@ export class FakeTerminal implements Terminal {
 
 	stop(): void {
 		this.stopCalls += 1;
+		this.events?.push("terminal-stop");
 		this.inputHandler = undefined;
 		this.resizeHandler = undefined;
 	}
