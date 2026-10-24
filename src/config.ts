@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { resolve } from "node:path";
+import { listSessions as sdkListSessions } from "@anthropic-ai/claude-agent-sdk";
 import type {
 	EffortLevel,
+	ListSessionsOptions,
 	Options,
 	PermissionMode,
+	SDKSessionInfo,
 } from "@anthropic-ai/claude-agent-sdk";
 
 export interface LaunchOptions {
@@ -26,6 +29,29 @@ export class ArgumentError extends Error {
 		super(message);
 		this.name = "ArgumentError";
 	}
+}
+
+export async function resolveLaunchOptions(
+	launch: LaunchOptions,
+	listSessions: (
+		options: ListSessionsOptions,
+	) => Promise<SDKSessionInfo[]> = sdkListSessions,
+): Promise<LaunchOptions> {
+	if (!launch.continue) return launch;
+
+	const sessions = await listSessions({
+		dir: launch.cwd,
+		includeWorktrees: false,
+		includeProgrammatic: true,
+	});
+	if (sessions.length === 0) {
+		throw new ArgumentError(`No resumable sessions found in ${launch.cwd}`);
+	}
+
+	const newest = sessions.reduce((latest, candidate) =>
+		candidate.lastModified > latest.lastModified ? candidate : latest,
+	);
+	return { ...launch, resume: newest.sessionId, continue: false };
 }
 
 const EFFORT_LEVELS: ReadonlySet<string> = new Set([
@@ -166,13 +192,15 @@ export function buildOptions(
 	launch: LaunchOptions,
 	callbacks: Pick<Options, "canUseTool" | "onElicitation" | "hooks">,
 ): Options {
+	if (launch.continue) {
+		throw new ArgumentError("--continue must be resolved to a session before building SDK options");
+	}
 	const startsNewSession = !launch.resume && !launch.continue;
 
 	return {
 		...callbacks,
 		cwd: launch.cwd,
 		...(launch.resume ? { resume: launch.resume } : {}),
-		...(launch.continue ? { continue: true } : {}),
 		...(launch.model ? { model: launch.model } : {}),
 		...(launch.effort ? { effort: launch.effort } : {}),
 		...(launch.permissionMode ? { permissionMode: launch.permissionMode } : {}),

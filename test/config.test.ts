@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildOptions, parseArgs } from "../src/config.js";
+import type { ListSessionsOptions, SDKSessionInfo } from "@anthropic-ai/claude-agent-sdk";
+import { ArgumentError, buildOptions, parseArgs, resolveLaunchOptions } from "../src/config.js";
 import { startSession } from "../src/session.js";
 import { FakeQueryHarness, optionCallbacks } from "./helpers/fake-query.js";
+
+function sessionInfo(sessionId: string, lastModified: number): SDKSessionInfo {
+	return { sessionId, summary: sessionId, lastModified };
+}
 
 test("invalid_args_do_not_create_query", () => {
 	const fake = new FakeQueryHarness();
@@ -100,3 +105,95 @@ test("buildOptions maps repeated plugin directories and optional launch values",
 	assert.equal(options.resume, "00000000-0000-4000-8000-000000000000");
 	assert.equal(options.sessionId, undefined);
 });
+
+test("resolveLaunchOptions selects the most recently modified session", async () => {
+	const launch = parseArgs(["--continue"]);
+	const sessions = [
+		sessionInfo("00000000-0000-4000-8000-000000000001", 100),
+		sessionInfo("00000000-0000-4000-8000-000000000003", 300),
+		sessionInfo("00000000-0000-4000-8000-000000000002", 200),
+	];
+
+	const resolved = await resolveLaunchOptions(launch, async () => sessions);
+	assert.equal(resolved.resume, "00000000-0000-4000-8000-000000000003");
+	assert.equal(resolved.continue, false);
+	const options = buildOptions(resolved, optionCallbacks());
+	assert.equal(options.resume, "00000000-0000-4000-8000-000000000003");
+	assert.equal(options.continue, undefined);
+	assert.equal(options.sessionId, undefined);
+});
+
+test("resolveLaunchOptions lists only the launch directory without worktrees and includes programmatic sessions", async () => {
+	const launch = parseArgs(["--continue"]);
+	let receivedOptions: ListSessionsOptions | undefined;
+
+	await resolveLaunchOptions(launch, async (options) => {
+		receivedOptions = options;
+		return [sessionInfo("00000000-0000-4000-8000-000000000001", 100)];
+	});
+
+	assert.deepEqual(receivedOptions, {
+		dir: launch.cwd,
+		includeWorktrees: false,
+		includeProgrammatic: true,
+	});
+});
+
+test("resolveLaunchOptions with no history prevents query creation", async () => {
+	const fake = new FakeQueryHarness();
+	const callbacks = { onMessage() {}, onError() {} };
+
+	await assert.rejects(async () => {
+		const resolved = await resolveLaunchOptions(parseArgs(["--continue"]), async () => []);
+		startSession(buildOptions(resolved, optionCallbacks()), callbacks, fake.createQuery);
+	}, (error: unknown) => error instanceof ArgumentError && /No resumable sessions/.test(error.message));
+	assert.equal(fake.parameters, undefined);
+});
+
+test("resolveLaunchOptions lookup failure prevents query creation", async () => {
+	const fake = new FakeQueryHarness();
+	const callbacks = { onMessage() {}, onError() {} };
+	const lookupFailure = new Error("session lookup unavailable");
+
+	await assert.rejects(async () => {
+		const resolved = await resolveLaunchOptions(parseArgs(["--continue"]), async () => {
+			throw lookupFailure;
+		});
+		startSession(buildOptions(resolved, optionCallbacks()), callbacks, fake.createQuery);
+	}, (error: unknown) => error === lookupFailure);
+	assert.equal(fake.parameters, undefined);
+});
+
+test("resolveLaunchOptions leaves explicit resume and new launches unchanged", async () => {
+	let lookupCount = 0;
+	const listSessions = async () => {
+		lookupCount += 1;
+		return [];
+	};
+
+	const explicit = parseArgs(["--resume", "00000000-0000-4000-8000-000000000001"]);
+	const resolvedExplicit = await resolveLaunchOptions(explicit, listSessions);
+	assert.strictEqual(resolvedExplicit, explicit);
+	const explicitOptions = buildOptions(resolvedExplicit, optionCallbacks());
+	assert.equal(explicitOptions.resume, explicit.resume);
+	assert.equal(explicitOptions.continue, undefined);
+	assert.equal(explicitOptions.sessionId, undefined);
+
+	const fresh = parseArgs([]);
+	const resolvedFresh = await resolveLaunchOptions(fresh, listSessions);
+	assert.strictEqual(resolvedFresh, fresh);
+	const freshOptions = buildOptions(resolvedFresh, optionCallbacks());
+	assert.equal(freshOptions.resume, undefined);
+	assert.equal(freshOptions.continue, undefined);
+	assert.match(freshOptions.sessionId ?? "", UUID_PATTERN);
+	assert.equal(lookupCount, 0);
+});
+
+test("buildOptions refuses an unresolved continue request", () => {
+	assert.throws(
+		() => buildOptions(parseArgs(["--continue"]), optionCallbacks()),
+		/--continue must be resolved to a session/,
+	);
+});
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
