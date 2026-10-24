@@ -24,6 +24,7 @@ export class AppSessionObserver {
 		private readonly isClosing: () => boolean,
 		private readonly isCurrentGeneration: () => boolean,
 		private readonly onCommandsChanged: (commands: SlashCommand[]) => void,
+		private readonly onCwdChanged: (cwd: string) => void,
 		private readonly onCheckpoint: (uuid: string) => void,
 		private readonly onResult: () => void,
 		private readonly onSdkError: (message: string) => void,
@@ -49,6 +50,7 @@ export class AppSessionObserver {
 				CwdChanged: [{ hooks: [async (input) => {
 					if (this.isCurrentGeneration() && input.hook_event_name === "CwdChanged") {
 						this.state.cwd = input.new_cwd;
+						this.onCwdChanged(input.new_cwd);
 						this.inspectors.scheduleWorkspaceRefresh(input.new_cwd);
 						this.render();
 					}

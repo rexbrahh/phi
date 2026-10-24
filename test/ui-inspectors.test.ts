@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import type { AutocompleteProvider } from "@earendil-works/pi-tui";
 import type { SessionMessage } from "@anthropic-ai/claude-agent-sdk";
+import { loadImage as loadImageFile } from "../src/attachments.js";
 import { parseArgs } from "../src/config.js";
 import { AppController } from "../src/ui/app.js";
 import { FakeQueryHarness } from "./helpers/fake-query.js";
@@ -62,6 +67,73 @@ test("CwdChanged refreshes the displayed workspace and rejects the previous cwd 
 	assert.equal(controller.views.inspectors.model.workspace?.cwd, "/new/cwd");
 	terminal.input("\u0003");
 	assert.equal(await running, 0);
+});
+
+test("CwdChanged refreshes relative completion and image attachment paths", async () => {
+	const temporary = await mkdtemp(join(tmpdir(), "phi-cwd-change-"));
+	const launchCwd = join(temporary, "launch");
+	const effectiveCwd = join(temporary, "effective");
+	await Promise.all([mkdir(launchCwd), mkdir(effectiveCwd)]);
+	await Promise.all([
+		writeFile(join(launchCwd, "old-only.txt"), "old"),
+		writeFile(join(effectiveCwd, "new-only.txt"), "new"),
+		writeFile(join(effectiveCwd, "relative.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+	]);
+
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	const loadedPaths: string[] = [];
+	const controller = new AppController(parseArgs(["--cwd", launchCwd]), appDependencies(fake, terminal, {
+		loadImage: async (path, signal) => {
+			loadedPaths.push(path);
+			return loadImageFile(path, signal);
+		},
+	}));
+	let autocomplete: AutocompleteProvider | undefined;
+	const setAutocompleteProvider = controller.views.editor.setAutocompleteProvider.bind(controller.views.editor);
+	controller.views.editor.setAutocompleteProvider = (provider) => {
+		autocomplete = provider;
+		setAutocompleteProvider(provider);
+	};
+	const processCwd = process.cwd();
+	const running = controller.run();
+	try {
+		await waitFor(() => controller.ready !== undefined && autocomplete !== undefined);
+		const launchProvider = autocomplete;
+		assert.ok(launchProvider);
+		const launchSuggestions = await launchProvider.getSuggestions(["./old-only"], 0, 10, {
+			signal: new AbortController().signal,
+			force: true,
+		});
+		assert.ok(launchSuggestions?.items.some((item) => item.label === "old-only.txt"));
+
+		const hook = fake.parameters?.options?.hooks?.CwdChanged?.[0]?.hooks[0];
+		assert.ok(hook);
+		await hook({ hook_event_name: "CwdChanged", old_cwd: launchCwd, new_cwd: effectiveCwd } as never, undefined, { signal: new AbortController().signal });
+		await waitFor(() => autocomplete !== launchProvider);
+		const effectiveProvider = autocomplete;
+		assert.ok(effectiveProvider);
+		const effectiveSuggestions = await effectiveProvider.getSuggestions(["./new-only"], 0, 10, {
+			signal: new AbortController().signal,
+			force: true,
+		});
+		assert.ok(effectiveSuggestions?.items.some((item) => item.label === "new-only.txt"));
+		const staleSuggestions = await effectiveProvider.getSuggestions(["./old-only"], 0, 10, {
+			signal: new AbortController().signal,
+			force: true,
+		});
+		assert.equal(staleSuggestions?.items.some((item) => item.label === "old-only.txt") ?? false, false);
+
+		controller.submitPrompt("/phi attach relative.png");
+		await waitFor(() => controller.attachments.length === 1);
+		assert.deepEqual(loadedPaths, [join(effectiveCwd, "relative.png")]);
+		assert.equal(controller.state.cwd, effectiveCwd);
+		assert.equal(process.cwd(), processCwd);
+	} finally {
+		await controller.close(0);
+		await running;
+		await rm(temporary, { recursive: true, force: true });
+	}
 });
 
 test("a failed workspace read is ignored after cwd changes but before its debounce fires", async () => {

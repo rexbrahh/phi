@@ -12,6 +12,7 @@ import {
 	type PermissionMode,
 } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
 import { buildOptions, type LaunchOptions } from "../config.js";
 import { dispatchLocalCommand, type LocalCommand, type WorkflowSize } from "../commands.js";
 import { InteractionQueue } from "../interactions.js";
@@ -335,7 +336,7 @@ export class AppController {
 	}
 
 	loadImage(path: string, restoreDraft: string): void {
-		this.attachmentController.loadImage(path, restoreDraft);
+		this.attachmentController.loadImage(resolve(this.state.cwd, path), restoreDraft);
 	}
 
 	copySelectedOutput(): Promise<void> {
@@ -496,6 +497,7 @@ export class AppController {
 			() => this.closing,
 			isCurrent,
 			(commands) => this.refreshNativeCommands(commands),
+			() => this.refreshNativeCommands(this.ready?.commands ?? []),
 			(uuid) => { this.lastCheckpointId = uuid; },
 			() => { this.completedInteractionVersion = this.userInteractionVersion; this.sessionError = undefined; },
 			(message) => { this.sessionError = message; },
