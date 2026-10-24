@@ -8,6 +8,7 @@ import {
 	createClipboardActions,
 	loadImage,
 	runSubprocess,
+	type ImageAttachment,
 	type SubprocessRequest,
 } from "../src/attachments.js";
 import { AppAttachmentController } from "../src/ui/app-attachments.js";
@@ -174,6 +175,67 @@ test("late image failures restore a command only for the same draft and session"
 	await new Promise<void>((resolve) => setTimeout(resolve, 0));
 	assert.equal(editorText, "newer composer draft");
 	assert.match(notices.at(-1) ?? "", /late session failure/);
+	await controller.close();
+});
+
+test("stale empty clipboard results are silent after a same-ID process resume", async () => {
+	let processGeneration = 4;
+	let finishRead: ((attachment: ImageAttachment | null) => void) | undefined;
+	const notices: string[] = [];
+	const controller = new AppAttachmentController({
+		dependencies: {
+			readClipboardImage: () => new Promise((resolve) => { finishRead = resolve; }),
+			copyText: async () => undefined,
+			loadImage: async () => { throw new Error("not used"); },
+		},
+		editor: { setText: () => undefined } as unknown as Editor,
+		draftRevision: () => 1,
+		sessionId: () => "same-session",
+		processGeneration: () => processGeneration,
+		selectedOutput: () => undefined,
+		isClosing: () => false,
+		showNotice: (message) => { if (message) notices.push(message); },
+	});
+
+	controller.loadClipboardImage();
+	assert.ok(finishRead);
+	processGeneration += 1;
+	finishRead(null);
+	await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+	assert.deepEqual(notices, []);
+	await controller.close();
+});
+
+test("stale image failures cannot restore or report against a same-ID resumed process", async () => {
+	let processGeneration = 7;
+	let rejectLoad: ((error: Error) => void) | undefined;
+	let editorText = "/phi attach old.png";
+	const notices: string[] = [];
+	const controller = new AppAttachmentController({
+		dependencies: {
+			readClipboardImage: async () => null,
+			copyText: async () => undefined,
+			loadImage: () => new Promise((_resolve, reject) => { rejectLoad = reject; }),
+		},
+		editor: { setText: (text: string) => { editorText = text; } } as unknown as Editor,
+		draftRevision: () => 2,
+		sessionId: () => "same-session",
+		processGeneration: () => processGeneration,
+		selectedOutput: () => undefined,
+		isClosing: () => false,
+		showNotice: (message) => { if (message) notices.push(message); },
+	});
+
+	controller.loadImage("old.png", "/phi attach old.png");
+	assert.ok(rejectLoad);
+	processGeneration += 1;
+	editorText = "draft for resumed process";
+	rejectLoad(new Error("stale image read failed"));
+	await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+	assert.equal(editorText, "draft for resumed process");
+	assert.deepEqual(notices, []);
 	await controller.close();
 });
 

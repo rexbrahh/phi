@@ -83,7 +83,12 @@ export class AppAttachmentController {
 			try {
 				const attachment = await load(controller.signal);
 				if (!attachment) {
-					if (emptyMessage) this.options.showNotice(emptyMessage);
+					if (
+						emptyMessage
+						&& !controller.signal.aborted
+						&& !this.options.isClosing()
+						&& processGeneration === this.options.processGeneration()
+					) this.options.showNotice(emptyMessage);
 					return;
 				}
 				if (this.options.isClosing()) return;
@@ -100,11 +105,16 @@ export class AppAttachmentController {
 				this.attachments.push(attachment);
 				this.options.showNotice(`Attached ${attachment.name}.`);
 			} catch (error) {
-				if (!controller.signal.aborted && !this.options.isClosing()) {
+				if (
+					!controller.signal.aborted
+					&& !this.options.isClosing()
+					&& processGeneration === this.options.processGeneration()
+				) {
 					if (
 						restoreDraft !== undefined
 						&& draftRevision === this.options.draftRevision()
 						&& sessionId === this.options.sessionId()
+						&& processGeneration === this.options.processGeneration()
 					) {
 						this.options.editor.setText(restoreDraft);
 					}
