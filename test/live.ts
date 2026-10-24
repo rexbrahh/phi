@@ -166,7 +166,6 @@ async function main(): Promise<void> {
 		assert.equal(firstOptions.model, LIVE_MODEL);
 		firstOptions.maxTurns = MAX_MAIN_TURNS;
 		firstOptions.effort = "low";
-		firstOptions.thinking = { type: "disabled" };
 		firstOptions.disallowedTools = ["WebFetch", "WebSearch"];
 		firstOptions.mcpServers = {};
 		firstOptions.strictMcpConfig = true;
@@ -424,7 +423,6 @@ async function main(): Promise<void> {
 		assert.equal(resumeOptions.model, LIVE_MODEL);
 		resumeOptions.maxTurns = 1;
 		resumeOptions.effort = "low";
-		resumeOptions.thinking = { type: "disabled" };
 		resumeOptions.disallowedTools = ["WebFetch", "WebSearch"];
 		resumeOptions.mcpServers = {};
 		resumeOptions.strictMcpConfig = true;
