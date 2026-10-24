@@ -681,3 +681,22 @@ test("runApp refuses non-TTY startup and closes the terminal after SDK initializ
 	assert.equal(fake.closeCalls, 1);
 	assert.equal(terminal.stopCalls, 1);
 });
+
+test("startup diagnostic render failure still closes the query and restores the terminal", async () => {
+	let diagnosticRenderAttempted = false;
+	class DiagnosticFailureTerminal extends FakeTerminal {
+		override write(data: string): void {
+			if (data.includes("Could not start Phi: initialization failed")) {
+				diagnosticRenderAttempted = true;
+				throw new Error("diagnostic rendering failed");
+			}
+			super.write(data);
+		}
+	}
+
+	const terminal = new DiagnosticFailureTerminal();
+	const fake = new FakeQueryHarness(Promise.reject(new Error("initialization failed")));
+	await assert.rejects(runApp(parseArgs([]), appDependencies(fake, terminal)), /diagnostic rendering failed/);
+	assert.equal(diagnosticRenderAttempted, true);
+	assert.deepEqual([fake.closeCalls, terminal.stopCalls], [1, 1]);
+});
