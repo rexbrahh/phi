@@ -79,22 +79,29 @@ Press Enter to submit a prompt. Use the editor for multiline input, history, pas
 | --- | --- |
 | `Ctrl+B` | Ask the SDK to background foreground work. |
 | `Escape` | Hide a pending dialog, leave shell mode, close an inspector, or interrupt foreground work, in that order. |
-| `Ctrl+C` | Cancel a visible dialog, stop a local shell job, interrupt foreground SDK work, or exit when those are idle. |
+| `Ctrl+C` | Cancel a visible native request, stop a local shell job, interrupt foreground SDK work, or request exit when those are idle. |
 | `Ctrl+Z` | Suspend Phi where the terminal supports process suspension. |
 | `Ctrl+T`, `Ctrl+R`, `Ctrl+W` | Open task, session-history, or workspace inspectors. |
 | `Ctrl+G`, `Ctrl+F`, `Ctrl+Y` | Refresh workspace status, search loaded history, or copy selected output. |
 | `Ctrl+V`, `Alt+Backspace` | Attach a clipboard image or remove the most recent attachment. |
-| `Ctrl+O` | Reopen a hidden pending dialog. |
+| `Ctrl+O` | Open transcript history. |
+| `Ctrl+Shift+P` | Open the command palette. |
 
-Permission dialogs accept `1` or `y` to allow once and `d` to deny. They accept `a` to allow the suggested action only when Phi offers that choice. Escape hides a dialog without answering it. Ctrl+C cancels the visible request.
+Permission dialogs accept `1` or `y` to allow once and `d` to deny. They accept `a` to allow the suggested action only when Phi offers that choice. Escape hides a dialog without answering it. Ctrl+C cancels only the visible native request. Phi and its SDK session stay open.
+
+Ctrl+O opens History and hides a visible native request. The request stays pending. Run `/phi questions` to reopen a hidden question or permission. Use `/phi transcript` to open History, `/phi tasks` to open Tasks, and `/phi worktrees` to open Workspace. Run `/phi palette` if the palette key is unavailable.
+
+The command palette lists supported SDK commands and local Phi controls. Select an SDK command to send it through the SDK command path. Select a local control to run its local command. Opening or closing the palette keeps the composer draft.
+
+With a visible native request, Ctrl+C cancels only that request and keeps Phi open. With a running local shell job, it stops the job. With foreground SDK work, it interrupts that work and keeps Phi open. Otherwise, Ctrl+C exits when no draft or background work remains. Phi asks for confirmation before it discards an unsent draft or stops remaining work. Choose “Stop work and exit Phi” to confirm. Choose “Keep Phi open” or press Escape to cancel. `/phi quit` follows the same confirmation rules.
 
 Use `/phi help` to see local commands.
 
 | Group | Commands |
 | --- | --- |
 | Inspect | `/phi status`, `/phi context`, `/phi model`, `/phi effort`, `/phi permissions`, `/phi tasks`, `/phi workflows`, `/phi transcript`, `/phi copy`, `/phi worktrees` |
-| Session | `/phi sessions`, `/phi new`, `/phi resume <id>`, `/phi fork`, `/phi rewind`, `/phi quit` |
-| Local tools | `/phi shell`, `/phi attach <path>`, `/phi mcp`, `/phi reload` |
+| Session | `/phi sessions`, `/phi new`, `/phi resume <id>`, `/phi fork`, `/phi rewind`, `/phi questions`, `/phi quit` |
+| Local tools | `/phi shell`, `/phi attach <path>`, `/phi mcp`, `/phi reload`, `/phi palette` |
 | Settings | `/phi ultracode`, `/phi workflow-size`, `/phi send <text>` |
 
 In Tasks, press `x` to request a stop for the selected running task. This is separate from foreground interruption. If work is active, repeat the same `/phi new`, `/phi resume <id>`, or `/phi fork` command within 30 seconds to confirm stop-and-switch. Phi opens the target only if stop requests succeed.
@@ -115,7 +122,7 @@ Local shell output appears in the transcript as a bounded preview. Phi stores fu
 
 ## Developer checks
 
-Run `npm run build`, `npm run typecheck`, or `npm test` from the checkout. The PTY, load, and live aliases require their harness files from the separate reviewed changes.
+Run `npm run build`, `npm run typecheck`, or `npm test` from the checkout. The PTY, load, and live test harnesses are included in this checkout. Manual acceptance is not complete.
 
 ```sh
 npm run test:pty
