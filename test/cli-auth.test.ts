@@ -252,10 +252,13 @@ test("legacy import paths follow CLAUDE_CONFIG_DIR and default to the user home"
 		assert.equal(await runCli([], dependencies), 0);
 		delete dependencies.environment.CLAUDE_CONFIG_DIR;
 		assert.equal(await runCli([], dependencies), 0);
+		dependencies.environment.CLAUDE_CONFIG_DIR = "";
+		assert.equal(await runCli([], dependencies), 0);
 
 		const home = resolvePhiHome(dependencies.environment, dependencies.userHome);
 		assert.deepEqual(calls, [
 			[explicitSource, home, join(explicitSource, ".claude.json")],
+			[join(dependencies.userHome, ".claude"), home, join(dependencies.userHome, ".claude.json")],
 			[join(dependencies.userHome, ".claude"), home, join(dependencies.userHome, ".claude.json")],
 		]);
 	});

@@ -101,10 +101,10 @@ export async function runCli(argv: string[], dependencies: CliDependencies): Pro
 		await dependencies.ensurePhiHome(home);
 
 		const explicitSource = dependencies.environment.CLAUDE_CONFIG_DIR;
-		const sourceRoot = explicitSource === undefined ? join(dependencies.userHome, ".claude") : explicitSource;
-		const globalConfigPath = explicitSource === undefined
-			? join(dependencies.userHome, ".claude.json")
-			: join(explicitSource, ".claude.json");
+		const sourceRoot = explicitSource ? explicitSource : join(dependencies.userHome, ".claude");
+		const globalConfigPath = explicitSource
+			? join(explicitSource, ".claude.json")
+			: join(dependencies.userHome, ".claude.json");
 		await dependencies.importCustomizations(sourceRoot, home, globalConfigPath);
 
 		const environment = await dependencies.preparePhiAuth(home, dependencies.environment, dependencies.promptForApiKey);
