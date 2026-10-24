@@ -1,3 +1,6 @@
+import type { AppController } from "./ui/app.js";
+import type { EffortLevel, PermissionMode } from "@anthropic-ai/claude-agent-sdk";
+
 export type WorkflowSize = "unrestricted" | "small" | "medium" | "large";
 
 type ArgumentlessKind =
@@ -170,4 +173,277 @@ export function parseLocalCommand(text: string): LocalCommand | null {
 				"/phi help",
 			);
 	}
+}
+
+const PERMISSION_MODES: readonly PermissionMode[] = [
+	"default",
+	"acceptEdits",
+	"bypassPermissions",
+	"plan",
+	"dontAsk",
+	"auto",
+];
+
+export async function dispatchLocalCommand(command: LocalCommand, app: AppController): Promise<void> {
+	if (command.kind === "invalid") {
+		app.showNotice(`${command.message} Usage: ${command.usage}. Use /phi help for local commands.`);
+		return;
+	}
+	if (command.kind === "send") {
+		app.submitLiteral(command.text);
+		return;
+	}
+	if (command.kind === "quit") {
+		await app.close(0);
+		return;
+	}
+	if (command.kind === "new" || command.kind === "resume" || command.kind === "fork") {
+		await app.replaceSession(command);
+		return;
+	}
+	if (command.kind === "rewind") {
+		await app.rewindFiles();
+		return;
+	}
+	if (command.kind === "help") {
+		app.showNotice("Local Phi: /phi status, context, model [id], effort [level], permissions [mode], tasks, workflows, transcript [text], copy, sessions, new, resume <id>, fork, rewind, worktrees, shell, attach <path>, mcp [server], reload, ultracode [on|off], workflow-size [unrestricted|small|medium|large], send <text>, quit. In Tasks, x stops the selected task; Ctrl+B backgrounds foreground work. SDK slash commands and @ paths pass through unchanged.");
+		return;
+	}
+
+	try {
+		switch (command.kind) {
+			case "status":
+				app.showNotice(formatStatus(app));
+				return;
+			case "context": {
+				const query = requireQuery(app);
+				const usage = await query.getContextUsage({ detail: "summary" });
+				app.setReportedModel(usage.model);
+				const categories = usage.categories.map((category) => `${category.name}: ${category.tokens.toLocaleString()} tokens`);
+				app.showNotice([
+					`Context: ${usage.totalTokens.toLocaleString()} / ${usage.maxTokens.toLocaleString()} tokens (${usage.percentage}%).`,
+					`SDK-reported model: ${usage.model}.`,
+					...categories,
+				].join("\n"));
+				return;
+			}
+			case "model":
+				await selectModel(app, command.name);
+				return;
+			case "effort":
+				await selectEffort(app, command.level);
+				return;
+			case "permissions":
+				await selectPermissionMode(app, command.mode);
+				return;
+			case "tasks":
+				app.showInspector("tasks");
+				return;
+			case "workflows":
+				app.showInspector("tasks");
+				app.showNotice("Native workflow IDs and phases are shown in Tasks. Resume a workflow through the SDK's native Workflow.resumeFromRunId path or a configured workflow command.");
+				return;
+			case "transcript":
+				app.showInspector("history");
+				if (command.query) app.searchLoadedHistory(command.query);
+				return;
+			case "copy":
+				await app.copySelectedOutput();
+				return;
+			case "sessions":
+				await showSessions(app);
+				return;
+			case "worktrees":
+				app.showInspector("workspace");
+				return;
+			case "shell":
+				app.openShellMode();
+				return;
+			case "attach":
+				app.loadImage(unquotePath(command.path), `/phi attach ${command.path}`);
+				return;
+			case "mcp":
+				await showOrReconnectMcp(app, command.server);
+				return;
+			case "reload":
+				await reloadNativeCommands(app);
+				return;
+			case "ultracode":
+				await setUltracode(app, command.enabled);
+				return;
+			case "workflow-size":
+				await setWorkflowSize(app, command.size);
+				return;
+		}
+	} catch (error) {
+		app.showNotice(`Could not run /phi ${command.kind}: ${errorText(error)}`);
+	}
+}
+
+function requireQuery(app: AppController) {
+	const query = app.query;
+	if (!query || !app.ready) throw new Error("The SDK session is not ready.");
+	return query;
+}
+
+async function selectModel(app: AppController, requested: string | undefined): Promise<void> {
+	const models = await requireQuery(app).supportedModels();
+	if (!requested) {
+		if (models.length === 0) {
+			app.showNotice("The SDK reported no available models.");
+			return;
+		}
+		const rows = models.map((model) => `${model.displayName} · ${model.value}${model.description ? ` · ${model.description}` : ""}`);
+		app.showNotice(`Runtime SDK models:\n${rows.join("\n")}\nUse /phi model <id> to select one. ${selectionLabel(app, "model")}`);
+		return;
+	}
+	const selected = models.find((model) => model.value === requested || model.resolvedModel === requested);
+	if (!selected) {
+		app.showNotice(`Model ${requested} is not in the SDK's current model list. Use /phi model to see available models.`);
+		return;
+	}
+	await requireQuery(app).setModel(selected.value);
+	app.setSessionControl("model", selected.value);
+			app.showNotice(`Model selection ${selected.value} was accepted by the SDK. Last SDK-reported model: ${app.reportedModel ?? "not reported yet"}.`);
+}
+
+async function selectEffort(app: AppController, requested: string | undefined): Promise<void> {
+	const query = requireQuery(app);
+	const models = await query.supportedModels();
+	let modelId = app.sessionControls.model ?? app.reportedModel;
+	if (!modelId) {
+		const usage = await query.getContextUsage({ detail: "summary" });
+		modelId = usage.model;
+		app.setReportedModel(modelId);
+	}
+	const model = models.find((candidate) => candidate.value === modelId || candidate.resolvedModel === modelId);
+	const levels = model?.supportedEffortLevels ?? [];
+	if (!requested) {
+		app.showNotice(levels.length
+			? `Runtime effort levels for ${model?.displayName ?? modelId}: ${levels.join(", ")}. ${selectionLabel(app, "effort")}`
+			: `The SDK reports no selectable effort levels for ${modelId}.`);
+		return;
+	}
+	if (!levels.includes(requested as EffortLevel)) {
+		app.showNotice(`Effort ${requested} is not supported for ${modelId}. Available levels: ${levels.join(", ") || "none"}.`);
+		return;
+	}
+	await query.applyFlagSettings({ effortLevel: requested as EffortLevel });
+	app.setSessionControl("effort", requested as EffortLevel);
+	app.showNotice(`Effort selection ${requested} was accepted by the SDK. The effective effort level is not reported by this control.`);
+}
+
+async function selectPermissionMode(app: AppController, requested: string | undefined): Promise<void> {
+	if (!requested) {
+		app.showNotice(`Permission modes: ${PERMISSION_MODES.join(", ")}. ${selectionLabel(app, "permissionMode")}`);
+		return;
+	}
+	if (!PERMISSION_MODES.includes(requested as PermissionMode)) {
+		app.showNotice(`Unsupported permission mode ${requested}. Available modes: ${PERMISSION_MODES.join(", ")}.`);
+		return;
+	}
+	if (requested === "bypassPermissions" && !app.dangerousPermissionsEnabled) {
+		app.showNotice("bypassPermissions requires the explicit --dangerously-skip-permissions launch option.");
+		return;
+	}
+	await requireQuery(app).setPermissionMode(requested as PermissionMode);
+	app.setSessionControl("permissionMode", requested as PermissionMode);
+	app.showNotice(`Permission-mode selection ${requested} was accepted by the SDK. Effective runtime mode is not reported by this control.`);
+}
+
+async function setUltracode(app: AppController, enabled: boolean | undefined): Promise<void> {
+	if (enabled === undefined) {
+		app.showNotice(`Ultracode selection: ${app.sessionControls.ultracode === undefined ? "not selected in Phi" : app.sessionControls.ultracode ? "on" : "off"}.`);
+		return;
+	}
+	await requireQuery(app).applyFlagSettings({ ultracode: enabled });
+	app.setSessionControl("ultracode", enabled);
+	app.showNotice(`Ultracode ${enabled ? "on" : "off"} was accepted by the SDK for this session.`);
+}
+
+async function setWorkflowSize(app: AppController, size: WorkflowSize | undefined): Promise<void> {
+	if (size === undefined) {
+		app.showNotice(`Workflow-size selection: ${app.sessionControls.workflowSize ?? "not selected in Phi"}.`);
+		return;
+	}
+	await requireQuery(app).applyFlagSettings({ workflowSizeGuideline: size });
+	app.setSessionControl("workflowSize", size);
+	app.showNotice(`Workflow size ${size} was accepted by the SDK for this session.`);
+}
+
+async function showSessions(app: AppController): Promise<void> {
+	const sessions = await app.listProjectSessions({ limit: 20, offset: 0 });
+	if (sessions.length === 0) {
+		app.showNotice("No SDK sessions were found for this project.");
+		return;
+	}
+	app.showNotice(`Project sessions:\n${sessions.map((session) => `${session.sessionId === app.currentSessionId ? "› " : "  "}${session.sessionId} · ${session.summary || "untitled"}`).join("\n")}\nUse /phi resume <id> to open a session.`);
+}
+
+async function showOrReconnectMcp(app: AppController, serverName: string | undefined): Promise<void> {
+	const query = requireQuery(app);
+	const statuses = await query.mcpServerStatus();
+	if (!serverName) {
+		app.showMcpStatus(statuses);
+		app.showNotice(formatMcpStatuses(statuses));
+		return;
+	}
+	const server = statuses.find((status) => status.name === serverName);
+	if (!server) {
+		app.showNotice(`MCP server ${serverName} was not reported by the SDK.`);
+		return;
+	}
+	await query.reconnectMcpServer(serverName);
+	const updated = await query.mcpServerStatus();
+	app.showMcpStatus(updated);
+	app.showNotice(formatMcpStatuses(updated));
+}
+
+async function reloadNativeCommands(app: AppController): Promise<void> {
+	const query = requireQuery(app);
+	const plugins = await query.reloadPlugins();
+	const skills = await query.reloadSkills();
+	const outputStyles = await query.reloadOutputStyles();
+	const commands = await query.supportedCommands();
+	app.refreshNativeCommands(commands);
+	app.showMcpStatus(plugins.mcpServers);
+	const result = plugins.error_count > 0
+		? `Reload finished with ${plugins.error_count} plugin error(s).`
+		: `Reloaded SDK plugins, ${skills.skills.length} skills, and ${outputStyles.available_output_styles.length} output styles.`;
+	app.showNotice(result);
+}
+
+function formatMcpStatuses(statuses: readonly { name: string; status: string; error?: string }[]): string {
+	return statuses.length === 0
+		? "The SDK reports no MCP servers."
+		: `MCP servers:\n${statuses.map((status) => `${status.name}: ${status.status}${status.error ? ` · ${status.error}` : ""}`).join("\n")}`;
+}
+
+function formatStatus(app: AppController): string {
+	const activeTasks = [...app.state.tasks.values()].filter((task) => task.status === "running").length;
+	const selected = app.sessionControls;
+	return [
+		`Session: ${app.currentSessionId ?? "opening"}`,
+		`Conversation: ${app.state.conversationId ?? "not reported"}`,
+		`Working directory: ${app.state.cwd}`,
+		`Foreground: ${app.state.effectiveStatus.foreground}; running SDK tasks: ${activeTasks}; background task IDs: ${app.state.liveBackgroundTaskIds.size}.`,
+		`Model selected by Phi: ${selected.model ?? "none"}; last SDK-reported model: ${app.reportedModel ?? "not reported"}.`,
+		`Effort selected by Phi: ${selected.effort ?? "none"}; permission mode selected by Phi: ${selected.permissionMode ?? "none"}.`,
+	].join("\n");
+}
+
+function selectionLabel(app: AppController, key: "model" | "effort" | "permissionMode"): string {
+	const value = app.sessionControls[key];
+	return `${key} selected by Phi: ${value ?? "none"}; last SDK-reported model: ${app.reportedModel ?? "not reported"}.`;
+}
+
+function unquotePath(path: string): string {
+	if (path.length >= 2 && ((path.startsWith('"') && path.endsWith('"')) || (path.startsWith("'") && path.endsWith("'")))) {
+		return path.slice(1, -1);
+	}
+	return path;
+}
+
+function errorText(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
