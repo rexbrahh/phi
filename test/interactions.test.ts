@@ -557,6 +557,54 @@ test("form elicitation validates recognized formats and item limits", async () =
 	assert.deepEqual((await elicitationResult(request.promise)).content, { email: "rex@example.com", when: "2026-02-28", roles: ["reader"] });
 });
 
+test("URI formats and HTTP URL guard reject raw spaces and controls", async () => {
+	const queue = new InteractionQueue();
+	const request = elicitationRequest(queue, "elicitation-uri-raw", {
+		mode: "form",
+		serverName: "test-server",
+		message: "Provide URI values",
+		requestedSchema: {
+			type: "object",
+			properties: {
+				destination: { type: "string", format: "uri" },
+				reference: { type: "string", format: "uri-reference" },
+			},
+			required: ["destination", "reference"],
+		},
+	});
+
+	for (const content of [
+		{ destination: "https://example.test/a b", reference: "../valid%20path" },
+		{ destination: "https://example.test/a\nb", reference: "../valid%20path" },
+		{ destination: "https://example.test/valid%20path", reference: "../a b" },
+		{ destination: "https://example.test/valid%20path", reference: "../a\tb" },
+	]) {
+		assert.throws(() => queue.answer("elicitation-uri-raw", {
+			kind: "elicitation",
+			response: { action: "accept", content },
+		}), /URI|format/i);
+		assert.deepEqual(pendingIds(queue), ["elicitation-uri-raw"]);
+	}
+
+	assert.equal(isHttpElicitationUrl("https://example.test/a b"), false);
+	assert.equal(isHttpElicitationUrl("https://example.test/a\nb"), false);
+	assert.equal(isHttpElicitationUrl("https://example.test/a%20b"), true);
+	assert.equal(queue.answer("elicitation-uri-raw", {
+		kind: "elicitation",
+		response: {
+			action: "accept",
+			content: {
+				destination: "https://example.test/a%20b",
+				reference: "../a%20b",
+			},
+		},
+	}), true);
+	assert.deepEqual((await elicitationResult(request.promise)).content, {
+		destination: "https://example.test/a%20b",
+		reference: "../a%20b",
+	});
+});
+
 test("unsupported elicitation schema can only be declined or cancelled", async () => {
 	const queue = new InteractionQueue();
 	const request = elicitationRequest(queue, "elicitation-unsupported", {

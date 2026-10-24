@@ -10,12 +10,13 @@ import { InteractionValidationError } from "./question-validation.js";
 type ElicitationContent = NonNullable<ElicitationResult["content"]>;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
 const INVALID_PERCENT_ESCAPE_PATTERN = /%(?![0-9a-f]{2})/iu;
+const URI_REFERENCE_TEXT_PATTERN = /^[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]*$/u;
 
 export { inspectElicitationForm };
 export type { ElicitationFormField, ElicitationFormSupport, SupportedStringFormat };
 
 export function isHttpElicitationUrl(value: unknown): value is string {
-	if (typeof value !== "string" || value.length === 0) return false;
+	if (typeof value !== "string" || value.length === 0 || !isValidUriReferenceText(value)) return false;
 	try {
 		const url = new URL(value);
 		return url.protocol === "http:" || url.protocol === "https:";
@@ -205,6 +206,7 @@ function isDateTime(value: string): boolean {
 }
 
 function isUri(value: string): boolean {
+	if (!isValidUriReferenceText(value)) return false;
 	try {
 		const url = new URL(value);
 		return url.protocol.length > 1 && /^[a-z][a-z0-9+.-]*:$/iu.test(url.protocol);
@@ -214,12 +216,17 @@ function isUri(value: string): boolean {
 }
 
 function isUriReference(value: string): boolean {
+	if (!isValidUriReferenceText(value)) return false;
 	try {
 		new URL(value, "https://phi.invalid/");
 		return true;
 	} catch {
 		return false;
 	}
+}
+
+function isValidUriReferenceText(value: string): boolean {
+	return URI_REFERENCE_TEXT_PATTERN.test(value) && !INVALID_PERCENT_ESCAPE_PATTERN.test(value);
 }
 
 function isMultipleOf(value: number, divisor: number): boolean {
