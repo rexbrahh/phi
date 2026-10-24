@@ -633,6 +633,38 @@ test("unsupported elicitation schema can only be declined or cancelled", async (
 	assert.deepEqual(pendingIds(queue), []);
 });
 
+test("array-level enum schema cannot be accepted", async () => {
+	const queue = new InteractionQueue();
+	const request = elicitationRequest(queue, "elicitation-array-enum", {
+		mode: "form",
+		serverName: "test-server",
+		message: "Choose allowed tags",
+		requestedSchema: {
+			type: "object",
+			properties: {
+				tags: {
+					type: "array",
+					enum: [["red"]],
+					items: { type: "string", enum: ["red", "blue"] },
+				},
+			},
+		},
+	});
+	const pending = formPending(queue);
+
+	assert.throws(() => queue.answer("elicitation-array-enum", {
+		kind: "elicitation",
+		response: { action: "accept", content: { tags: ["red"] } },
+	}), /unsupported|enum/i);
+	assert.equal(pending.form.supported, false);
+	assert.deepEqual(pendingIds(queue), ["elicitation-array-enum"]);
+	assert.equal(queue.answer("elicitation-array-enum", {
+		kind: "elicitation",
+		response: { action: "decline" },
+	}), true);
+	assert.deepEqual(await elicitationResult(request.promise), { action: "decline" });
+});
+
 test("URL elicitation is not opened automatically and cancellation is returned natively", async () => {
 	const queue = new InteractionQueue();
 	const url = "https://auth.example.test/authorize?state=one";

@@ -196,6 +196,9 @@ function parseField(name: string, definition: unknown, required: boolean): Elici
 	}
 
 	if (definition.type === "array") {
+		if (definition.enum !== undefined) {
+			throw new InteractionValidationError(`Array field ${name} uses an unsupported enum constraint`);
+		}
 		assertKnownKeys(
 			definition,
 			new Set([...COMMON_FIELD_KEYS, "items", "minItems", "maxItems", "uniqueItems"]),
