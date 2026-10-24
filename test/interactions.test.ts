@@ -403,3 +403,256 @@ test("malformed AskUserQuestion input is denied without opening a dialog", async
 	assert.match(response.message, /question/i);
 	assert.deepEqual(pendingIds(queue), []);
 });
+
+test("form elicitation exposes supported fields and accepts validated content", async () => {
+	const queue = new InteractionQueue();
+	const schema = {
+		type: "object",
+		title: "Access request",
+		required: ["name", "role", "count", "approved", "tags"],
+		properties: {
+			name: { type: "string", minLength: 1, maxLength: 32 },
+			role: { type: "string", enum: ["reader", "writer"] },
+			count: { type: "integer", minimum: 1, maximum: 3 },
+			approved: { type: "boolean" },
+			tags: { type: "array", items: { type: "string", enum: ["red", "blue"] }, minItems: 1, maxItems: 2, uniqueItems: true },
+		},
+	};
+	const request = elicitationRequest(queue, "elicitation-form", {
+		mode: "form",
+		serverName: "test-server",
+		message: "Provide access details",
+		requestedSchema: schema,
+	});
+	const pending = formPending(queue);
+	assert.equal(pending.form.supported, true);
+	assert.deepEqual(pending.form.required, ["name", "role", "count", "approved", "tags"]);
+	assert.deepEqual(pendingIds(queue), ["elicitation-form"]);
+
+	assert.equal(queue.answer("elicitation-form", {
+		kind: "elicitation",
+		response: {
+			action: "accept",
+			content: { name: "Rex", role: "reader", count: 2, approved: true, tags: ["red", "blue"] },
+		},
+	}), true);
+	const response = await elicitationResult(request.promise);
+	assert.deepEqual(response, {
+		action: "accept",
+		content: { name: "Rex", role: "reader", count: 2, approved: true, tags: ["red", "blue"] },
+	});
+	assert.deepEqual(pendingIds(queue), []);
+});
+
+test("form elicitation rejects empty required fields", async () => {
+	const queue = new InteractionQueue();
+	const request = elicitationRequest(queue, "elicitation-required", {
+		mode: "form",
+		serverName: "test-server",
+		message: "Name is required",
+		requestedSchema: { type: "object", properties: { name: { type: "string", minLength: 1 } }, required: ["name"] },
+	});
+
+	assert.throws(() => queue.answer("elicitation-required", {
+		kind: "elicitation",
+		response: { action: "accept", content: { name: "" } },
+	}), /name|required|length/i);
+	assert.deepEqual(pendingIds(queue), ["elicitation-required"]);
+	assert.equal(queue.answer("elicitation-required", {
+		kind: "elicitation",
+		response: { action: "accept", content: { name: "Ada" } },
+	}), true);
+	assert.deepEqual((await elicitationResult(request.promise)).content, { name: "Ada" });
+});
+
+test("form elicitation enforces enum and numeric constraints", async () => {
+	const queue = new InteractionQueue();
+	const request = elicitationRequest(queue, "elicitation-bounds", {
+		mode: "form",
+		serverName: "test-server",
+		message: "Choose a level",
+		requestedSchema: {
+			type: "object",
+			properties: {
+				level: { type: "string", enum: ["low", "high"] },
+				count: { type: "number", minimum: 1.5, exclusiveMaximum: 4 },
+			},
+			required: ["level", "count"],
+		},
+	});
+
+	for (const content of [
+		{ level: "medium", count: 2 },
+		{ level: "low", count: 1 },
+		{ level: "high", count: 4 },
+		{ level: "low", count: "2" },
+	]) {
+		assert.throws(() => queue.answer("elicitation-bounds", {
+			kind: "elicitation",
+			response: { action: "accept", content },
+		}), /enum|level|count|number|minimum|maximum/i);
+		assert.deepEqual(pendingIds(queue), ["elicitation-bounds"]);
+	}
+
+	assert.equal(queue.answer("elicitation-bounds", {
+		kind: "elicitation",
+		response: { action: "accept", content: { level: "high", count: 3.5 } },
+	}), true);
+	assert.deepEqual((await elicitationResult(request.promise)).content, { level: "high", count: 3.5 });
+});
+
+test("form elicitation validates recognized formats and item limits", async () => {
+	const queue = new InteractionQueue();
+	const request = elicitationRequest(queue, "elicitation-formats", {
+		mode: "form",
+		serverName: "test-server",
+		message: "Enter contact details",
+		requestedSchema: {
+			type: "object",
+			properties: {
+				email: { type: "string", format: "email" },
+				when: { type: "string", format: "date" },
+				roles: { type: "array", items: { type: "string", enum: ["reader", "writer"] }, minItems: 1, maxItems: 2 },
+			},
+			required: ["email", "when", "roles"],
+		},
+	});
+
+	assert.throws(() => queue.answer("elicitation-formats", {
+		kind: "elicitation",
+		response: { action: "accept", content: { email: "not-email", when: "2026-02-30", roles: [] } },
+	}), /email|date|roles|minimum/i);
+	assert.deepEqual(pendingIds(queue), ["elicitation-formats"]);
+	assert.equal(queue.answer("elicitation-formats", {
+		kind: "elicitation",
+		response: { action: "accept", content: { email: "rex@example.com", when: "2026-02-28", roles: ["reader"] } },
+	}), true);
+	assert.deepEqual((await elicitationResult(request.promise)).content, { email: "rex@example.com", when: "2026-02-28", roles: ["reader"] });
+});
+
+test("unsupported elicitation schema can only be declined or cancelled", async () => {
+	const queue = new InteractionQueue();
+	const request = elicitationRequest(queue, "elicitation-unsupported", {
+		mode: "form",
+		serverName: "test-server",
+		message: "Nested forms are not supported",
+		requestedSchema: {
+			type: "object",
+			properties: { profile: { type: "object", properties: { name: { type: "string" } } } },
+		},
+	});
+	const pending = formPending(queue);
+	assert.equal(pending.form.supported, false);
+	if (pending.form.supported) assert.fail("Nested forms must be declined as unsupported");
+	assert.match(pending.form.reason, /nested|profile|unsupported/i);
+	assert.throws(() => queue.answer("elicitation-unsupported", {
+		kind: "elicitation",
+		response: { action: "accept" },
+	}), /unsupported/i);
+	assert.deepEqual(pendingIds(queue), ["elicitation-unsupported"]);
+	assert.equal(queue.answer("elicitation-unsupported", {
+		kind: "elicitation",
+		response: { action: "decline" },
+	}), true);
+	assert.deepEqual(await elicitationResult(request.promise), { action: "decline" });
+	assert.deepEqual(pendingIds(queue), []);
+});
+
+test("URL elicitation is not opened automatically and cancellation is returned natively", async () => {
+	const queue = new InteractionQueue();
+	const url = "https://auth.example.test/authorize?state=one";
+	const request = elicitationRequest(queue, "elicitation-url", {
+		mode: "url",
+		serverName: "test-server",
+		message: "Sign in to continue",
+		url,
+		elicitationId: "elicitation-native-id",
+	});
+	const pending = urlPending(queue);
+	assert.equal(pending.url, url);
+	assert.equal(pending.canOpenUrl, true);
+	assert.equal(isHttpElicitationUrl(url), true);
+	assert.equal(isHttpElicitationUrl("javascript:alert(1)"), false);
+	assert.equal(isHttpElicitationUrl("file:///etc/passwd"), false);
+
+	assert.equal(queue.answer("elicitation-url", {
+		kind: "elicitation",
+		response: { action: "cancel" },
+	}), true);
+	assert.deepEqual(await elicitationResult(request.promise), { action: "cancel" });
+	assert.deepEqual(pendingIds(queue), []);
+});
+
+test("cancelAll settles every request and prevents later answers", async () => {
+	const queue = new InteractionQueue();
+	const permission = permissionRequest(queue, "cancel-all-permission");
+	const elicitation = elicitationRequest(queue, "cancel-all-elicitation", {
+		mode: "url",
+		serverName: "test-server",
+		message: "Authenticate",
+		url: "https://auth.example.test/",
+	});
+
+	queue.cancelAll("Session closed");
+	assert.deepEqual(pendingIds(queue), []);
+	assert.equal(permissionDeny(await permission.promise).behavior, "deny");
+	assert.deepEqual(await elicitationResult(elicitation.promise), { action: "cancel" });
+	assert.equal(queue.answer("cancel-all-permission", { kind: "permission", action: "allow-once" }), false);
+	assert.equal(queue.answer("cancel-all-elicitation", { kind: "elicitation", response: { action: "accept" } }), false);
+
+	const lateRequest = permissionRequest(queue, "late-after-close");
+	assert.deepEqual(pendingIds(queue), []);
+	assert.match(permissionDeny(await lateRequest.promise).message, /session closed/i);
+});
+
+test("answer types cannot cross permission, question, and elicitation requests", async () => {
+	const queue = new InteractionQueue();
+	const permission = permissionRequest(queue, "typed-permission");
+	const question = questionRequest(queue, "typed-question", questionInput([{ question: "Proceed?", options: [] }]));
+	const elicitation = elicitationRequest(queue, "typed-elicitation", {
+		mode: "url",
+		serverName: "test-server",
+		message: "Authenticate",
+		url: "https://auth.example.test/",
+	});
+
+	assert.throws(() => queue.answer("typed-permission", { kind: "question", action: "cancel" } as InteractionAnswer), /does not match/i);
+	assert.throws(() => queue.answer("typed-question", { kind: "permission", action: "allow-once" } as InteractionAnswer), /does not match/i);
+	assert.throws(() => queue.answer("typed-elicitation", { kind: "permission", action: "deny" } as InteractionAnswer), /does not match/i);
+	assert.deepEqual(pendingIds(queue), ["typed-permission", "typed-question", "typed-elicitation"]);
+
+	queue.cancelAll("test cleanup");
+	assert.equal(permissionDeny(await permission.promise).behavior, "deny");
+	assert.equal(permissionDeny(await question.promise).behavior, "deny");
+	assert.deepEqual(await elicitationResult(elicitation.promise), { action: "cancel" });
+});
+
+test("session close settles native interaction callbacks", async () => {
+	const queue = new InteractionQueue();
+	const fake = new FakeQueryHarness();
+	const options = buildOptions(parseArgs([]), {
+		canUseTool: queue.canUseTool,
+		onElicitation: queue.onElicitation,
+		hooks: {},
+	});
+	const session = startSession(options, {
+		onMessage() {},
+		onError() {},
+		onClosing(reason: string) {
+			queue.cancelAll(reason);
+		},
+	}, fake.createQuery);
+	await session.ready;
+
+	const pending = fake.parameters?.options?.canUseTool?.("Bash", { command: "echo close" }, {
+		signal: new AbortController().signal,
+		toolUseID: "tool-close",
+		requestId: "request-close",
+	});
+	assert.deepEqual(pendingIds(queue), ["request-close"]);
+	await session.close();
+	assert.ok(pending);
+	assert.equal(permissionDeny(await pending).behavior, "deny");
+	assert.deepEqual(pendingIds(queue), []);
+	assert.equal(queue.answer("request-close", { kind: "permission", action: "allow-once" }), false);
+});
