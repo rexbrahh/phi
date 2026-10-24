@@ -29,6 +29,38 @@ function delay(milliseconds: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function processExists(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+function processGroupExists(pid: number): boolean {
+	try {
+		process.kill(-pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+async function withinDeadline<T>(promise: Promise<T>, milliseconds: number, message: string): Promise<T> {
+	let timeout: NodeJS.Timeout | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<never>((_, reject) => {
+				timeout = setTimeout(() => reject(new Error(message)), milliseconds);
+			}),
+		]);
+	} finally {
+		if (timeout) clearTimeout(timeout);
+	}
+}
+
 test("runUserShell passes the exact command and inherited environment and stores private split output", async () => {
 	const temporary = await mkdtemp(join(tmpdir(), "phi shell "));
 	const stateHome = join(temporary, "state home");
@@ -259,19 +291,121 @@ test("runUserShell abort kills its process group and does not report success", a
 	}
 });
 
+test("runUserShell keeps a background descendant owned and cancellable after the shell exits", async () => {
+	const temporary = await mkdtemp(join(tmpdir(), "phi shell detached descendant "));
+	const stateHome = join(temporary, "state");
+	const pidPath = join(temporary, "process ids.txt");
+	const markerPath = join(temporary, "descendant marker.txt");
+	const restoreEnvironment = setEnvironment({ XDG_STATE_HOME: stateHome, SHELL: "/bin/sh" });
+	const controller = new AbortController();
+	let shellPid: number | undefined;
+	try {
+		const command = `(trap '' TERM; while :; do printf x >> ${quoteShell(markerPath)}; sleep 0.05; done) >/dev/null 2>&1 & printf '%s %s\\n' "$$" "$!" > ${quoteShell(pidPath)}; exit 0`;
+		const job = runUserShell(command, temporary, "detached-session", controller.signal, () => {});
+		let jobSettled = false;
+		void job.done.then(() => {
+			jobSettled = true;
+		});
+
+		let descendantPid: number | undefined;
+		for (let attempt = 0; attempt < 150; attempt += 1) {
+			try {
+				[shellPid, descendantPid] = (await readFile(pidPath, "utf8")).trim().split(" ").map(Number);
+				break;
+			} catch {
+				await delay(20);
+			}
+		}
+		assert.ok(shellPid, "the shell should record its process ID");
+		assert.ok(descendantPid, "the shell should record its descendant process ID");
+
+		let shellExited = false;
+		for (let attempt = 0; attempt < 150; attempt += 1) {
+			if (!processExists(shellPid)) {
+				shellExited = true;
+				break;
+			}
+			await delay(20);
+		}
+		assert.ok(shellExited, "the shell should exit before its descendant");
+		assert.ok(processGroupExists(shellPid), "the descendant should keep the owned process group alive");
+		await delay(100);
+		assert.equal(jobSettled, false, "job.done should wait while the owned process group is alive");
+		assert.throws(
+			() => runUserShell("true", temporary, "detached-session", new AbortController().signal, () => {}),
+			/one local shell job/i,
+		);
+
+		controller.abort();
+		const receipt = await withinDeadline(job.done, 7_000, "cancelled detached descendant did not settle");
+		assert.equal(receipt.aborted, true);
+		assert.equal(receipt.exitCode, null);
+		assert.ok(receipt.signal);
+		const markerSize = await stat(markerPath).then((info) => info.size, () => 0);
+		await delay(150);
+		assert.equal(await stat(markerPath).then((info) => info.size, () => 0), markerSize);
+	} finally {
+		controller.abort();
+		if (shellPid) {
+			try {
+				process.kill(-shellPid, "SIGKILL");
+			} catch {
+				// The process group has already exited.
+			}
+		}
+		restoreEnvironment();
+		await rm(temporary, { recursive: true, force: true });
+	}
+});
+
+test("runUserShell reports no signal when an already-aborted job starts no child", async () => {
+	const temporary = await mkdtemp(join(tmpdir(), "phi shell pre-aborted "));
+	const restoreEnvironment = setEnvironment({ XDG_STATE_HOME: join(temporary, "state"), SHELL: "/bin/sh" });
+	const controller = new AbortController();
+	controller.abort();
+	try {
+		const receipt = await runUserShell("true", temporary, "pre-aborted-session", controller.signal, () => {}).done;
+		assert.equal(receipt.aborted, true);
+		assert.equal(receipt.exitCode, null);
+		assert.equal(receipt.signal, null);
+	} finally {
+		restoreEnvironment();
+		await rm(temporary, { recursive: true, force: true });
+	}
+});
+
 test("runUserShell allows only one active local job", async () => {
 	const temporary = await mkdtemp(join(tmpdir(), "phi shell single "));
 	const restoreEnvironment = setEnvironment({ XDG_STATE_HOME: join(temporary, "state"), SHELL: "/bin/sh" });
 	const controller = new AbortController();
+	const pidPath = join(temporary, "shell id.txt");
+	let shellPid: number | undefined;
 	try {
-		const first = runUserShell("sleep 30", temporary, "single-session", controller.signal, () => {});
+		const first = runUserShell(`printf '%s\\n' "$$" > ${quoteShell(pidPath)}; sleep 30`, temporary, "single-session", controller.signal, () => {});
 		assert.throws(
 			() => runUserShell("true", temporary, "single-session", new AbortController().signal, () => {}),
 			/one local shell job/i,
 		);
+		for (let attempt = 0; attempt < 150; attempt += 1) {
+			try {
+				shellPid = Number((await readFile(pidPath, "utf8")).trim());
+				break;
+			} catch {
+				await delay(20);
+			}
+		}
+		assert.ok(shellPid, "the active shell should have started");
 		controller.abort();
-		await first.done;
+		await withinDeadline(first.done, 7_000, "aborted active shell did not settle");
 	} finally {
+		controller.abort();
+		if (shellPid) {
+			try {
+				process.kill(-shellPid, "SIGKILL");
+			} catch {
+				// The process group has already exited.
+			}
+		}
 		restoreEnvironment();
 		await rm(temporary, { recursive: true, force: true });
 	}

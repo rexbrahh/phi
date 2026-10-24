@@ -163,6 +163,10 @@ function wait(milliseconds: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+async function waitForProcessGroupExit(pid: number): Promise<void> {
+	while (processGroupExists(pid)) await wait(50);
+}
+
 async function terminateProcessGroup(
 	child: ChildProcess,
 	addError: (error: unknown) => void,
@@ -317,11 +321,11 @@ async function runJob(
 
 		const close = new Promise<ProcessExit>((resolve) => {
 			child?.once("close", (exitCode, exitSignal) => {
-				signal.removeEventListener("abort", onAbort);
 				resolve({ exitCode, signal: exitSignal });
 			});
 		});
 		processExit = await close;
+		if (child.pid !== undefined && process.platform !== "win32") await waitForProcessGroupExit(child.pid);
 		if (stopPromise) await stopPromise;
 	}
 
@@ -361,7 +365,7 @@ async function runJob(
 		command,
 		cwd,
 		exitCode: aborted || spawnFailed ? null : processExit.exitCode,
-		signal: aborted ? processExit.signal ?? "SIGTERM" : processExit.signal,
+		signal: aborted ? processExit.signal ?? (child ? "SIGTERM" : null) : processExit.signal,
 		aborted,
 		...(infrastructureError ? { infrastructureError } : {}),
 		outputFiles: existingOutputPaths,
@@ -388,7 +392,7 @@ export function runUserShell(
 			command,
 			cwd,
 			exitCode: null,
-			signal: signal.aborted ? "SIGTERM" as const : null,
+			signal: null,
 			aborted: signal.aborted,
 			infrastructureError: formatError(error),
 			outputFiles: {},
