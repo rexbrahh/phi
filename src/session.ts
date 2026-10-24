@@ -19,6 +19,7 @@ const MAX_STDERR_CAPTURE_CHARS = 16_384;
 export interface SessionCallbacks {
 	onMessage(message: SDKMessage): void | Promise<void>;
 	onError(error: unknown): void | Promise<void>;
+	onClosing?(reason: string): void;
 }
 
 export interface Session {
@@ -174,6 +175,11 @@ export function startSession(
 			query.close();
 		} catch (error) {
 			closeError = error;
+		}
+		try {
+			callbacks.onClosing?.("Session closed");
+		} catch (error) {
+			closeError ??= error;
 		}
 
 		closePromise = (async () => {
