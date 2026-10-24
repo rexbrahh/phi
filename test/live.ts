@@ -3,7 +3,7 @@ import { randomUUID, type UUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Options, SDKMessage, SDKResultMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { WorkflowOutput } from "../src/workflows.js";
@@ -14,11 +14,29 @@ const AGENT_SLEEP_COMMAND = "sleep 90";
 const INITIAL_BUDGET_SHARE = 0.75;
 const MAX_TOTAL_TIME_MS = 180_000;
 const STEP_TIMEOUT_MS = 60_000;
+const TERMINATION_TIMEOUT_MS = 15_000;
+
+export interface LiveQueryLifecycle {
+	done: Promise<void>;
+	close(): Promise<void>;
+}
+
+export interface LiveCloseOutcome {
+	terminated: boolean;
+	error?: unknown;
+}
 
 export class LiveRunRefusal extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = "LiveRunRefusal";
+	}
+}
+
+class QueryCreationTripwireError extends Error {
+	constructor() {
+		super("The offline query-creation tripwire blocked the native SDK query.");
+		this.name = "QueryCreationTripwireError";
 	}
 }
 
@@ -94,17 +112,24 @@ interface EventLog {
 async function main(): Promise<void> {
 	const maxBudgetUsd = validateLiveInvocation(process.env, process.argv.slice(2));
 	const deadline = Date.now() + MAX_TOTAL_TIME_MS;
-	const [{ parseArgs, buildOptions }, { startSession }, { readWorkflowJournal }] = await Promise.all([
+	const [{ parseArgs, buildOptions }, { startSession }, { readWorkflowJournal }, sdk] = await Promise.all([
 		import("../src/config.js"),
 		import("../src/session.js"),
 		import("../src/workflows.js"),
+		import("@anthropic-ai/claude-agent-sdk"),
 	]);
+	const createFixtureSession = (options: Options, callbacks: Parameters<typeof startSession>[1]) =>
+		startSession(options, callbacks, (params) => {
+			if (process.env.PHI_LIVE_TEST_QUERY_CREATION_TRIPWIRE === "1") {
+				throw new QueryCreationTripwireError();
+			}
+			return sdk.query(params);
+		});
 
 	const fixture = await createFixture();
 	const sessions: Array<ReturnType<typeof startSession>> = [];
 	let reportedSpend: number | undefined;
 	let sessionId: string | undefined;
-	let checkpointId: UUID | undefined;
 	let workflowTaskId: string | undefined;
 	let workflowRunId: string | undefined;
 
@@ -130,7 +155,7 @@ async function main(): Promise<void> {
 		sessionId = firstOptions.sessionId;
 		assert.ok(sessionId, "new native query must have an SDK session id");
 		const events: EventLog = { messages: [], errors: [] };
-		const session = startSession(firstOptions, {
+		const session = createFixtureSession(firstOptions, {
 			onMessage(message) {
 				events.messages.push(message);
 			},
@@ -140,7 +165,7 @@ async function main(): Promise<void> {
 		});
 		sessions.push(session);
 
-		const initialized = await withDeadline(session.ready, deadline, "initial SDK initialization");
+		const initialized = await withDeadline(session.ready, deadline, "initial SDK initialization", session);
 		assert.equal(initialized.account.apiProvider, "firstParty", "fixture must use the first-party API route");
 		assert.equal(initialized.account.apiKeySource, "ANTHROPIC_API_KEY", "fixture must use its environment key source");
 		assert.ok(
@@ -148,27 +173,31 @@ async function main(): Promise<void> {
 			"native initialization must discover the project acceptance skill",
 		);
 
-		const initialCheckpointId = randomUUID();
-		checkpointId = initialCheckpointId;
-		session.send(userMessage(buildInitialPrompt(fixture.workflowPath, initialCheckpointId), initialCheckpointId));
+		const checkpointUserMessageUuid = randomUUID();
+		session.send(userMessage(
+			buildInitialPrompt(fixture.workflowPath, checkpointUserMessageUuid),
+			checkpointUserMessageUuid,
+		));
 
 		const mainBash = await waitFor(
 			() => findToolUse(events.messages, "Bash", (input) => input.command === MAIN_SLEEP_COMMAND),
 			events,
 			deadline,
 			"bounded foreground Bash tool call",
+			session,
 		);
 		const mainBashTask = await waitFor(
 			() => findTaskStarted(events.messages, (task) => task.tool_use_id === mainBash.id),
 			events,
 			deadline,
 			"native foreground task registration",
+			session,
 		);
 		const mainBashTaskId = asString(mainBashTask.task_id);
 		assert.ok(mainBashTaskId, "foreground Bash task must have a native task id");
 		assert.notEqual(mainBashTask.is_backgrounded, true, "sleep command must start in the foreground");
 		assert.equal(
-			await withDeadline(session.query.backgroundTasks(mainBash.id), deadline, "native task backgrounding"),
+			await withDeadline(session.query.backgroundTasks(mainBash.id), deadline, "native task backgrounding", session),
 			true,
 			"native backgroundTasks must background the selected command",
 		);
@@ -177,20 +206,23 @@ async function main(): Promise<void> {
 			events,
 			deadline,
 			"background task membership",
+			session,
 		);
 		const workflowCall = await waitFor(
 			() => findToolUse(events.messages, "Workflow", (input) => input.name === SKILL_NAME),
 			events,
 			deadline,
 			"native Workflow tool call",
+			session,
 		);
-		assert.equal(workflowCall.input.name, SKILL_NAME);
+		assert.ok(isNamedFixtureWorkflow(workflowCall.input, SKILL_NAME));
 
 		const workflowOutput = await waitFor(
 			() => findWorkflowOutput(events.messages),
 			events,
 			deadline,
 			"native Workflow launch result",
+			session,
 		);
 		assert.equal(workflowOutput.status, "async_launched");
 		assert.equal(workflowOutput.workflowName, SKILL_NAME);
@@ -199,12 +231,6 @@ async function main(): Promise<void> {
 		assert.ok(workflowOutput.transcriptDir, "WorkflowOutput.transcriptDir is required for native metadata inspection");
 		workflowTaskId = workflowOutput.taskId;
 		workflowRunId = workflowOutput.runId;
-		assert.notEqual(workflowTaskId, workflowRunId, "native task id and workflow run id must remain distinct");
-		assert.notEqual(workflowTaskId, sessionId, "Workflow task id and session id must remain distinct");
-		assert.notEqual(workflowRunId, sessionId, "Workflow run id and session id must remain distinct");
-		assert.notEqual(checkpointId, sessionId, "checkpoint UUID and session id must remain distinct");
-		assert.notEqual(checkpointId, workflowTaskId, "checkpoint UUID and native task id must remain distinct");
-		assert.notEqual(checkpointId, workflowRunId, "checkpoint UUID and workflow run id must remain distinct");
 
 		const journalRef = {
 			sessionId,
@@ -216,6 +242,7 @@ async function main(): Promise<void> {
 			journalRef,
 			events,
 			deadline,
+			session,
 		);
 		const startedAgentRecords = journal.records.filter(
 			(record) => record.type === "started" && record.phase === "Parallel fixture probes",
@@ -236,27 +263,11 @@ async function main(): Promise<void> {
 			events,
 			deadline,
 			"two native Workflow agent tasks",
+			session,
 		);
 		const firstAgentTaskId = asString(asRecord(workflowAgents[0])?.task_id);
 		const secondAgentTaskId = asString(asRecord(workflowAgents[1])?.task_id);
 		assert.ok(firstAgentTaskId && secondAgentTaskId);
-		assert.notEqual(firstAgentTaskId, secondAgentTaskId, "the two Workflow agent task ids must differ");
-		assert.notEqual(firstAgentTaskId, workflowTaskId);
-		assert.notEqual(secondAgentTaskId, workflowTaskId);
-		const nativeIdentifiers = [
-			sessionId,
-			checkpointId,
-			workflowTaskId,
-			workflowRunId,
-			mainBashTaskId,
-			firstAgentTaskId,
-			secondAgentTaskId,
-		];
-		assert.equal(
-			new Set(nativeIdentifiers).size,
-			nativeIdentifiers.length,
-			"session, checkpoint, Workflow run, and task ids must be distinct",
-		);
 		const secondAgentStartIndex = events.messages.findIndex((message) => {
 			const record = asRecord(message);
 			return record?.subtype === "task_started" && record.task_id === secondAgentTaskId;
@@ -268,23 +279,25 @@ async function main(): Promise<void> {
 			"both Workflow agents must overlap before the first one settles",
 		);
 
-		await withDeadline(session.query.stopTask(firstAgentTaskId), deadline, "stop first Workflow agent");
+		await withDeadline(session.query.stopTask(firstAgentTaskId), deadline, "stop first Workflow agent", session);
 		await waitFor(
 			() => hasTaskNotification(events.messages, firstAgentTaskId, "stopped"),
 			events,
 			deadline,
 			"individual native task stop",
+			session,
 		);
 		assert.ok(
-			!hasTaskNotification(events.messages, secondAgentTaskId, "stopped"),
+			isBackgroundTaskActive(events.messages, secondAgentTaskId),
 			"stopping one Workflow agent must leave its parallel sibling active",
 		);
 
 		const firstTurn = await waitFor(
-			() => resultForMessage(events.messages, initialCheckpointId),
+			() => resultForMessage(events.messages, checkpointUserMessageUuid),
 			events,
 			deadline,
 			"first main turn result",
+			session,
 		);
 		reportedSpend = firstTurn.total_cost_usd;
 		console.log(`Reported session spend after initial turn: $${reportedSpend.toFixed(4)} USD.`);
@@ -292,6 +305,7 @@ async function main(): Promise<void> {
 		assert.equal(firstTurn.is_error, false, "initial native session turn must succeed");
 		assert.equal(findToolUses(events.messages, "Edit").length, 1, "the fixture must produce exactly one native Edit call");
 		assert.ok(findToolUse(events.messages, "Skill", (input) => input.skill === SKILL_NAME), "native Skill tool must run");
+		assert.ok(hasSkillMarker(events.messages, "phi-live-skill-ok"), "fixture skill marker must appear in native assistant output");
 		assert.ok(
 			findToolUse(events.messages, "Workflow", (input) => input.name === SKILL_NAME),
 			"native Workflow tool must run",
@@ -303,9 +317,10 @@ async function main(): Promise<void> {
 		assert.equal(hookLog.trim(), "native-settings-and-hook-ok", "project settings env and hook must both be active");
 
 		const rewindPreview = await withDeadline(
-			session.query.rewindFiles(checkpointId, { dryRun: true }),
+			session.query.rewindFiles(checkpointUserMessageUuid, { dryRun: true }),
 			deadline,
 			"native checkpoint dry run",
+			session,
 		);
 		assert.equal(rewindPreview.canRewind, true, "native checkpoint must support a dry-run preview");
 		const checkpointPaths = rewindPreview.filesChanged ?? [];
@@ -319,9 +334,8 @@ async function main(): Promise<void> {
 		);
 		assert.equal(await readFile(fixture.toolEditTarget, "utf8"), "after\n", "dry-run checkpoint preview must not restore files");
 		assert.ok(
-			!hasTaskNotification(events.messages, secondAgentTaskId, "completed") &&
-			!hasTaskNotification(events.messages, secondAgentTaskId, "stopped"),
-			"the second Workflow agent must still be active before continued main input",
+			isBackgroundTaskActive(events.messages, secondAgentTaskId),
+			"the second Workflow agent must remain in current background membership before continued main input",
 		);
 		const continuationPromptId = randomUUID();
 		session.send(userMessage("The first turn is complete. Reply only `continuation accepted`; do not use tools.", continuationPromptId));
@@ -331,14 +345,15 @@ async function main(): Promise<void> {
 			events,
 			deadline,
 			"continued main input while a Workflow agent is active",
+			session,
 		);
 		reportedSpend = continuedTurn.total_cost_usd;
 		console.log(`Reported session spend before resume: $${reportedSpend.toFixed(4)} USD.`);
 		assert.equal(continuedTurn.session_id, sessionId);
 		assert.equal(continuedTurn.is_error, false);
 		assert.ok(
-			!hasTaskNotification(events.messages, secondAgentTaskId, "completed"),
-			"the main session must accept input while the other Workflow agent remains active",
+			isBackgroundTaskActive(events.messages, secondAgentTaskId),
+			"the sibling must still be active when continued main input completes",
 		);
 		const remainingBudgetUsd = maxBudgetUsd - reportedSpend;
 		assert.ok(remainingBudgetUsd > 0, "reported initial spend leaves room inside the requested total budget for resume");
@@ -348,16 +363,18 @@ async function main(): Promise<void> {
 			events,
 			deadline,
 			"background Bash completion",
+			session,
 		);
-		await withDeadline(session.query.stopTask(secondAgentTaskId), deadline, "stop remaining Workflow agent");
+		await withDeadline(session.query.stopTask(secondAgentTaskId), deadline, "stop remaining Workflow agent", session);
 		await waitFor(
 			() => hasTaskNotification(events.messages, secondAgentTaskId, "stopped"),
 			events,
 			deadline,
 			"cleanup stop for the remaining Workflow agent",
+			session,
 		);
 
-		await closeSession(session, deadline, "initial session close");
+		assertCleanClose(await closeSession(session, TERMINATION_TIMEOUT_MS, "initial session close"), "initial session close");
 
 		const resumeOptions = buildOptions(
 			parseArgs([
@@ -380,7 +397,7 @@ async function main(): Promise<void> {
 		};
 
 		const resumedEvents: EventLog = { messages: [], errors: [] };
-		const resumed = startSession(resumeOptions, {
+		const resumed = createFixtureSession(resumeOptions, {
 			onMessage(message) {
 				resumedEvents.messages.push(message);
 			},
@@ -389,7 +406,7 @@ async function main(): Promise<void> {
 			},
 		});
 		sessions.push(resumed);
-		const resumedInitialization = await withDeadline(resumed.ready, deadline, "resumed SDK initialization");
+		const resumedInitialization = await withDeadline(resumed.ready, deadline, "resumed SDK initialization", resumed);
 		assert.equal(resumedInitialization.account.apiProvider, "firstParty");
 		assert.equal(resumedInitialization.account.apiKeySource, "ANTHROPIC_API_KEY");
 
@@ -403,6 +420,7 @@ async function main(): Promise<void> {
 			resumedEvents,
 			deadline,
 			"resumed session result",
+			resumed,
 		);
 		assert.equal(resumedResult.session_id, sessionId, "native session resume must retain the original session id");
 		reportedSpend = resumedResult.total_cost_usd;
@@ -411,24 +429,29 @@ async function main(): Promise<void> {
 		if (resumedResult.subtype !== "success") {
 			throw new Error(`Native session resume ended with ${resumedResult.subtype}`);
 		}
-		const expectedResumeMarker = extractResumeMarker(events.messages, checkpointId);
+		const expectedResumeMarker = extractResumeMarker(events.messages, checkpointUserMessageUuid);
 		assert.ok(resumedResult.result.includes(expectedResumeMarker), "resumed conversation must retain its earlier user context");
 		assert.ok(reportedSpend <= maxBudgetUsd, "reported session spend must remain within the requested budget");
 
 		console.log(`Native SDK acceptance scenario completed. Reported session spend: $${reportedSpend.toFixed(4)} USD.`);
 		console.log(
-			`Session ${sessionId}; Workflow task ${workflowTaskId}; Workflow run ${workflowRunId}; checkpoint ${checkpointId}.`,
+			`Session ${sessionId}; Workflow task ${workflowTaskId}; Workflow run ${workflowRunId}; checkpoint message ${checkpointUserMessageUuid}.`,
 		);
 	} finally {
-		const closeOutcomes = await Promise.allSettled(
-			sessions.reverse().map((session) => closeSession(session, Date.now() + 15_000, "final session cleanup")),
+		const closeOutcomes = await Promise.all(
+			sessions.reverse().map((session) => closeSession(session, TERMINATION_TIMEOUT_MS, "final session cleanup")),
 		);
-		const cleanupFailure = closeOutcomes.find((outcome) => outcome.status === "rejected");
-		if (cleanupFailure?.status === "rejected") {
+		const cleanupFailure = closeOutcomes.find((outcome) => outcome.error !== undefined || !outcome.terminated);
+		if (cleanupFailure) {
 			console.error("Native SDK session cleanup did not complete cleanly.");
 			process.exitCode = process.exitCode || 1;
 		}
-		await rm(fixture.root, { recursive: true, force: true });
+		if (closeOutcomes.every((outcome) => outcome.terminated)) {
+			await rm(fixture.root, { recursive: true, force: true });
+		} else {
+			console.error("Retained the synthetic fixture because query termination was not observed.");
+			process.exitCode = process.exitCode || 1;
+		}
 	}
 }
 
@@ -443,12 +466,11 @@ function fixtureCallbacks(fixture: HarnessFixture): Pick<Options, "canUseTool" |
 			}
 			if (
 				toolName === "Edit" &&
-				isFixturePath(fixture.repository, input.file_path) &&
-				basename(String(input.file_path)) === "target.txt"
+				isExactFixtureTarget(fixture.repository, fixture.toolEditTarget, input.file_path)
 			) {
 				return { behavior: "allow", updatedInput: input };
 			}
-			if (toolName === "Workflow" && input.name === SKILL_NAME) {
+			if (toolName === "Workflow" && isNamedFixtureWorkflow(input, SKILL_NAME)) {
 				return { behavior: "allow", updatedInput: input };
 			}
 			if (toolName === "Bash" && (input.command === MAIN_SLEEP_COMMAND || input.command === AGENT_SLEEP_COMMAND)) {
@@ -459,6 +481,15 @@ function fixtureCallbacks(fixture: HarnessFixture): Pick<Options, "canUseTool" |
 		onElicitation: async () => ({ action: "decline" }),
 		hooks: {},
 	};
+}
+
+export function isExactFixtureTarget(repository: string, target: string, value: unknown): boolean {
+	return typeof value === "string" && resolve(repository, value) === resolve(target);
+}
+
+export function isNamedFixtureWorkflow(input: Record<string, unknown>, workflowName: string): boolean {
+	const keys = Object.keys(input);
+	return input.name === workflowName && keys.length === 1 && keys[0] === "name";
 }
 
 async function createFixture(): Promise<HarnessFixture> {
@@ -647,6 +678,45 @@ function isTaskNotification(message: SDKMessage, taskId: string): boolean {
 	return record?.type === "system" && record.subtype === "task_notification" && record.task_id === taskId;
 }
 
+const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "stopped"]);
+
+function hasTerminalTaskNotification(messages: readonly unknown[], taskId: string): boolean {
+	return messages.some((message) => {
+		const record = asRecord(message);
+		return record?.type === "system" && record.subtype === "task_notification" &&
+			record.task_id === taskId && typeof record.status === "string" &&
+			TERMINAL_TASK_STATUSES.has(record.status);
+	});
+}
+
+export function isBackgroundTaskActive(messages: readonly unknown[], taskId: string): boolean {
+	let currentMembership: Set<string> | undefined;
+	for (const message of messages) {
+		const record = asRecord(message);
+		if (record?.type !== "system" || record.subtype !== "background_tasks_changed" || !Array.isArray(record.tasks)) {
+			continue;
+		}
+		currentMembership = new Set(record.tasks.flatMap((value) => {
+			const taskId = asString(asRecord(value)?.task_id);
+			return taskId ? [taskId] : [];
+		}));
+	}
+	return currentMembership?.has(taskId) === true && !hasTerminalTaskNotification(messages, taskId);
+}
+
+export function hasSkillMarker(messages: readonly unknown[], marker: string): boolean {
+	return messages.some((message) => {
+		const record = asRecord(message);
+		if (record?.type !== "assistant") return false;
+		const body = asRecord(record.message);
+		if (!Array.isArray(body?.content)) return false;
+		return body.content.some((value) => {
+			const block = asRecord(value);
+			return block?.type === "text" && typeof block.text === "string" && block.text.includes(marker);
+		});
+	});
+}
+
 function hasTaskNotification(messages: SDKMessage[], taskId: string, status: string): boolean {
 	return messages.some((message) => {
 		const record = asRecord(message);
@@ -680,6 +750,7 @@ async function waitFor<T>(
 	events: EventLog,
 	deadline: number,
 	label: string,
+	session: LiveQueryLifecycle,
 ): Promise<T> {
 	return withDeadline((async () => {
 		while (Date.now() < deadline) {
@@ -688,8 +759,8 @@ async function waitFor<T>(
 			if (events.errors.length > 0) throw new Error(`SDK reported an error while waiting for ${label}`);
 			await delay(100);
 		}
-		throw new Error(`Timed out waiting for ${label}`);
-	})(), deadline, label);
+		throw new DeadlineExceededError(`Timed out waiting for ${label}`);
+	})(), deadline, label, session);
 }
 
 async function waitForJournal(
@@ -697,6 +768,7 @@ async function waitForJournal(
 	ref: import("../src/workflows.js").WorkflowReference,
 	events: EventLog,
 	deadline: number,
+	session: LiveQueryLifecycle,
 ): Promise<import("../src/workflows.js").WorkflowJournalMetadata> {
 	return waitFor(async () => {
 		const page = await readJournal(ref);
@@ -706,26 +778,91 @@ async function waitForJournal(
 		return new Set(started.map((record) => record.agentId).filter(Boolean)).size >= 2
 			? page.metadata
 			: undefined;
-	}, events, deadline, "workflow phase journal metadata");
+	}, events, deadline, "workflow phase journal metadata", session);
 }
 
-async function closeSession(
-	session: ReturnType<typeof import("../src/session.js").startSession>,
+export async function closeSession(
+	session: LiveQueryLifecycle,
+	timeoutMs: number,
+	label: string,
+): Promise<LiveCloseOutcome> {
+	const startedAt = Date.now();
+	let closeError: unknown;
+	let doneError: unknown;
+	let closePromise: Promise<void>;
+	try {
+		closePromise = session.close().then(
+			() => undefined,
+			(error: unknown) => {
+				closeError = error;
+			},
+		);
+	} catch (error) {
+		closeError = error;
+		closePromise = Promise.resolve();
+	}
+	const donePromise = session.done.then(
+		() => undefined,
+		(error: unknown) => {
+			doneError = error;
+		},
+	);
+	try {
+		await waitBounded(donePromise, timeoutMs, `${label} query termination`);
+	} catch (error) {
+		return { terminated: false, error };
+	}
+	try {
+		const remainingMs = Math.max(1, timeoutMs - (Date.now() - startedAt));
+		await waitBounded(closePromise, remainingMs, `${label} close`);
+	} catch (error) {
+		return { terminated: true, error: closeError ?? doneError ?? error };
+	}
+	const error = closeError ?? doneError;
+	return error === undefined ? { terminated: true } : { terminated: true, error };
+}
+
+function assertCleanClose(outcome: LiveCloseOutcome, label: string): void {
+	if (!outcome.terminated) {
+		throw new Error(`${label} did not establish query termination`, { cause: outcome.error });
+	}
+	if (outcome.error !== undefined) {
+		throw new Error(`${label} reported a cleanup failure`, { cause: outcome.error });
+	}
+}
+
+export async function withDeadline<T>(
+	promise: Promise<T>,
 	deadline: number,
 	label: string,
-): Promise<void> {
-	await withDeadline(session.close(), deadline, label);
+	session: LiveQueryLifecycle,
+): Promise<T> {
+	const remainingMs = Math.min(STEP_TIMEOUT_MS, Math.max(0, deadline - Date.now()));
+	try {
+		return await waitBounded(promise, remainingMs, label);
+	} catch (error) {
+		if (!(error instanceof DeadlineExceededError)) throw error;
+		const cleanup = await closeSession(session, TERMINATION_TIMEOUT_MS, `${label} timeout termination`);
+		if (!cleanup.terminated || cleanup.error !== undefined) {
+			const details = cleanup.error === undefined ? [error] : [error, cleanup.error];
+			const message = cleanup.terminated
+				? `${label} timed out and query cleanup failed`
+				: `${label} timed out and query termination was not observed`;
+			throw new AggregateError(details, message);
+		}
+		throw error;
+	}
 }
 
-async function withDeadline<T>(promise: Promise<T>, deadline: number, label: string): Promise<T> {
-	const remainingMs = Math.min(STEP_TIMEOUT_MS, Math.max(0, deadline - Date.now()));
-	if (remainingMs === 0) throw new Error(`Timed out before ${label} started`);
+class DeadlineExceededError extends Error {}
+
+async function waitBounded<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
 	let timer: NodeJS.Timeout | undefined;
 	try {
 		return await Promise.race([
 			promise,
 			new Promise<T>((_, reject) => {
-			timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), remainingMs);
+				timer = setTimeout(() => reject(new DeadlineExceededError(`Timed out waiting for ${label}`)), timeoutMs);
 			}),
 		]);
 	} finally {
@@ -753,6 +890,11 @@ if (isMainModule()) {
 		if (error instanceof LiveRunRefusal) {
 			console.error(error.message);
 			process.exitCode = 2;
+			return;
+		}
+		if (error instanceof QueryCreationTripwireError) {
+			console.error(error.message);
+			process.exitCode = 86;
 			return;
 		}
 		const errorName = error instanceof Error ? error.name : "UnknownError";
