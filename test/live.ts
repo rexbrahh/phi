@@ -10,7 +10,7 @@ import type { WorkflowOutput } from "../src/workflows.js";
 
 const SKILL_NAME = "phi-live-acceptance";
 const MAIN_SLEEP_COMMAND = "sleep 8";
-const AGENT_SLEEP_COMMAND = "sleep 30";
+const AGENT_SLEEP_COMMAND = "sleep 90";
 const INITIAL_BUDGET_SHARE = 0.75;
 const MAX_TOTAL_TIME_MS = 180_000;
 const STEP_TIMEOUT_MS = 60_000;

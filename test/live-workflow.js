@@ -7,10 +7,10 @@ export const meta = {
 phase("Parallel fixture probes");
 
 await parallel([
-	() => agent("Run `sleep 30` once, then return only `phi-live-agent-stopped`. Do not edit files.", {
+	() => agent("Run `sleep 90` once, then return only `phi-live-agent-stopped`. Do not edit files.", {
 		label: "phi-live-agent-stopped",
 	}),
-	() => agent("Run `sleep 30` once, then return only `phi-live-agent-continued`. Do not edit files.", {
+	() => agent("Run `sleep 90` once, then return only `phi-live-agent-continued`. Do not edit files.", {
 		label: "phi-live-agent-continued",
 	}),
 ]);
