@@ -434,7 +434,11 @@ test("a delayed image result is discarded when the composer draft changes", asyn
 	terminal.input("\r");
 	terminal.input("new composer draft");
 	resolveImage(image);
-	await waitFor(() => terminal.output.includes("composer draft changed"));
+	await waitFor(() => terminal.output
+		.replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/gu, "")
+		.replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "")
+		.replace(/\s+/gu, " ")
+		.includes("composer draft changed"));
 	assert.equal(controller.attachments.length, 0);
 	assert.equal(controller.views.editor.getText(), "new composer draft");
 	terminal.input("\u0003");
