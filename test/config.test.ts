@@ -67,7 +67,7 @@ test("buildOptions preserves SDK defaults unless explicit settings are supplied"
 	assert.deepEqual(options.extraArgs, { "replay-user-messages": null });
 	assert.equal(options.env?.PATH, process.env.PATH);
 	assert.equal(options.env?.CLAUDE_CONFIG_DIR, launch.home);
-	assert.equal(options.env?.CLAUDE_CODE_PLUGIN_CACHE_DIR, join(launch.home, "plugins", "cache"));
+	assert.equal(options.env?.CLAUDE_CODE_PLUGIN_CACHE_DIR, join(launch.home, "plugins"));
 	assert.equal(options.env?.CLAUDE_AGENT_SDK_CLIENT_APP, "phi/0.1.0");
 	assert.equal(options.canUseTool, callbacks.canUseTool);
 	assert.equal(options.onElicitation, callbacks.onElicitation);
@@ -91,7 +91,7 @@ test("buildOptions keeps injected credentials and inherited environment while pi
 	assert.equal(options.env?.ANTHROPIC_API_KEY, "synthetic-api-key");
 	assert.equal(options.env?.PATH, "/synthetic/bin");
 	assert.equal(options.env?.CLAUDE_CONFIG_DIR, launch.home);
-	assert.equal(options.env?.CLAUDE_CODE_PLUGIN_CACHE_DIR, join(launch.home, "plugins", "cache"));
+	assert.equal(options.env?.CLAUDE_CODE_PLUGIN_CACHE_DIR, join(launch.home, "plugins"));
 	assert.equal(process.env.CLAUDE_CONFIG_DIR, priorConfigRoot);
 });
 

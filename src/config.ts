@@ -228,7 +228,7 @@ export function buildOptions(
 		env: {
 			...environment,
 			CLAUDE_CONFIG_DIR: launch.home,
-			CLAUDE_CODE_PLUGIN_CACHE_DIR: join(launch.home, "plugins", "cache"),
+			CLAUDE_CODE_PLUGIN_CACHE_DIR: join(launch.home, "plugins"),
 			CLAUDE_AGENT_SDK_CLIENT_APP: "phi/0.1.0",
 		},
 	};
