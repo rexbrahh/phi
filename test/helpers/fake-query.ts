@@ -68,7 +68,14 @@ export function initializedResponse(
 		apiKeySource: "ANTHROPIC_API_KEY",
 	},
 ): SDKControlInitializeResponse {
-	return { account } as SDKControlInitializeResponse;
+	return {
+		commands: [],
+		agents: [],
+		output_style: "default",
+		available_output_styles: [],
+		models: [],
+		account,
+	} as SDKControlInitializeResponse;
 }
 
 export class FakeQueryHarness {
@@ -78,6 +85,8 @@ export class FakeQueryHarness {
 	readonly createQuery: (parameters: QueryParameters) => Query;
 	parameters?: QueryParameters;
 	closeCalls = 0;
+	interruptCalls = 0;
+	mcpStatusCalls = 0;
 
 	private readonly output = new AsyncQueue<SDKMessage>();
 	private readonly initialization: Promise<SDKControlInitializeResponse>;
@@ -97,6 +106,14 @@ export class FakeQueryHarness {
 		const iterator = this.readOutput();
 		this.query = Object.assign(iterator, {
 			initializationResult: () => this.initialization,
+			mcpServerStatus: async () => {
+				this.mcpStatusCalls += 1;
+				return [];
+			},
+			interrupt: async () => {
+				this.interruptCalls += 1;
+				return undefined;
+			},
 			close: () => {
 				this.closeCalls += 1;
 				this.output.close();

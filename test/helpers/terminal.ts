@@ -79,3 +79,21 @@ export class FakeTerminal implements Terminal {
 		this.resizeHandler?.();
 	}
 }
+
+export class FakeSignals {
+	private readonly listeners = new Map<string, Set<() => void>>();
+
+	on(signal: string, listener: () => void): void {
+		const listeners = this.listeners.get(signal) ?? new Set<() => void>();
+		listeners.add(listener);
+		this.listeners.set(signal, listeners);
+	}
+
+	off(signal: string, listener: () => void): void {
+		this.listeners.get(signal)?.delete(listener);
+	}
+
+	emit(signal: string): void {
+		for (const listener of this.listeners.get(signal) ?? []) listener();
+	}
+}
