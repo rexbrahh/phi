@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { arch, cpus, platform, release, tmpdir, version as osVersion } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { performance } from "node:perf_hooks";
@@ -17,11 +17,16 @@ import { appDependencies } from "./helpers/ui-app.js";
 const EXPECTED_UNIQUE_EVENTS = 2 * LOAD_TOOL_CALLS + 5 * LOAD_CHILD_CONVERSATIONS + 1;
 const EXPECTED_DELIVERIES = 2 * EXPECTED_UNIQUE_EVENTS + 1;
 const INJECTED_PROMPTS = ["load input one", "load input two", "load input three"] as const;
+const KEYBOARD_SAMPLE_INTERVAL_EVENTS = 50;
+const KEYBOARD_SAMPLE_CHARACTER = "x";
+const KEYBOARD_SAMPLE_BACKSPACE = "\u007f";
+const EXPECTED_KEYBOARD_SAMPLE_EVENTS = Math.floor((EXPECTED_UNIQUE_EVENTS - 1) / KEYBOARD_SAMPLE_INTERVAL_EVENTS) + 1;
+const EXPECTED_KEYBOARD_INPUT_SAMPLES = 2 * EXPECTED_KEYBOARD_SAMPLE_EVENTS;
 
 interface FeederReady {
 	type: "ready";
 	eventCountPerPass: number;
-	workerHeapUsedBytes: number;
+	producerWorkerHeapUsedBytes: number;
 }
 
 interface FeederEvent {
@@ -36,7 +41,7 @@ interface FeederPhaseComplete {
 	phase: "unique" | "duplicate";
 	firstEmittedAt: number;
 	lastEmittedAt: number;
-	workerHeapUsedBytes: number;
+	producerWorkerHeapUsedBytes: number;
 }
 
 interface FeederComplete {
@@ -44,7 +49,7 @@ interface FeederComplete {
 	deliveryCount: number;
 	firstEmittedAt: number;
 	lastEmittedAt: number;
-	workerHeapUsedBytes: number;
+	producerWorkerHeapUsedBytes: number;
 }
 
 type FeederNotice = FeederReady | FeederPhaseComplete | FeederComplete;
@@ -55,7 +60,7 @@ interface MemorySample {
 	parentRssBytes: number;
 	parentHeapUsedBytes: number;
 	parentExternalBytes: number;
-	workerHeapUsedBytes: number;
+	producerWorkerHeapUsedBytes: number;
 }
 
 interface ProgressSample {
@@ -82,11 +87,14 @@ test("load acceptance: 7,000 tool calls, 200 child histories, native tasks, and 
 		resolveLaunchOptions: async (launch) => launch,
 		readWorkspace: async (cwd) => ({ kind: "not-repository", cwd }),
 	}));
-	const primaryLatencies: number[] = [];
-	const oversizedLatencies: number[] = [];
-	const pendingInputs: Array<{ decodedAt: number; group: FakeQuerySampleGroup }> = [];
+	const keyboardLatencies: number[] = [];
+	const sdkEventLatencies: number[] = [];
+	const oversizedSdkEventLatencies: number[] = [];
+	const pendingSdkEvents: Array<{ eventAt: number; group: FakeQuerySampleGroup }> = [];
+	const pendingKeyboardInputs: number[] = [];
+	const keyboardSampleEventIndices: number[] = [];
 	const memorySamples: MemorySample[] = [];
-	const workerSamples: Array<{ stage: string; heapUsedBytes: number }> = [];
+	const producerWorkerSamples: Array<{ stage: string; producerWorkerHeapUsedBytes: number }> = [];
 	const progressSamples: ProgressSample[] = [];
 	const notificationQueues = new Map<string, FeederNotice[]>();
 	const notificationWaiters = new Map<string, Array<{
@@ -100,6 +108,7 @@ test("load acceptance: 7,000 tool calls, 200 child histories, native tasks, and 
 	let feederWorker: Worker | undefined;
 	let running: Promise<number> | undefined;
 	const injected = new Set<number>();
+	let recordingKeyboardSample = false;
 	const injectionAt = [
 		Math.floor(EXPECTED_UNIQUE_EVENTS * 0.1),
 		Math.floor(EXPECTED_UNIQUE_EVENTS * 0.5),
@@ -111,6 +120,13 @@ test("load acceptance: 7,000 tool calls, 200 child histories, native tasks, and 
 	let oversizeFrameWrites = 0;
 	const harnessStartedAt = performance.now();
 	let currentStage = "initializing";
+	const removeKeyboardInputObserver = controller.views.tui.addInputListener((data) => {
+		if (!recordingKeyboardSample) return;
+		if (data !== KEYBOARD_SAMPLE_CHARACTER && data !== KEYBOARD_SAMPLE_BACKSPACE) {
+			throw new Error(`Unexpected input reached the keyboard sample seam: ${JSON.stringify(data)}`);
+		}
+		pendingKeyboardInputs.push(performance.now());
+	});
 	context.after(() => {
 		context.diagnostic(`LOAD_PROGRESS ${JSON.stringify({
 			stage: currentStage,
@@ -119,9 +135,13 @@ test("load acceptance: 7,000 tool calls, 200 child histories, native tasks, and 
 			uniqueEventsRead,
 			userInputsReceived: fake.receivedMessages.length,
 			frameWrites: terminal.frameWriteTimes.length,
-			pendingMeasuredInputs: pendingInputs.length,
-			primaryLatency: primaryLatencies.length
-				? { sampleCount: primaryLatencies.length, p50: percentile(primaryLatencies, 0.5), p95: percentile(primaryLatencies, 0.95) }
+			pendingSdkEvents: pendingSdkEvents.length,
+			pendingKeyboardInputs: pendingKeyboardInputs.length,
+			keyboardLatency: keyboardLatencies.length
+				? { sampleCount: keyboardLatencies.length, p50: percentile(keyboardLatencies, 0.5), p95: percentile(keyboardLatencies, 0.95) }
+				: null,
+			sdkEventLatency: sdkEventLatencies.length
+				? { sampleCount: sdkEventLatencies.length, p50: percentile(sdkEventLatencies, 0.5), p95: percentile(sdkEventLatencies, 0.95) }
 				: null,
 			fullRedrawCount: fullRedrawCount(controller),
 			retained: retainedStateCounts(controller),
@@ -153,24 +173,24 @@ test("load acceptance: 7,000 tool calls, 200 child histories, native tasks, and 
 		});
 	};
 
-	const recordMemory = (stage: string, workerHeapUsedBytes: number): void => {
+	const recordMemory = (stage: string, producerWorkerHeapUsedBytes: number): void => {
 		const memory = process.memoryUsage();
 		memorySamples.push({
 			stage,
 			parentRssBytes: memory.rss,
 			parentHeapUsedBytes: memory.heapUsed,
 			parentExternalBytes: memory.external,
-			workerHeapUsedBytes,
+			producerWorkerHeapUsedBytes,
 		});
 	};
 
-	fake.onMessageRead = (_message, decodedAt, group) => {
+	fake.onMessageRead = (_message, eventAt, group) => {
 		eventsRead += 1;
 		if (group === "unique") {
 			uniqueEventsRead += 1;
-			pendingInputs.push({ decodedAt, group });
+			pendingSdkEvents.push({ eventAt, group });
 		} else if (group === "oversized") {
-			pendingInputs.push({ decodedAt, group });
+			pendingSdkEvents.push({ eventAt, group });
 		}
 		if (eventsRead % 5_000 === 0) {
 			progressSamples.push({
@@ -184,11 +204,12 @@ test("load acceptance: 7,000 tool calls, 200 child histories, native tasks, and 
 		}
 	};
 	terminal.onFrameWrite = (writtenAt) => {
-		for (const input of pendingInputs.splice(0)) {
-			const latency = writtenAt - input.decodedAt;
-			if (input.group === "unique") primaryLatencies.push(latency);
-			else if (input.group === "oversized") oversizedLatencies.push(latency);
+		for (const event of pendingSdkEvents.splice(0)) {
+			const latency = writtenAt - event.eventAt;
+			if (event.group === "unique") sdkEventLatencies.push(latency);
+			else if (event.group === "oversized") oversizedSdkEventLatencies.push(latency);
 		}
+		for (const decodedAt of pendingKeyboardInputs.splice(0)) keyboardLatencies.push(writtenAt - decodedAt);
 	};
 
 	try {
@@ -202,7 +223,7 @@ test("load acceptance: 7,000 tool calls, 200 child histories, native tasks, and 
 		feederWorker.on("message", (raw: FeederMessage) => {
 			if (raw.type !== "event") {
 				if (raw.type === "phase-complete") {
-					workerSamples.push({ stage: raw.phase, heapUsedBytes: raw.workerHeapUsedBytes });
+					producerWorkerSamples.push({ stage: raw.phase, producerWorkerHeapUsedBytes: raw.producerWorkerHeapUsedBytes });
 				}
 				onNotice(raw);
 				return;
@@ -210,6 +231,17 @@ test("load acceptance: 7,000 tool calls, 200 child histories, native tasks, and 
 
 			eventsEnqueued += 1;
 			fake.pushMessage(raw.message, raw.phase);
+			if (raw.phase === "unique" && raw.eventIndex % KEYBOARD_SAMPLE_INTERVAL_EVENTS === 0) {
+				keyboardSampleEventIndices.push(raw.eventIndex);
+				for (const data of [KEYBOARD_SAMPLE_CHARACTER, KEYBOARD_SAMPLE_BACKSPACE]) {
+					recordingKeyboardSample = true;
+					try {
+						terminal.input(data);
+					} finally {
+						recordingKeyboardSample = false;
+					}
+				}
+			}
 			if (raw.phase === "unique" && injectionAt.includes(raw.eventIndex) && !injected.has(raw.eventIndex)) {
 				const inputIndex = injectionAt.indexOf(raw.eventIndex);
 				const prompt = INJECTED_PROMPTS[inputIndex];
@@ -229,7 +261,7 @@ test("load acceptance: 7,000 tool calls, 200 child histories, native tasks, and 
 		const ready = await waitForNotice("ready");
 		currentStage = "feeder-ready";
 		assert.equal(ready.eventCountPerPass, EXPECTED_UNIQUE_EVENTS);
-		recordMemory("before-feed", ready.workerHeapUsedBytes);
+		recordMemory("before-feed", ready.producerWorkerHeapUsedBytes);
 		const firstFrameWrite = terminal.frameWriteTimes.length;
 		const elapsedStart = performance.now();
 		feederWorker.postMessage({ type: "start" });
@@ -242,15 +274,19 @@ test("load acceptance: 7,000 tool calls, 200 child histories, native tasks, and 
 			"unique replay processing and frame writes",
 			() => eventsRead >= EXPECTED_UNIQUE_EVENTS &&
 				controller.state.seenEnvelopeIds.size === EXPECTED_UNIQUE_EVENTS &&
-				pendingInputs.length === 0,
+				pendingSdkEvents.length === 0 && pendingKeyboardInputs.length === 0,
 			180_000,
 			() => feederFailure,
 		);
 		currentStage = "validating-unique-processing";
 		assert.equal(uniqueEventsRead, EXPECTED_UNIQUE_EVENTS);
-		assert.equal(primaryLatencies.length, EXPECTED_UNIQUE_EVENTS, "every unique SDK input must reach a pi-tui frame write");
+		assert.equal(sdkEventLatencies.length, EXPECTED_UNIQUE_EVENTS, "every unique SDK event sample must reach a pi-tui frame write");
+		assert.equal(keyboardSampleEventIndices.length, EXPECTED_KEYBOARD_SAMPLE_EVENTS);
+		assert.equal(keyboardSampleEventIndices[0], 0, "keyboard sampling must start at the beginning of the unique feed");
+		assert.equal(keyboardSampleEventIndices.at(-1), EXPECTED_UNIQUE_EVENTS - 1, "keyboard sampling must reach the end of the unique feed");
+		assert.equal(keyboardLatencies.length, EXPECTED_KEYBOARD_INPUT_SAMPLES, "each decoded keyboard sample must reach its next pi-tui frame write");
 		phaseCounts.afterUnique = retainedStateCounts(controller);
-		recordMemory("after-unique", uniqueComplete.workerHeapUsedBytes);
+		recordMemory("after-unique", uniqueComplete.producerWorkerHeapUsedBytes);
 		uniqueFrameWrites = terminal.frameWriteTimes.length - firstFrameWrite;
 		feederWorker.postMessage({ type: "continue", phase: "unique" });
 
@@ -266,7 +302,7 @@ test("load acceptance: 7,000 tool calls, 200 child histories, native tasks, and 
 			() => feederFailure,
 		);
 		phaseCounts.afterDuplicates = retainedStateCounts(controller);
-		recordMemory("after-duplicates", duplicateComplete.workerHeapUsedBytes);
+		recordMemory("after-duplicates", duplicateComplete.producerWorkerHeapUsedBytes);
 		duplicateFrameWrites = terminal.frameWriteTimes.length - firstFrameWrite - uniqueFrameWrites;
 		feederWorker.postMessage({ type: "continue", phase: "duplicate" });
 
@@ -277,13 +313,13 @@ test("load acceptance: 7,000 tool calls, 200 child histories, native tasks, and 
 			"oversized result processing and frame write",
 			() => eventsRead === EXPECTED_DELIVERIES &&
 				controller.state.seenEnvelopeIds.size === EXPECTED_UNIQUE_EVENTS + 1 &&
-				pendingInputs.length === 0,
+				pendingSdkEvents.length === 0 && pendingKeyboardInputs.length === 0,
 			180_000,
 			() => feederFailure,
 		);
 		phaseCounts.afterOversized = retainedStateCounts(controller);
-		workerSamples.push({ stage: "oversized-output", heapUsedBytes: complete.workerHeapUsedBytes });
-		recordMemory("after-oversized-output", complete.workerHeapUsedBytes);
+		producerWorkerSamples.push({ stage: "oversized-output", producerWorkerHeapUsedBytes: complete.producerWorkerHeapUsedBytes });
+		recordMemory("after-oversized-output", complete.producerWorkerHeapUsedBytes);
 		oversizeFrameWrites = terminal.frameWriteTimes.length - firstFrameWrite - uniqueFrameWrites - duplicateFrameWrites;
 		currentStage = "waiting-for-user-input-delivery";
 		await waitForCondition("three injected user inputs", () => fake.receivedMessages.length === INJECTED_PROMPTS.length, 180_000, () => feederFailure);
@@ -295,19 +331,37 @@ test("load acceptance: 7,000 tool calls, 200 child histories, native tasks, and 
 		const uniqueRate = (EXPECTED_UNIQUE_EVENTS - 1) * 1_000 / uniqueDurationMs;
 		const duplicateRate = (EXPECTED_UNIQUE_EVENTS - 1) * 1_000 / duplicateDurationMs;
 		const elapsedMs = performance.now() - elapsedStart;
-		const primaryP50 = percentile(primaryLatencies, 0.5);
-		const primaryP95 = percentile(primaryLatencies, 0.95);
+		const keyboardP50 = percentile(keyboardLatencies, 0.5);
+		const keyboardP95 = percentile(keyboardLatencies, 0.95);
 		const largeReceipt = controller.state.toolReceipts.get(loadToolUseId(LOAD_TOOL_CALLS - 1));
 		const report = {
-			metric: "application decoded-input-to-pi-tui frame-write latency; not physical rendering latency",
+			metrics: {
+				keyboardInput: "decoded keyboard input at the AppController TuiMainScreen input-listener seam to the next synchronized pi-tui frame-write end",
+				sdkEvent: "fake SDK async-iterator yield to the next synchronized pi-tui frame-write end",
+			},
+			context: {
+				terminal: { columns: terminal.columns, rows: terminal.rows },
+				machine: {
+					cpuModel: cpus()[0]?.model ?? null,
+					architecture: arch(),
+					operatingSystem: { platform: platform(), release: release(), version: osVersion() },
+				},
+				runtime: { node: process.version, v8: process.versions.v8 },
+			},
+			measurementLimits: [
+				"Physical display latency is not measured.",
+				"Native SDK history-worker memory is not measured.",
+				"Memory values are stage snapshots, not peak measurements.",
+			],
 			toolCalls: LOAD_TOOL_CALLS,
 			childConversations: LOAD_CHILD_CONVERSATIONS,
 			nativeTasks: LOAD_CHILD_CONVERSATIONS,
 			eventCounts: {
-				uniqueInput: EXPECTED_UNIQUE_EVENTS,
-				duplicateInput: EXPECTED_UNIQUE_EVENTS,
-				oversizedCase: 1,
-				processed: eventsRead,
+				uniqueSdkEvents: EXPECTED_UNIQUE_EVENTS,
+				duplicateSdkEvents: EXPECTED_UNIQUE_EVENTS,
+				oversizedSdkEvents: 1,
+				processedSdkEvents: eventsRead,
+				userPromptsDelivered: fake.receivedMessages.length,
 				retainedUniqueEnvelopes: controller.state.seenEnvelopeIds.size,
 			},
 			resultBytes: {
@@ -316,17 +370,27 @@ test("load acceptance: 7,000 tool calls, 200 child histories, native tasks, and 
 				oversized: LOAD_OVERSIZED_BYTES,
 			},
 			feed: {
-				targetEventsPerSecond: 500,
-				measuredUniqueEventsPerSecond: uniqueRate,
-				measuredDuplicateEventsPerSecond: duplicateRate,
-				aggregateEventsPerSecondIncludingPhaseGates: aggregateRate,
-				uniqueInputWindowMs: uniqueDurationMs,
-				duplicateInputWindowMs: duplicateDurationMs,
+				targetSdkEventsPerSecond: 500,
+				measuredUniqueSdkEventsPerSecond: uniqueRate,
+				measuredDuplicateSdkEventsPerSecond: duplicateRate,
+				aggregateSdkEventsPerSecondIncludingPhaseGates: aggregateRate,
+				uniqueSdkEventWindowMs: uniqueDurationMs,
+				duplicateSdkEventWindowMs: duplicateDurationMs,
 				elapsedUntilProcessedMs: elapsedMs,
 			},
 			latencyMs: {
-				unique: { sampleCount: primaryLatencies.length, p50: primaryP50, p95: primaryP95 },
-				oversizedCase: { sampleCount: oversizedLatencies.length, p50: percentile(oversizedLatencies, 0.5), p95: percentile(oversizedLatencies, 0.95) },
+				keyboardInputToFrameWriteDuringUniqueFeed: {
+					sampleCount: keyboardLatencies.length,
+					sampledFeedEvents: keyboardSampleEventIndices.length,
+					feedEventInterval: KEYBOARD_SAMPLE_INTERVAL_EVENTS,
+					p95TargetMsExclusive: 50,
+					p50: keyboardP50,
+					p95: keyboardP95,
+				},
+				sdkEventToFrameWrite: {
+					uniqueReplay: { sampleCount: sdkEventLatencies.length, p50: percentile(sdkEventLatencies, 0.5), p95: percentile(sdkEventLatencies, 0.95) },
+					oversizedResult: { sampleCount: oversizedSdkEventLatencies.length, p50: percentile(oversizedSdkEventLatencies, 0.5), p95: percentile(oversizedSdkEventLatencies, 0.95) },
+				},
 			},
 			frameWrites: {
 				unique: uniqueFrameWrites,
@@ -334,8 +398,8 @@ test("load acceptance: 7,000 tool calls, 200 child histories, native tasks, and 
 				oversizedCase: oversizeFrameWrites,
 			},
 			retainedState: phaseCounts,
-			memory: memorySamples,
-			workerMemory: workerSamples,
+			memorySnapshots: memorySamples,
+			producerWorkerHeapSnapshots: producerWorkerSamples,
 		};
 		context.diagnostic(`LOAD_ACCEPTANCE ${JSON.stringify(report)}`);
 
@@ -364,12 +428,13 @@ test("load acceptance: 7,000 tool calls, 200 child histories, native tasks, and 
 		assert.equal(phaseCounts.afterOversized?.seenEnvelopeIds, EXPECTED_UNIQUE_EVENTS + 1);
 		assert.equal(largeReceipt?.resultPreview?.length, 8_192, "oversized output preview must remain bounded");
 		assert.ok(largeReceipt?.resultPreview?.endsWith("…"));
-		assert.equal(oversizedLatencies.length, 1);
-		assert.ok(primaryP95 < 50, `p95 application input-to-write latency was ${primaryP95.toFixed(2)} ms`);
+		assert.equal(oversizedSdkEventLatencies.length, 1);
+		assert.ok(keyboardP95 < 50, `p95 decoded keyboard input-to-write latency was ${keyboardP95.toFixed(2)} ms`);
 	} finally {
 		currentStage = "cleanup";
 		fake.onMessageRead = undefined;
 		terminal.onFrameWrite = undefined;
+		removeKeyboardInputObserver();
 		if (feederWorker) await feederWorker.terminate();
 		await controller.close(0);
 		if (running) await running;

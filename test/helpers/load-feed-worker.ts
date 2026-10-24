@@ -20,7 +20,7 @@ const events = createLoadEvents();
 port.postMessage({
 	type: "ready",
 	eventCountPerPass: events.length,
-	workerHeapUsedBytes: getHeapStatistics().used_heap_size,
+	producerWorkerHeapUsedBytes: getHeapStatistics().used_heap_size,
 });
 
 port.once("message", (message: { type?: unknown }) => {
@@ -53,7 +53,7 @@ async function feed(): Promise<void> {
 			phase,
 			firstEmittedAt: firstPhaseEmittedAt,
 			lastEmittedAt: lastPhaseEmittedAt,
-			workerHeapUsedBytes: getHeapStatistics().used_heap_size,
+			producerWorkerHeapUsedBytes: getHeapStatistics().used_heap_size,
 		});
 		await waitForContinue(phase);
 	}
@@ -73,7 +73,7 @@ async function feed(): Promise<void> {
 		deliveryCount: deliveryIndex,
 		firstEmittedAt,
 		lastEmittedAt,
-		workerHeapUsedBytes: getHeapStatistics().used_heap_size,
+		producerWorkerHeapUsedBytes: getHeapStatistics().used_heap_size,
 	});
 }
 
