@@ -46,13 +46,17 @@ interface GitResult {
 
 function runGit(cwd: string, args: string[]): Promise<GitResult> {
 	return new Promise((resolve) => {
+		const environment = { ...process.env };
+		delete environment.GIT_INDEX_FILE;
+		delete environment.GIT_DIR;
+		delete environment.GIT_WORK_TREE;
 		execFile(
 			"git",
 			["-C", cwd, ...args],
 			{
 				encoding: "buffer",
 					env: {
-					...process.env,
+					...environment,
 					GIT_OPTIONAL_LOCKS: "0",
 					GIT_TERMINAL_PROMPT: "0",
 				},

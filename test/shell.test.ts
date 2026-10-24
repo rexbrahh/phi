@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,10 +34,12 @@ test("runUserShell passes the exact command and inherited environment and stores
 	const stateHome = join(temporary, "state home");
 	const fakeShell = join(temporary, "configured shell");
 	const capturePath = join(temporary, "captured arguments.txt");
+	const cwdCapturePath = join(temporary, "captured cwd.txt");
 	const restoreEnvironment = setEnvironment({
 		XDG_STATE_HOME: stateHome,
 		SHELL: fakeShell,
 		PHI_TEST_CAPTURE: capturePath,
+		PHI_TEST_CWD_CAPTURE: cwdCapturePath,
 		PHI_TEST_VALUE: "inherited value",
 	});
 
@@ -45,6 +47,7 @@ test("runUserShell passes the exact command and inherited environment and stores
 		await writeFile(
 			fakeShell,
 			'#!/bin/sh\nprintf \'%s\\n\' "$#" "$1" "$2" "$PHI_TEST_VALUE" > "$PHI_TEST_CAPTURE"\n' +
+			'pwd > "$PHI_TEST_CWD_CAPTURE"\n' +
 			"printf 'stdout line\\n'\n" +
 			"printf 'stderr line\\n' >&2\n" +
 			"if IFS= read -r line; then printf 'stdin open\\n'; else printf 'stdin closed\\n'; fi\n",
@@ -73,6 +76,7 @@ test("runUserShell passes the exact command and inherited environment and stores
 			"inherited value",
 			"",
 		]);
+		assert.equal((await readFile(cwdCapturePath, "utf8")).trimEnd(), await realpath(temporary));
 		assert.equal(await readFile(receipt.outputFiles.stdout!, "utf8"), "stdout line\nstdin closed\n");
 		assert.equal(await readFile(receipt.outputFiles.stderr!, "utf8"), "stderr line\n");
 		assert.ok(previews.length > 0);
