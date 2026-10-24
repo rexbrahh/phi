@@ -712,6 +712,37 @@ test("cancelAll settles every request and prevents later answers", async () => {
 	assert.match(permissionDeny(await lateRequest.promise).message, /session closed/i);
 });
 
+test("callbacks after close do not replay settled allow or accept results", async () => {
+	const queue = new InteractionQueue();
+	const tool = permissionRequest(queue, "settled-tool-after-close");
+	assert.equal(queue.answer("settled-tool-after-close", { kind: "permission", action: "allow-once" }), true);
+	assert.equal(permissionAllow(await tool.promise).behavior, "allow");
+
+	const elicitation = elicitationRequest(queue, "settled-elicitation-after-close", {
+		mode: "url",
+		serverName: "test-server",
+		message: "Authenticate",
+		url: "https://auth.example.test/",
+	});
+	assert.equal(queue.answer("settled-elicitation-after-close", {
+		kind: "elicitation",
+		response: { action: "accept" },
+	}), true);
+	assert.deepEqual(await elicitationResult(elicitation.promise), { action: "accept" });
+
+	queue.cancelAll("Session closed after acceptance");
+	const lateTool = permissionRequest(queue, "settled-tool-after-close");
+	const lateToolResult = permissionDeny(await lateTool.promise);
+	assert.match(lateToolResult.message, /session closed after acceptance/i);
+	const lateElicitation = elicitationRequest(queue, "settled-elicitation-after-close", {
+		mode: "url",
+		serverName: "test-server",
+		message: "Authenticate",
+		url: "https://auth.example.test/",
+	});
+	assert.deepEqual(await elicitationResult(lateElicitation.promise), { action: "cancel" });
+});
+
 test("answer types cannot cross permission, question, and elicitation requests", async () => {
 	const queue = new InteractionQueue();
 	const permission = permissionRequest(queue, "typed-permission");

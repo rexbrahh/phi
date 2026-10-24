@@ -108,12 +108,12 @@ export class InteractionQueue {
 		options: CanUseToolOptions,
 	): Promise<PermissionResult | null> {
 		const kind = toolName === "AskUserQuestion" ? "question" : "permission";
+		if (this.closedReason) return Promise.resolve(denyPermission(options.toolUseID, this.closedReason));
 		const existing = this.findExisting(options.requestId, kind, options.signal);
 		if (existing) return existing as Promise<PermissionResult>;
 		if (this.hasRequestId(options.requestId)) {
 			return Promise.resolve(denyPermission(options.toolUseID, "Conflicting native request identifier"));
 		}
-		if (this.closedReason) return Promise.resolve(denyPermission(options.toolUseID, this.closedReason));
 
 		const nativePayload: ToolNativePayload = { toolName, input, options };
 		if (kind === "question") {
@@ -176,12 +176,12 @@ export class InteractionQueue {
 		request: ElicitationRequest,
 		options: ElicitationOptions,
 	): Promise<ElicitationResult | null> {
+		if (this.closedReason) return Promise.resolve({ action: "cancel" });
 		const existing = this.findExisting(options.requestId, "elicitation", options.signal);
 		if (existing) return existing as Promise<ElicitationResult>;
 		if (this.hasRequestId(options.requestId)) {
 			return Promise.resolve({ action: "cancel" });
 		}
-		if (this.closedReason) return Promise.resolve({ action: "cancel" });
 
 		const nativePayload = { request, options };
 		let pending: PendingFormElicitationRequest | PendingUrlElicitationRequest;
