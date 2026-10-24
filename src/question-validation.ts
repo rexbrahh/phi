@@ -109,7 +109,7 @@ export function validateQuestionAnswers(
 			if (typeof value.label !== "string" || !labels.has(value.label)) {
 				throw new InteractionValidationError(`Answer for ${question.question} must match an available option`);
 			}
-			normalized[question.question] = value.label;
+			setOwnQuestionAnswer(normalized, question.question, value.label);
 			continue;
 		}
 
@@ -130,7 +130,7 @@ export function validateQuestionAnswers(
 				}
 				selected.add(label);
 			}
-			normalized[question.question] = [...value.labels];
+			setOwnQuestionAnswer(normalized, question.question, [...value.labels]);
 			continue;
 		}
 
@@ -141,7 +141,7 @@ export function validateQuestionAnswers(
 			if (typeof value.text !== "string" || value.text.trim().length === 0) {
 				throw new InteractionValidationError(`A required answer for ${question.question} cannot be empty`);
 			}
-			normalized[question.question] = value.text;
+			setOwnQuestionAnswer(normalized, question.question, value.text);
 			continue;
 		}
 
@@ -149,6 +149,19 @@ export function validateQuestionAnswers(
 	}
 
 	return normalized;
+}
+
+function setOwnQuestionAnswer(
+	answers: Record<string, string | string[]>,
+	question: string,
+	answer: string | string[],
+): void {
+	Object.defineProperty(answers, question, {
+		value: answer,
+		enumerable: true,
+		configurable: true,
+		writable: true,
+	});
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

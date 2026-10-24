@@ -320,6 +320,33 @@ test("AskUserQuestion returns multiselect answers as label arrays", async () => 
 	assert.deepEqual(pendingIds(queue), []);
 });
 
+test("AskUserQuestion preserves __proto__ as an own multiselect answer key", async () => {
+	const queue = new InteractionQueue();
+	const input = questionInput([{
+		question: "__proto__",
+		multiSelect: true,
+		options: [{ label: "Read" }, { label: "Write" }],
+	}]);
+	const request = questionRequest(queue, "question-proto-key", input);
+	const answers = JSON.parse('{"__proto__":{"kind":"choices","labels":["Read","Write"]}}') as Record<
+		string,
+		{ kind: "choices"; labels: string[] }
+	>;
+	const inputPrototype = Object.getPrototypeOf(input);
+
+	assert.equal(Object.hasOwn(answers, "__proto__"), true);
+	assert.equal(queue.answer("question-proto-key", { kind: "question", answers }), true);
+	const response = permissionAllow(await request.promise);
+	assert.ok(response.updatedInput);
+	const updatedAnswers = response.updatedInput.answers as Record<string, unknown>;
+	assert.equal(Object.hasOwn(updatedAnswers, "__proto__"), true);
+	assert.deepEqual(updatedAnswers["__proto__"], ["Read", "Write"]);
+	assert.strictEqual(Object.getPrototypeOf(answers), Object.prototype);
+	assert.strictEqual(Object.getPrototypeOf(updatedAnswers), Object.prototype);
+	assert.strictEqual(Object.getPrototypeOf(response.updatedInput), Object.prototype);
+	assert.strictEqual(Object.getPrototypeOf(input), inputPrototype);
+});
+
 test("AskUserQuestion returns actual free text", async () => {
 	const queue = new InteractionQueue();
 	const input = questionInput([{ question: "What should the branch be called?", header: "Branch", options: [] }]);
