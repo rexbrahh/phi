@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
-import { resolve } from "node:path";
-import { listSessions as sdkListSessions } from "@anthropic-ai/claude-agent-sdk";
+import { join, resolve } from "node:path";
 import type {
 	EffortLevel,
 	ListSessionsOptions,
@@ -9,9 +8,11 @@ import type {
 	PermissionMode,
 	SDKSessionInfo,
 } from "@anthropic-ai/claude-agent-sdk";
+import { resolvePhiHome } from "./home.js";
 
 export interface LaunchOptions {
 	cwd: string;
+	home: string;
 	resume?: string;
 	sessionId?: string;
 	forkSession?: boolean;
@@ -37,7 +38,7 @@ export async function resolveLaunchOptions(
 	launch: LaunchOptions,
 	listSessions: (
 		options: ListSessionsOptions,
-	) => Promise<SDKSessionInfo[]> = sdkListSessions,
+	) => Promise<SDKSessionInfo[]>,
 ): Promise<LaunchOptions> {
 	if (!launch.continue) return launch;
 
@@ -75,7 +76,7 @@ const PERMISSION_MODES: ReadonlySet<string> = new Set([
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function parseArgs(argv: string[]): LaunchOptions {
+export function parseArgs(argv: string[], environment: NodeJS.ProcessEnv = process.env): LaunchOptions {
 	let cwd = resolve(process.cwd());
 	let resume: string | undefined;
 	let continueSession = false;
@@ -177,6 +178,7 @@ export function parseArgs(argv: string[]): LaunchOptions {
 
 	return {
 		cwd,
+		home: resolvePhiHome(environment),
 		...(resume ? { resume } : {}),
 		continue: continueSession,
 		...(model ? { model } : {}),
@@ -193,6 +195,7 @@ export function parseArgs(argv: string[]): LaunchOptions {
 export function buildOptions(
 	launch: LaunchOptions,
 	callbacks: Pick<Options, "canUseTool" | "onElicitation" | "hooks">,
+	environment: NodeJS.ProcessEnv = process.env,
 ): Options {
 	if (launch.continue) {
 		throw new ArgumentError("--continue must be resolved to a session before building SDK options");
@@ -223,7 +226,9 @@ export function buildOptions(
 		agentProgressSummaries: false,
 		extraArgs: { "replay-user-messages": null },
 		env: {
-			...process.env,
+			...environment,
+			CLAUDE_CONFIG_DIR: launch.home,
+			CLAUDE_CODE_PLUGIN_CACHE_DIR: join(launch.home, "plugins", "cache"),
 			CLAUDE_AGENT_SDK_CLIENT_APP: "phi/0.1.0",
 		},
 	};

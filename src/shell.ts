@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { chmod, lstat, mkdir, stat } from "node:fs/promises";
 import { createWriteStream, type WriteStream } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { Readable } from "node:stream";
+import { ensurePhiHome, resolvePhiHome } from "./home.js";
 
 const PREVIEW_LIMIT = 8_192;
 const STOP_ESCALATION_MS = 2_000;
@@ -85,12 +85,11 @@ function appendPreview(buffer: PreviewBuffer, text: string): boolean {
 	return end > 0;
 }
 
-function safeSessionDirectory(sessionId: string): string {
+function safeSessionDirectory(sessionId: string, home: string): string {
 	if (!/^[A-Za-z0-9._-]+$/.test(sessionId) || sessionId === "." || sessionId === "..") {
 		throw new TypeError("sessionId must be a safe path segment");
 	}
-	const stateHome = process.env.XDG_STATE_HOME || join(homedir(), ".local", "state");
-	return join(stateHome, "phi", sessionId, "shell");
+	return join(home, "state", sessionId, "shell");
 }
 
 async function ensurePrivateDirectory(path: string): Promise<void> {
@@ -205,6 +204,7 @@ async function runJob(
 	onUpdate: (preview: ShellPreview) => void,
 	shellPath: string,
 	environment: NodeJS.ProcessEnv,
+	home: string,
 ): Promise<ShellReceipt> {
 	let infrastructureError: string | undefined;
 	let aborted = signal.aborted;
@@ -253,11 +253,12 @@ async function runJob(
 
 	if (!signal.aborted) signal.addEventListener("abort", onAbort, { once: true });
 
-	const stateDirectory = safeSessionDirectory(sessionId);
+	const stateDirectory = safeSessionDirectory(sessionId, home);
 	try {
-		const phiDirectory = join(stateDirectory, "..", "..");
+		await ensurePhiHome(home);
+		const stateRoot = join(home, "state");
 		const sessionDirectory = join(stateDirectory, "..");
-		await ensurePrivateDirectory(phiDirectory);
+		await ensurePrivateDirectory(stateRoot);
 		await ensurePrivateDirectory(sessionDirectory);
 		await ensurePrivateDirectory(stateDirectory);
 	} catch (error) {
@@ -399,14 +400,15 @@ export function runUserShell(
 	sessionId: string,
 	signal: AbortSignal,
 	onUpdate: (preview: ShellPreview) => void,
+	home: string = resolvePhiHome(),
 ): ShellJob {
 	if (activeJobId !== undefined) throw new Error("Only one local shell job may run at a time");
-	safeSessionDirectory(sessionId);
+	safeSessionDirectory(sessionId, home);
 	const jobId = randomUUID();
 	const environment = { ...process.env };
 	const shellPath = environment.SHELL || "/bin/sh";
 	activeJobId = jobId;
-	const done = runJob(jobId, command, cwd, sessionId, signal, onUpdate, shellPath, environment)
+	const done = runJob(jobId, command, cwd, sessionId, signal, onUpdate, shellPath, environment, home)
 		.catch((error: unknown) => ({
 			jobId,
 			sessionId,
