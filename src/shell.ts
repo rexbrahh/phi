@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmod, mkdir, stat } from "node:fs/promises";
+import { chmod, lstat, mkdir, stat } from "node:fs/promises";
 import { createWriteStream, type WriteStream } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -94,7 +94,16 @@ function safeSessionDirectory(sessionId: string): string {
 }
 
 async function ensurePrivateDirectory(path: string): Promise<void> {
-	await mkdir(path, { recursive: true, mode: 0o700 });
+	let metadata;
+	try {
+		metadata = await lstat(path);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		await mkdir(path, { recursive: true, mode: 0o700 });
+		metadata = await lstat(path);
+	}
+	if (metadata.isSymbolicLink()) throw new Error(`private shell output directory is a symbolic link: ${path}`);
+	if (!metadata.isDirectory()) throw new Error(`private shell output path is not a directory: ${path}`);
 	await chmod(path, 0o700);
 }
 

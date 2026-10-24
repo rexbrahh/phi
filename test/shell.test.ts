@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { chmod, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -200,6 +200,56 @@ test("runUserShell reports output storage failure without hiding command complet
 		assert.equal(receipt.exitCode, 0);
 		assert.match(receipt.infrastructureError ?? "", /not a directory|enotdir/i);
 		assert.deepEqual(receipt.outputFiles, {});
+	} finally {
+		restoreEnvironment();
+		await rm(temporary, { recursive: true, force: true });
+	}
+});
+
+test("runUserShell rejects symlinked app directories without changing outside targets", async () => {
+	const temporary = await mkdtemp(join(tmpdir(), "phi shell symlink "));
+	const stateHome = join(temporary, "state");
+	const phiDirectory = join(stateHome, "phi");
+	const sessionDirectory = join(phiDirectory, "symlink-session");
+	const shellDirectory = join(sessionDirectory, "shell");
+	const outsideDirectory = join(temporary, "outside target");
+	const outsideFile = join(outsideDirectory, "important.txt");
+	const restoreEnvironment = setEnvironment({ XDG_STATE_HOME: stateHome, SHELL: "/bin/sh" });
+	await mkdir(outsideDirectory);
+	await mkdir(stateHome);
+	await writeFile(outsideFile, "outside contents remain unchanged\n");
+	await chmod(outsideDirectory, 0o755);
+	const originalMode = (await stat(outsideDirectory)).mode & 0o777;
+	const originalContents = await readFile(outsideFile, "utf8");
+	try {
+		for (const component of ["phi", "session", "shell"] as const) {
+			await rm(phiDirectory, { recursive: true, force: true });
+			if (component === "phi") {
+				await symlink(outsideDirectory, phiDirectory);
+			} else {
+				await mkdir(phiDirectory, { recursive: true });
+				if (component === "session") await symlink(outsideDirectory, sessionDirectory);
+				else {
+					await mkdir(sessionDirectory);
+					await symlink(outsideDirectory, shellDirectory);
+				}
+			}
+
+			const receipt = await runUserShell(
+				"printf 'output must not reach the outside target'",
+				temporary,
+				"symlink-session",
+				new AbortController().signal,
+				() => {},
+			).done;
+			assert.match(receipt.infrastructureError ?? "", /symbolic link/i, `${component} symlink must report an infrastructure error`);
+			assert.deepEqual(receipt.outputFiles, {});
+			assert.equal((await stat(outsideDirectory)).mode & 0o777, originalMode);
+			assert.deepEqual(await readdir(outsideDirectory), ["important.txt"]);
+			assert.equal(await readFile(outsideFile, "utf8"), originalContents);
+			const componentPath = component === "phi" ? phiDirectory : component === "session" ? sessionDirectory : shellDirectory;
+			assert.ok((await lstat(componentPath)).isSymbolicLink());
+		}
 	} finally {
 		restoreEnvironment();
 		await rm(temporary, { recursive: true, force: true });
