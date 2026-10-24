@@ -72,6 +72,29 @@ test("Phi API keys round-trip privately, overwrite atomically, and reject invali
 	});
 });
 
+test("readPhiApiKey rejects a group or others readable home without changing its mode", async () => {
+	await withHome(async (home) => {
+		const secret = "synthetic-secret-wide-home";
+		await savePhiApiKey(home, secret);
+		await chmod(home, 0o755);
+
+		await assertGenericError(readPhiApiKey(home), secret);
+		assert.equal((await lstat(home)).mode & 0o777, 0o755);
+	});
+});
+
+test("readPhiApiKey rejects a group or others readable credential without changing its mode", async () => {
+	await withHome(async (home) => {
+		const secret = "synthetic-secret-wide-file";
+		await savePhiApiKey(home, secret);
+		const authPath = join(home, "auth.json");
+		await chmod(authPath, 0o644);
+
+		await assertGenericError(readPhiApiKey(home), secret);
+		assert.equal((await lstat(authPath)).mode & 0o777, 0o644);
+	});
+});
+
 test("readPhiApiKey rejects corrupt or invalid schemas without exposing their contents", async () => {
 	await withHome(async (home) => {
 		await ensurePhiHome(home);

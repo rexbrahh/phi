@@ -42,11 +42,16 @@ export async function ensurePhiHome(home: string): Promise<void> {
 export async function readPhiApiKey(home: string): Promise<string | undefined> {
 	let file: FileHandle | undefined;
 	try {
-		if (!(await safeHomeExists(home))) return undefined;
+		const homeMetadata = await lstatIfPresent(home);
+		if (!homeMetadata) return undefined;
+		if (homeMetadata.isSymbolicLink() || !homeMetadata.isDirectory() || (homeMetadata.mode & 0o077) !== 0) {
+			throw new Error(HOME_ERROR);
+		}
 		const authPath = join(home, AUTH_FILE);
 		if (!(await regularCredentialExists(authPath))) return undefined;
 		file = await open(authPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
-		if (!(await file.stat()).isFile()) throw new Error(INVALID_FILE);
+		const metadata = await file.stat();
+		if (!metadata.isFile() || (metadata.mode & 0o077) !== 0) throw new Error(INVALID_FILE);
 		const parsed: unknown = JSON.parse(await file.readFile({ encoding: "utf8" }));
 		if (!isRecord(parsed) || Object.keys(parsed).length !== 2 || parsed.version !== 1 || typeof parsed.apiKey !== "string") {
 			throw new Error(INVALID_FILE);
