@@ -24,6 +24,10 @@ const TERMINATION_TIMEOUT_MS = 15_000;
 const MAX_FAILURE_DIAGNOSTIC_CHARS = 1_200;
 const MAX_CAUSE_DETAILS = 4;
 const MAX_CAUSE_MESSAGE_CHARS = 220;
+const MAX_WORKFLOW_FAILURE_EVIDENCE_CHARS = 1_900;
+const MAX_WORKFLOW_ERROR_EXCERPT_CHARS = 320;
+const MAX_DIAGNOSTIC_LIST_ITEMS = 6;
+const MAX_DIAGNOSTIC_LABEL_CHARS = 40;
 
 let failureDiagnosticEmitted = false;
 
@@ -175,6 +179,147 @@ export function formatLiveFailureDiagnostic(
 	return boundedDiagnosticText(diagnostic, key, MAX_FAILURE_DIAGNOSTIC_CHARS);
 }
 
+export function formatWorkflowFailureEvidence(
+	messages: readonly unknown[],
+	selectedApiKey?: string,
+	fixtureName = SKILL_NAME,
+): string {
+	const call = findDiagnosticWorkflowUse(messages, fixtureName);
+	const matchedResult = call?.id ? findCorrelatedWorkflowResult(messages, call.id) : undefined;
+	const resultBlock = matchedResult?.block;
+	const resultMessage = matchedResult?.message;
+	const toolError = resultBlock?.is_error === true;
+	const structuredPresent = resultMessage !== undefined && Object.hasOwn(resultMessage, "tool_use_result");
+	const structuredResult = structuredPresent ? asRecord(resultMessage?.tool_use_result) : undefined;
+	let latestResult: Record<string, unknown> | undefined;
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const record = asRecord(messages[index]);
+		if (record?.type === "result") {
+			latestResult = record;
+			break;
+		}
+	}
+	const modelUsage = asRecord(latestResult?.modelUsage);
+	const modelNames = modelUsage ? Object.keys(modelUsage) : [];
+	const numTurns = latestResult?.num_turns;
+	const fields = ["taskId", "workflowName", "runId", "transcriptDir"].map((field) => {
+		if (!structuredResult || !Object.hasOwn(structuredResult, field)) return `${field}=absent`;
+		const value = structuredResult[field];
+		return `${field}=${value === null ? "null" : Array.isArray(value) ? "array" : typeof value}/present`;
+	}).join(",");
+	const content = resultBlock?.content;
+	const contentKinds = typeof content === "string"
+		? ["text"]
+		: Array.isArray(content)
+			? content.slice(0, MAX_DIAGNOSTIC_LIST_ITEMS).map((value) => {
+				const block = asRecord(value);
+				return typeof block?.type === "string" ? block.type : diagnosticType(value);
+			})
+			: [];
+	const subtype = latestResult?.subtype;
+	const hasStatus = structuredResult !== undefined && Object.hasOwn(structuredResult, "status");
+	const status = hasStatus ? structuredResult.status : undefined;
+	const parts = [
+		`toolUseSeen=${call !== undefined}`,
+		`toolName=${call ? boundedDiagnosticText(call.name, selectedApiKey, 32) : "none"}`,
+		`fixtureNameMatched=${call?.input.name === fixtureName}`,
+		`inputKeys=${formatDiagnosticKeys(call?.input ?? {}, selectedApiKey, true)}`,
+		`resultMatched=${resultBlock !== undefined}`,
+		`is_error=${typeof resultBlock?.is_error === "boolean" ? resultBlock.is_error : "unknown"}`,
+		`contentKinds=${formatDiagnosticLabels(contentKinds, selectedApiKey, Array.isArray(content) ? content.length - contentKinds.length : 0)}`,
+		`structuredPresent=${structuredPresent}`,
+		`structuredType=${structuredPresent ? diagnosticType(resultMessage?.tool_use_result) : "missing"}`,
+		`structuredKeys=${formatDiagnosticKeys(structuredResult ?? {}, selectedApiKey)}`,
+		`status=${!hasStatus ? "missing" : typeof status === "string" ? boundedDiagnosticText(status, selectedApiKey, 96) || "empty" : diagnosticType(status)}`,
+		fields,
+		`latestResultSubtype=${typeof subtype === "string" ? boundedDiagnosticText(subtype, selectedApiKey, 96) || "empty" : subtype === undefined ? "none" : diagnosticType(subtype)}`,
+		`latestResultNumTurns=${typeof numTurns === "number" && Number.isFinite(numTurns) ? numTurns : "none"}`,
+		`modelUsageModels=${formatDiagnosticLabels(modelNames, selectedApiKey, Math.max(0, modelNames.length - MAX_DIAGNOSTIC_LIST_ITEMS))}`,
+	];
+	if (toolError) {
+		const text = typeof content === "string"
+			? content
+			: Array.isArray(content)
+				? content.map((value) => {
+					const block = asRecord(value);
+					return block?.type === "text" && typeof block.text === "string" ? block.text : "";
+				}).filter(Boolean).join(" ")
+				: "";
+		const excerpt = text.split(/\r?\n/).find((line) => line.trim().length > 0) ?? "";
+		parts.push(`errorExcerpt=${boundedDiagnosticText(excerpt, selectedApiKey, MAX_WORKFLOW_ERROR_EXCERPT_CHARS) || "none"}`);
+	}
+	return boundedDiagnosticText(`Workflow failure evidence: ${parts.join("; ")}`, selectedApiKey, MAX_WORKFLOW_FAILURE_EVIDENCE_CHARS);
+}
+
+function findDiagnosticWorkflowUse(
+	messages: readonly unknown[],
+	fixtureName: string,
+): { id?: string; name: string; input: Record<string, unknown> } | undefined {
+	let firstWorkflow: { id?: string; name: string; input: Record<string, unknown> } | undefined;
+	for (const message of messages) {
+		const record = asRecord(message);
+		if (record?.type !== "assistant") continue;
+		const content = asRecord(record.message)?.content;
+		if (!Array.isArray(content)) continue;
+		for (const value of content) {
+			const block = asRecord(value);
+			if (block?.type !== "tool_use" || block.name !== "Workflow") continue;
+			const call = {
+				id: asString(block.id),
+				name: block.name,
+				input: asRecord(block.input) ?? {},
+			};
+			firstWorkflow ??= call;
+			if (call.input.name === fixtureName) return call;
+		}
+	}
+	return firstWorkflow;
+}
+
+function findCorrelatedWorkflowResult(
+	messages: readonly unknown[],
+	toolUseId: string,
+): { block: Record<string, unknown>; message: Record<string, unknown> } | undefined {
+	for (const message of messages) {
+		const record = asRecord(message);
+		if (!record) continue;
+		const content = asRecord(record.message)?.content;
+		if (!Array.isArray(content)) continue;
+		for (const value of content) {
+			const block = asRecord(value);
+			if (block?.type === "tool_result" && block.tool_use_id === toolUseId) return { block, message: record };
+		}
+	}
+	return undefined;
+}
+
+function formatDiagnosticKeys(
+	record: Record<string, unknown>,
+	selectedApiKey?: string,
+	prioritizeName = false,
+): string {
+	const keys = Object.keys(record).sort();
+	const selected = keys.slice(0, MAX_DIAGNOSTIC_LIST_ITEMS);
+	if (prioritizeName && keys.includes("name") && !selected.includes("name")) {
+		selected[selected.length - 1] = "name";
+		selected.sort();
+	}
+	const omitted = keys.length - selected.length;
+	return formatDiagnosticLabels(selected, selectedApiKey, omitted);
+}
+
+function formatDiagnosticLabels(values: string[], selectedApiKey?: string, omitted = 0): string {
+	const labels = values.slice(0, MAX_DIAGNOSTIC_LIST_ITEMS)
+		.map((value) => boundedDiagnosticText(value, selectedApiKey, MAX_DIAGNOSTIC_LABEL_CHARS));
+	return `[${labels.join(",")}${omitted > 0 ? `${labels.length > 0 ? "," : ""}${omitted} more omitted` : ""}]`;
+}
+
+function diagnosticType(value: unknown): string {
+	if (value === null) return "null";
+	if (Array.isArray(value)) return "array";
+	return typeof value;
+}
+
 function describeDiagnosticCause(error: unknown, selectedApiKey?: string): string {
 	const pending: unknown[] = [error];
 	const seen = new Set<unknown>();
@@ -201,7 +346,7 @@ function describeDiagnosticCause(error: unknown, selectedApiKey?: string): strin
 
 function boundedDiagnosticText(value: string, selectedApiKey?: string, limit = MAX_FAILURE_DIAGNOSTIC_CHARS): string {
 	const oneLine = formatErrorText(value, selectedApiKey)
-		.replace(/[\u0000-\u001f\u007f]+/g, " ")
+		.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
 	if (oneLine.length <= limit) return oneLine;
@@ -244,6 +389,7 @@ async function main(): Promise<void> {
 
 	let scenarioFailed = false;
 	let scenarioFailure: unknown;
+	const initialEvents: EventLog = { messages: [], errors: [] };
 	try {
 		const firstBudgetUsd = maxBudgetUsd * INITIAL_BUDGET_SHARE;
 		const initialLaunch = parseArgs([
@@ -272,7 +418,7 @@ async function main(): Promise<void> {
 
 		sessionId = firstOptions.sessionId;
 		assert.ok(sessionId, "new native query must have an SDK session id");
-		const events: EventLog = { messages: [], errors: [] };
+		const events = initialEvents;
 		const session = createFixtureSession(firstOptions, {
 			onMessage(message) {
 				events.messages.push(message);
@@ -576,6 +722,7 @@ async function main(): Promise<void> {
 	} catch (error) {
 		scenarioFailed = true;
 		scenarioFailure = error;
+		console.error(formatWorkflowFailureEvidence(initialEvents.messages, process.env.ANTHROPIC_API_KEY));
 		throw error;
 	} finally {
 		const closeOutcomes = await Promise.all(sessions.reverse().map(async (session) => {
