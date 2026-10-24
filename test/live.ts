@@ -59,7 +59,8 @@ export function validateLiveInvocation(env: NodeJS.ProcessEnv, argv: string[]): 
 	const budget = parseLiveBudget(argv);
 	if (!env.ANTHROPIC_API_KEY) {
 		throw new LiveRunRefusal(
-			"This isolated fixture requires ANTHROPIC_API_KEY in the process environment; the harness does not read or configure other credentials",
+			"This isolated fixture requires ANTHROPIC_API_KEY in the process environment; " +
+				"the harness does not read or configure other credentials",
 		);
 	}
 	return budget;
@@ -89,6 +90,7 @@ interface EventLog {
 	messages: SDKMessage[];
 	errors: unknown[];
 }
+
 async function main(): Promise<void> {
 	const maxBudgetUsd = validateLiveInvocation(process.env, process.argv.slice(2));
 	const deadline = Date.now() + MAX_TOTAL_TIME_MS;
@@ -146,8 +148,9 @@ async function main(): Promise<void> {
 			"native initialization must discover the project acceptance skill",
 		);
 
-		checkpointId = randomUUID();
-		session.send(userMessage(buildInitialPrompt(fixture.workflowPath, checkpointId), checkpointId));
+		const initialCheckpointId = randomUUID();
+		checkpointId = initialCheckpointId;
+		session.send(userMessage(buildInitialPrompt(fixture.workflowPath, initialCheckpointId), initialCheckpointId));
 
 		const mainBash = await waitFor(
 			() => findToolUse(events.messages, "Bash", (input) => input.command === MAIN_SLEEP_COMMAND),
@@ -278,7 +281,7 @@ async function main(): Promise<void> {
 		);
 
 		const firstTurn = await waitFor(
-			() => allResults(events.messages)[0],
+			() => resultForMessage(events.messages, initialCheckpointId),
 			events,
 			deadline,
 			"first main turn result",
@@ -318,12 +321,11 @@ async function main(): Promise<void> {
 			!hasTaskNotification(events.messages, secondAgentTaskId, "stopped"),
 			"the second Workflow agent must still be active before continued main input",
 		);
-		session.send(userMessage("The first turn is complete. Reply only `continuation accepted`; do not use tools.", randomUUID()));
+		const continuationPromptId = randomUUID();
+		session.send(userMessage("The first turn is complete. Reply only `continuation accepted`; do not use tools.", continuationPromptId));
 
 		const continuedTurn = await waitFor(
-			() => {
-				return allResults(events.messages)[1];
-			},
+			() => resultForMessage(events.messages, continuationPromptId),
 			events,
 			deadline,
 			"continued main input while a Workflow agent is active",
@@ -395,7 +397,7 @@ async function main(): Promise<void> {
 			resumePromptId,
 		));
 		const resumedResult = await waitFor(
-			() => latestResult(resumedEvents.messages),
+			() => resultForMessage(resumedEvents.messages, resumePromptId),
 			resumedEvents,
 			deadline,
 			"resumed session result",
@@ -412,7 +414,9 @@ async function main(): Promise<void> {
 		assert.ok(reportedSpend <= maxBudgetUsd, "reported session spend must remain within the requested budget");
 
 		console.log(`Native SDK acceptance scenario completed. Reported session spend: $${reportedSpend.toFixed(4)} USD.`);
-		console.log(`Session ${sessionId}; Workflow task ${workflowTaskId}; Workflow run ${workflowRunId}; checkpoint ${checkpointId}.`);
+		console.log(
+			`Session ${sessionId}; Workflow task ${workflowTaskId}; Workflow run ${workflowRunId}; checkpoint ${checkpointId}.`,
+		);
 	} finally {
 		const closeOutcomes = await Promise.allSettled(
 			sessions.reverse().map((session) => closeSession(session, Date.now() + 15_000, "final session cleanup")),
@@ -435,7 +439,11 @@ function fixtureCallbacks(fixture: HarnessFixture): Pick<Options, "canUseTool" |
 			if (toolName === "Skill" && input.skill === SKILL_NAME) {
 				return { behavior: "allow", updatedInput: input };
 			}
-			if (toolName === "Edit" && isFixturePath(fixture.repository, input.file_path) && basename(String(input.file_path)) === "target.txt") {
+			if (
+				toolName === "Edit" &&
+				isFixturePath(fixture.repository, input.file_path) &&
+				basename(String(input.file_path)) === "target.txt"
+			) {
 				return { behavior: "allow", updatedInput: input };
 			}
 			if (toolName === "Workflow" && input.name === SKILL_NAME) {
@@ -536,7 +544,8 @@ function buildInitialPrompt(workflowPath: string, checkpoint: string): string {
 		`Use the ${SKILL_NAME} skill first.`,
 		"Use the Edit tool exactly once to replace `before` with `after` in target.txt.",
 		`Run the exact Bash command ${MAIN_SLEEP_COMMAND} once as a foreground tool call.`,
-		`Call the native Workflow tool exactly once using name ${SKILL_NAME}; its fixture is ${workflowPath}. Do not edit that workflow file.`,
+		`Call the native Workflow tool exactly once using name ${SKILL_NAME}.`,
+		`Its fixture is ${workflowPath}. Do not edit that workflow file.`,
 		`The exact resume marker for the later session-resume check is ${marker}.`,
 		"Do not use network tools, run other shell commands, modify other files, or access any non-fixture path.",
 		"After the native Workflow tool returns its launch result, finish this turn with a short status.",
@@ -651,16 +660,17 @@ function hasBackgroundTask(messages: SDKMessage[], taskId: string): boolean {
 	});
 }
 
-function latestResult(messages: SDKMessage[]): SDKResultMessage | undefined {
+function resultForMessage(messages: SDKMessage[], userMessageId: UUID): SDKResultMessage | undefined {
 	for (let index = messages.length - 1; index >= 0; index -= 1) {
-		const record = asRecord(messages[index]);
-		if (record?.type === "result") return messages[index] as SDKResultMessage;
+		const message = messages[index];
+		const record = asRecord(message);
+		if (record?.type !== "result") continue;
+		const result = message as SDKResultMessage;
+		if (result.user_message_uuid === userMessageId || result.user_message_uuids?.includes(userMessageId)) {
+			return result;
+		}
 	}
 	return undefined;
-}
-
-function allResults(messages: SDKMessage[]): SDKResultMessage[] {
-	return messages.filter((message) => asRecord(message)?.type === "result") as SDKResultMessage[];
 }
 
 async function waitFor<T>(
