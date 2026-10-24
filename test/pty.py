@@ -14,7 +14,11 @@ from typing import Callable
 
 sys.dont_write_bytecode = True
 
-from helpers.pty_harness import APP, PTYChild, mode_snapshot
+from helpers.pty_harness import APP, AUTH_APP, PTYChild, mode_snapshot
+
+
+AUTH_TEST_KEY = b"phi_pty_test_saved_secret"
+AUTH_CANCEL_PARTIAL = b"phi_pty_cancel_partial_secret"
 
 
 def check(issues: list[str], condition: bool, message: str) -> None:
@@ -146,6 +150,40 @@ def run_initialization_failure(child: PTYChild, issues: list[str]) -> None:
 	check(issues, child.mode_error(expect_restored=True) is None, "initialization failure did not restore exact terminal settings")
 
 
+def run_auth_save_restart(child: PTYChild, issues: list[str]) -> None:
+	child.send(AUTH_TEST_KEY + b"\r")
+	saved = child.wait_event("auth-login-saved")
+	check(issues, saved.get("code") == 0, "auth login did not return success")
+	check(issues, saved.get("apiKeyMatches") is True, "auth login did not save the synthetic key")
+	check(issues, saved.get("authSource") == "saved", "saved key was not selected as the auth source")
+	run_app = child.wait_event("run-app")
+	check(issues, run_app.get("authSource") == "saved", "restart did not use saved auth")
+	check(issues, run_app.get("apiKeyMatches") is True, "restart did not pass the saved key to the injected app")
+	check(issues, run_app.get("parentEnvironmentUnchanged") is True, "restart mutated the parent environment")
+	check(issues, run_app.get("backendQueries") == 0, "auth PTY test started a backend query")
+	restarted = child.wait_event("auth-restart-complete")
+	check(issues, restarted.get("code") == 0, "saved auth restart did not complete")
+	check(issues, restarted.get("promptCalls") == 1, "saved auth restart prompted a second time")
+	check(issues, restarted.get("runAppCalls") == 1, "saved auth restart did not call the injected app exactly once")
+	check(issues, AUTH_TEST_KEY not in child.output, "synthetic key appeared in PTY output")
+	check(issues, child.wait_exit() == 0, "auth save/restart wrapper did not exit successfully")
+	check(issues, child.mode_error(expect_restored=True) is None, "auth save/restart did not restore exact terminal settings")
+
+
+def run_auth_cancel(child: PTYChild, issues: list[str]) -> None:
+	child.send(AUTH_CANCEL_PARTIAL)
+	child.send(b"\x1b")
+	cancelled = child.wait_event("auth-login-cancelled")
+	check(issues, cancelled.get("code") == 1, "auth login cancellation did not return the cancellation code")
+	check(issues, cancelled.get("authSource") == "missing", "cancelled auth created a saved auth source")
+	check(issues, cancelled.get("saved") is False, "cancelled auth wrote a credential")
+	check(issues, cancelled.get("runAppCalls") == 0, "cancelled auth reached the injected app")
+	check(issues, not any(event.get("event") == "run-app" for event in child.events), "cancelled auth started an app")
+	check(issues, AUTH_CANCEL_PARTIAL not in child.output, "partial key appeared in PTY output")
+	check(issues, child.wait_exit() == 0, "auth cancellation wrapper did not exit successfully")
+	check(issues, child.mode_error(expect_restored=True) is None, "auth cancellation did not restore exact terminal settings")
+
+
 def run_sigterm(child: PTYChild, issues: list[str]) -> None:
 	os.kill(child.pid, signal.SIGTERM)
 	exit_event = child.wait_event("exit")
@@ -156,23 +194,26 @@ def run_sigterm(child: PTYChild, issues: list[str]) -> None:
 
 
 def main() -> int:
-	if not APP.is_file():
-		print(f"Missing compiled PTY helper: {APP}; run `npm run build` first", file=sys.stderr)
+	missing = [str(path) for path in (APP, AUTH_APP) if not path.is_file()]
+	if missing:
+		print(f"Missing compiled PTY helper(s): {', '.join(missing)}; run `npm run build` first", file=sys.stderr)
 		return 2
-	cases: list[tuple[str, str, Callable[[PTYChild, list[str]], None]]] = [
-		("Enter and multiline input", "input", run_input),
-		("bracketed paste", "paste", run_paste),
-		("PTY resize", "resize", run_resize),
-		("Escape precedence", "escape", run_escape),
-		("native dialog cancel and decline", "dialog", run_dialog),
-		("suspend and resume", "suspend", run_suspend),
-		("SDK initialization failure cleanup", "initialization-failure", run_initialization_failure),
-		("SIGTERM cleanup", "sigterm", run_sigterm),
+	cases: list[tuple[str, str, Callable[[PTYChild, list[str]], None], Path]] = [
+		("Enter and multiline input", "input", run_input, APP),
+		("bracketed paste", "paste", run_paste, APP),
+		("PTY resize", "resize", run_resize, APP),
+		("Escape precedence", "escape", run_escape, APP),
+		("native dialog cancel and decline", "dialog", run_dialog, APP),
+		("suspend and resume", "suspend", run_suspend, APP),
+		("SDK initialization failure cleanup", "initialization-failure", run_initialization_failure, APP),
+		("SIGTERM cleanup", "sigterm", run_sigterm, APP),
+		("hidden auth save and restart", "save-restart", run_auth_save_restart, AUTH_APP),
+		("hidden auth cancellation", "cancel", run_auth_cancel, AUTH_APP),
 	]
 	results: list[dict[str, object]] = []
-	for name, scenario, action in cases:
+	for name, scenario, action, application in cases:
 		with tempfile.TemporaryDirectory(prefix="phi-pty-case-") as temporary:
-			child = PTYChild(scenario, Path(temporary))
+			child = PTYChild(scenario, Path(temporary), application=application)
 			issues: list[str] = []
 			modes = child.mode_history
 			try:
@@ -214,7 +255,8 @@ def main() -> int:
 			print(f"  {issue}")
 		if not results[-1]["passed"]:
 			print(f"  markers={json.dumps(child.events, ensure_ascii=False)}")
-			print(f"  terminal_output_tail={child.output[-800:].decode('utf-8', errors='replace')!r}")
+			tail = child.output[-800:].replace(AUTH_TEST_KEY, b"<redacted>").replace(AUTH_CANCEL_PARTIAL, b"<redacted>")
+			print(f"  terminal_output_tail={tail.decode('utf-8', errors='replace')!r}")
 	passed = sum(bool(result["passed"]) for result in results)
 	print(f"PTY scenarios: {passed}/{len(results)} passed")
 	for result in results:

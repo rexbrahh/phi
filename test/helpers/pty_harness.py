@@ -18,6 +18,7 @@ from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[2]
 APP = ROOT / "dist" / "test" / "pty-app.js"
+AUTH_APP = ROOT / "dist" / "test" / "pty-auth.js"
 PATH_PREFIX = "/opt/homebrew/bin"
 DA_QUERY = b"\x1b[c"
 DA_REPLY = b"\x1b[?1;2c"
@@ -94,9 +95,10 @@ def _setup_application_child(child_pid: int, slave_fd: int, pid_path: Path) -> N
 
 
 class PTYChild:
-	def __init__(self, scenario: str, directory: Path) -> None:
+	def __init__(self, scenario: str, directory: Path, application: Path = APP) -> None:
 		self.scenario = scenario
 		self.directory = directory
+		self.application = application
 		self.cwd = directory / "cwd"
 		self.cwd.mkdir()
 		self.home = directory / "home"
@@ -210,7 +212,7 @@ class PTYChild:
 			node = shutil.which("node", path=environment["PATH"])
 			if not node:
 				raise RuntimeError("node was not found on the test PATH")
-			os.execvpe(node, [node, str(APP), self.scenario], environment)
+			os.execvpe(node, [node, str(self.application), self.scenario], environment)
 		except BaseException as error:
 			os.write(2, f"PTY child launch failed: {error}\n".encode())
 			os._exit(127)
