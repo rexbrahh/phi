@@ -111,6 +111,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies): Pro
 		if (!environment) return 0;
 		const selectedKey = environment.ANTHROPIC_API_KEY;
 		if (selectedKey) secrets.add(selectedKey);
+		await dependencies.ensurePhiHome(join(home, "tmp"));
 
 		return await dependencies.runApp(launch, { environment });
 	} catch (error) {

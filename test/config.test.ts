@@ -83,16 +83,24 @@ test("buildOptions keeps injected credentials and inherited environment while pi
 		ANTHROPIC_API_KEY: "synthetic-api-key",
 		CLAUDE_CONFIG_DIR: "/legacy/claude-config",
 		CLAUDE_CODE_PLUGIN_CACHE_DIR: "/legacy/plugin-cache",
+		CLAUDE_CODE_TMPDIR: "/legacy/native-tmp",
+		TMPDIR: "/ordinary/inherited-tmp",
 		PATH: "/synthetic/bin",
 	};
 	const priorConfigRoot = process.env.CLAUDE_CONFIG_DIR;
+	const priorParentTmpdir = process.env.TMPDIR;
 	const options = buildOptions(launch, optionCallbacks(), environment);
 
 	assert.equal(options.env?.ANTHROPIC_API_KEY, "synthetic-api-key");
 	assert.equal(options.env?.PATH, "/synthetic/bin");
 	assert.equal(options.env?.CLAUDE_CONFIG_DIR, launch.home);
 	assert.equal(options.env?.CLAUDE_CODE_PLUGIN_CACHE_DIR, join(launch.home, "plugins"));
+	assert.equal(options.env?.CLAUDE_CODE_TMPDIR, join(launch.home, "tmp"));
+	assert.equal(options.env?.TMPDIR, "/ordinary/inherited-tmp");
 	assert.equal(process.env.CLAUDE_CONFIG_DIR, priorConfigRoot);
+	assert.equal(process.env.TMPDIR, priorParentTmpdir);
+	assert.equal(environment.CLAUDE_CODE_TMPDIR, "/legacy/native-tmp");
+	assert.equal(environment.TMPDIR, "/ordinary/inherited-tmp");
 });
 
 test("parseArgs resolves an explicit Phi home without treating legacy config as the write root", () => {

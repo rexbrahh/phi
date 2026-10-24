@@ -59,7 +59,7 @@ test("first interactive launch saves a hidden prompt result before runApp receiv
 		const env = dependencies.environment;
 		env.CLAUDE_CONFIG_DIR = join(parent, "legacy-config");
 		dependencies.ensurePhiHome = async (path) => {
-			events.push("ensure-home");
+			events.push(path === home ? "ensure-home" : "ensure-native-temp");
 			await ensurePhiHome(path);
 		};
 		dependencies.importCustomizations = async (sourceRoot, destination, globalPath) => {
@@ -83,7 +83,7 @@ test("first interactive launch saves a hidden prompt result before runApp receiv
 		};
 
 		assert.equal(await runCli([], dependencies), 0);
-		assert.deepEqual(events, ["ensure-home", "import-customizations", "prompt", "run-app"]);
+		assert.deepEqual(events, ["ensure-home", "import-customizations", "prompt", "ensure-native-temp", "run-app"]);
 		assert.equal(combined(stdout).includes(secret), false);
 		assert.equal(combined(stderr).includes(secret), false);
 		assert.equal(dependencies.environment.ANTHROPIC_API_KEY, undefined);
@@ -270,6 +270,8 @@ test("real importer and saved auth share Phi plugin and runtime roots without mu
 		const home = resolvePhiHome(dependencies.environment, dependencies.userHome);
 		const legacyKey = "legacy_auth_must_not_be_imported";
 		const syntheticKey = "phi_test_full_home_restart_key";
+		const staleNativeTemp = join(parent, "legacy-native-tmp");
+		const ordinaryTemp = join(parent, "ordinary-temp");
 		const pluginSource = join(source, "plugins", "cache", "demo");
 		const marketplaceSource = join(source, "plugins", "marketplaces", "local");
 		const parentApiKey = process.env.ANTHROPIC_API_KEY;
@@ -284,6 +286,7 @@ test("real importer and saved auth share Phi plugin and runtime roots without mu
 				ANTHROPIC_API_KEY: legacyKey,
 				CLAUDE_CONFIG_DIR: source,
 				ANTHROPIC_BASE_URL: "https://legacy.invalid",
+				CLAUDE_CODE_TMPDIR: staleNativeTemp,
 				PHI_IMPORTED_SETTING: "preserved",
 			},
 			hooks: { PreToolUse: [{ hooks: [{ type: "command", command: "printf untouched-hook" }] }] },
@@ -303,6 +306,8 @@ test("real importer and saved auth share Phi plugin and runtime roots without mu
 			local: { installLocation: marketplaceSource },
 		}));
 		dependencies.environment.CLAUDE_CONFIG_DIR = source;
+		dependencies.environment.CLAUDE_CODE_TMPDIR = staleNativeTemp;
+		dependencies.environment.TMPDIR = ordinaryTemp;
 		dependencies.importCustomizations = async (sourceRoot, destination, globalConfigPath) =>
 			importClaudeCustomizations(sourceRoot, destination, globalConfigPath);
 
@@ -318,6 +323,9 @@ test("real importer and saved auth share Phi plugin and runtime roots without mu
 			assert.notEqual(appDependencies.environment, dependencies.environment);
 			assert.notEqual(appDependencies.environment, process.env);
 			assert.equal(appDependencies.environment.ANTHROPIC_API_KEY, syntheticKey);
+			const nativeTemp = await lstat(join(home, "tmp"));
+			assert.equal(nativeTemp.isDirectory(), true);
+			assert.equal(nativeTemp.mode & 0o777, 0o700);
 			const callbacks = {
 				canUseTool: async () => ({ behavior: "deny" as const, message: "offline test" }),
 				onElicitation: async () => ({ action: "decline" as const }),
@@ -327,6 +335,8 @@ test("real importer and saved auth share Phi plugin and runtime roots without mu
 			assert.equal(options.env?.ANTHROPIC_API_KEY, syntheticKey);
 			assert.equal(options.env?.CLAUDE_CONFIG_DIR, home);
 			assert.equal(options.env?.CLAUDE_CODE_PLUGIN_CACHE_DIR, join(home, "plugins"));
+			assert.equal(options.env?.CLAUDE_CODE_TMPDIR, join(home, "tmp"));
+			assert.equal(options.env?.TMPDIR, ordinaryTemp);
 			runtimeRoots.push(options.env?.CLAUDE_CODE_PLUGIN_CACHE_DIR ?? "");
 			return 0;
 		};
@@ -364,6 +374,8 @@ test("real importer and saved auth share Phi plugin and runtime roots without mu
 		}
 		assert.equal(dependencies.environment.ANTHROPIC_API_KEY, undefined);
 		assert.equal(dependencies.environment.CLAUDE_CONFIG_DIR, source);
+		assert.equal(dependencies.environment.CLAUDE_CODE_TMPDIR, staleNativeTemp);
+		assert.equal(dependencies.environment.TMPDIR, ordinaryTemp);
 		assert.equal(process.env.ANTHROPIC_API_KEY, parentApiKey);
 		assert.equal(process.env.CLAUDE_CONFIG_DIR, parentConfigRoot);
 	});
