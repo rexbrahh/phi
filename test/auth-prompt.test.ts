@@ -73,6 +73,34 @@ test("bracketed paste remains hidden without output proportional to key length",
 	assert.equal(terminal.output.includes(secret), false);
 });
 
+test("multiline bracketed paste is rejected before flattening and can be corrected", async () => {
+	const terminal = new FakeTerminal();
+	const { result } = await startPrompt(terminal);
+	const firstLine = "phi_test_multiline_first_secret";
+	const secondLine = "phi_test_multiline_second_secret";
+	let settled = false;
+	void result.then(() => { settled = true; });
+
+	terminal.input(`\u001b[200~${firstLine}\n${secondLine}\u001b[201~`);
+	await Promise.resolve();
+	assert.equal(settled, false);
+	assert.ok(terminal.output.includes("Enter a non-empty, single-line API key."));
+	assert.equal(terminal.output.includes(firstLine), false);
+	assert.equal(terminal.output.includes(secondLine), false);
+
+	terminal.input("\r");
+	await Promise.resolve();
+	assert.equal(settled, false);
+
+	const corrected = "phi_test_corrected_key";
+	terminal.input(corrected);
+	terminal.input("\r");
+	assert.equal(await result, corrected);
+	assert.equal(terminal.output.includes(firstLine), false);
+	assert.equal(terminal.output.includes(secondLine), false);
+	assert.equal(terminal.output.includes(corrected), false);
+});
+
 test("Escape and Ctrl+C cancel without rendering the partial key", async () => {
 	for (const cancelKey of ["\u001b", "\u0003"]) {
 		const terminal = new FakeTerminal();

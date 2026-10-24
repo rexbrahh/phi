@@ -1,6 +1,8 @@
 import { Input, Key, matchesKey, Text, TuiMainScreen, type Terminal } from "@earendil-works/pi-tui";
 
 const TERMINATION_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
+const BRACKETED_PASTE_START = "\u001b[200~";
+const BRACKETED_PASTE_END = "\u001b[201~";
 
 export async function promptForPhiApiKey(
 	terminal: Terminal,
@@ -33,17 +35,20 @@ export async function promptForPhiApiKey(
 		settled = true;
 		rejectPrompt(new Error("The hidden API key prompt could not be updated."));
 	};
+	const showInvalidInput = (): void => {
+		feedback.setText("Enter a non-empty, single-line API key.");
+		try {
+			tui.renderNow(true);
+		} catch {
+			fail();
+		}
+	};
 
 	input.onEscape = () => complete(undefined);
 	input.onSubmit = (value) => {
 		const key = value.trim();
 		if (!key || /[\r\n]/u.test(value)) {
-			feedback.setText("Enter a non-empty, single-line API key.");
-			try {
-				tui.renderNow(true);
-			} catch {
-				fail();
-			}
+			showInvalidInput();
 			return;
 		}
 		complete(key);
@@ -58,6 +63,13 @@ export async function promptForPhiApiKey(
 			if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
 				complete(undefined);
 				return { consume: true };
+			}
+			if (data.startsWith(BRACKETED_PASTE_START) && data.endsWith(BRACKETED_PASTE_END)) {
+				const pastedText = data.slice(BRACKETED_PASTE_START.length, -BRACKETED_PASTE_END.length).trim();
+				if (/[\r\n]/u.test(pastedText)) {
+					showInvalidInput();
+					return { consume: true };
+				}
 			}
 			try {
 				input.handleInput(data);
