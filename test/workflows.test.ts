@@ -105,16 +105,45 @@ test("an incomplete final line is emitted only after a later append completes it
 	}
 });
 
-test("identical journal records in one page produce one metadata record", async () => {
+test("observed lifecycle records preserve keys and deduplicate identical rows after cursor continuation", async () => {
 	const fixture = await createFixture();
 	try {
-		const duplicate = event("launched", { id: "launch-1", agentId: "agent-a", phase: "plan" });
-		await writeFile(fixture.journalPath, `${duplicate}\n${duplicate}\n`);
-		const page = await readWorkflowJournal(fixture.ref);
-		assert.deepEqual(page.metadata.records, [
-			{ type: "launched", id: "launch-1", agentId: "agent-a", phase: "plan" },
+		const key = "opaque-correlation-key-1";
+		const observedRecords = [
+			event("launched"),
+			event("started", { key, agentId: "agent-a", label: "Review", phase: "review" }),
+			event("result", { key, agentId: "agent-a", result: "synthetic result text" }),
+			event("failed", { key: "opaque-correlation-key-2", agentId: "agent-b" }),
+		];
+		const prefix = `${"x".repeat(BATCH_BYTES - 1)}\n`;
+		await writeFile(
+			fixture.journalPath,
+			`${prefix}${observedRecords.flatMap((record) => [record, record]).join("\n")}\n`,
+		);
+
+		const first = await readWorkflowJournal(fixture.ref);
+		assert.deepEqual(first.metadata.records, []);
+		assert.equal(first.cursor?.byteOffset, BATCH_BYTES);
+		assert.ok(first.cursor);
+
+		const continued = await readWorkflowJournal(fixture.ref, first.cursor);
+		assert.deepEqual(continued.metadata.records, [
+			{ type: "launched" },
+			{ type: "started", key, agentId: "agent-a", phase: "review", label: "Review" },
+			{ type: "result", key, agentId: "agent-a" },
+			{ type: "failed", key: "opaque-correlation-key-2", agentId: "agent-b" },
 		]);
-		assert.ok(page.warnings.some((warning) => /duplicate/i.test(warning)));
+		assert.equal(continued.warnings.filter((warning) => /duplicate/i.test(warning)).length, 4);
+		assert.deepEqual(
+			continued.metadata.records
+				.filter((record) => record.type === "started" || record.type === "result")
+				.map((record) => ({ type: record.type, key: "key" in record ? record.key : undefined })),
+			[
+				{ type: "started", key },
+				{ type: "result", key },
+			],
+		);
+		assert.equal("result" in continued.metadata.records[2]!, false);
 	} finally {
 		await disposeFixture(fixture);
 	}

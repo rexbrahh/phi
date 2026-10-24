@@ -17,6 +17,11 @@ export type WorkflowJournalRecordType = "launched" | "started" | "result" | "fai
 export interface WorkflowJournalRecord {
 	type: WorkflowJournalRecordType;
 	id?: string;
+	/**
+	 * Opaque workflow-local correlation metadata. Global uniqueness is not
+	 * guaranteed; this is not a native task ID or unique event ID.
+	 */
+	key?: string;
 	agentId?: string;
 	taskId?: string;
 	phase?: string;
@@ -124,6 +129,7 @@ function metadataRecord(value: unknown): WorkflowJournalRecord | undefined {
 	if (typeof source.type !== "string" || !RECORD_TYPES.has(source.type)) return undefined;
 	const record: WorkflowJournalRecord = { type: source.type as WorkflowJournalRecordType };
 	const id = firstString(source, "id", "eventId", "uuid");
+	const key = firstString(source, "key");
 	const agentId = firstString(source, "agentId", "agent_id");
 	const taskId = firstString(source, "taskId", "task_id");
 	const phase = firstString(source, "phase", "phaseLabel", "phase_label");
@@ -131,6 +137,7 @@ function metadataRecord(value: unknown): WorkflowJournalRecord | undefined {
 	const name = firstString(source, "name");
 	const timestamp = source.timestamp;
 	if (id !== undefined) record.id = id;
+	if (key !== undefined) record.key = key;
 	if (agentId !== undefined) record.agentId = agentId;
 	if (taskId !== undefined) record.taskId = taskId;
 	if (phase !== undefined) record.phase = phase;
@@ -180,12 +187,12 @@ function parseLine(
 
 	const record = metadataRecord(source);
 	if (!record) return;
-	const key = record.id ? `${record.type}:${record.id}` : `${record.type}:${text}`;
-	if (seenRecords.has(key)) {
+	const dedupKey = record.id ? `${record.type}:${record.id}` : `${record.type}:${text}`;
+	if (seenRecords.has(dedupKey)) {
 		warnings.push(`Skipped a duplicate ${record.type} journal record.`);
 		return;
 	}
-	seenRecords.add(key);
+	seenRecords.add(dedupKey);
 	metadata.records.push(record);
 }
 
