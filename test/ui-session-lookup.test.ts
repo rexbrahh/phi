@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import test from "node:test";
 import type { ListSessionsOptions, SDKSessionInfo, SessionMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { HistoryReader } from "../src/history.js";
@@ -61,7 +62,7 @@ test("startup --continue lists from Phi home and opens the selected SDK session 
 		assert.equal(fake.parameters?.options?.cwd, launch.cwd);
 		assert.equal(fake.parameters?.options?.env?.ANTHROPIC_API_KEY, "synthetic-api-key");
 		assert.equal(fake.parameters?.options?.env?.CLAUDE_CONFIG_DIR, launch.home);
-		assert.equal(fake.parameters?.options?.env?.CLAUDE_CODE_PLUGIN_CACHE_DIR, `${launch.home}/plugins/cache`);
+		assert.equal(fake.parameters?.options?.env?.CLAUDE_CODE_PLUGIN_CACHE_DIR, join(launch.home, "plugins"));
 		assert.equal(closeCount, 1);
 	} finally {
 		await controller.close(0);
