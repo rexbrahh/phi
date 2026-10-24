@@ -20,24 +20,31 @@ export class AppInspectorController {
 	private historyGeneration = 0;
 	private workspaceGeneration = 0;
 	private workflowGeneration = 0;
+	private processGeneration = 0;
 	private workspaceRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 	private scheduledWorkspaceCwd: string | undefined;
 	private closed = false;
 
 	constructor(
 		private readonly state: PhiState,
-		private readonly launchCwd: string,
+		private launchCwd: string,
 		private readonly dependencies: AppDependencies,
 		private readonly onChange: () => void,
 	) {
 		this.view = new InspectorView(state, this.model);
 	}
 
-	setSession(sessionId: string): void {
-		if (this.sessionId === sessionId) return;
+	setSession(sessionId: string, processGeneration = this.processGeneration, cwd = this.launchCwd): void {
+		if (this.sessionId === sessionId && this.processGeneration === processGeneration && this.launchCwd === cwd) return;
 		this.sessionId = sessionId;
+		this.processGeneration = processGeneration;
+		this.launchCwd = cwd;
 		this.historyGeneration += 1;
+		this.workspaceGeneration += 1;
 		this.workflowGeneration += 1;
+		if (this.workspaceRefreshTimer) clearTimeout(this.workspaceRefreshTimer);
+		this.workspaceRefreshTimer = undefined;
+		this.scheduledWorkspaceCwd = undefined;
 		this.workflowReferences.clear();
 		this.workflowCursors.clear();
 		this.workflowRecords.clear();
@@ -122,6 +129,7 @@ export class AppInspectorController {
 
 	async selectChild(agentId: string): Promise<void> {
 		const sessionId = this.sessionId;
+		const processGeneration = this.processGeneration;
 		if (!sessionId || !this.model.childAgentIds.includes(agentId)) return;
 		this.workflowGeneration += 1;
 		this.model.selectedTaskId = undefined;
@@ -140,13 +148,13 @@ export class AppInspectorController {
 				limit: HISTORY_PAGE_SIZE,
 				offset: 0,
 			});
-			if (this.closed || generation !== this.historyGeneration || this.sessionId !== sessionId || this.model.selectedChildId !== agentId) return;
+			if (this.closed || generation !== this.historyGeneration || this.processGeneration !== processGeneration || this.sessionId !== sessionId || this.model.selectedChildId !== agentId) return;
 			this.model.childMessages = messages;
 			this.model.historyError = undefined;
 		} catch (error) {
-			if (generation === this.historyGeneration) this.model.historyError = errorText(error);
+			if (generation === this.historyGeneration && this.processGeneration === processGeneration) this.model.historyError = errorText(error);
 		} finally {
-			if (generation === this.historyGeneration) {
+			if (generation === this.historyGeneration && this.processGeneration === processGeneration) {
 				this.model.historyLoading = false;
 				this.onChange();
 			}
@@ -155,6 +163,7 @@ export class AppInspectorController {
 
 	async loadHistoryPage(offset: number): Promise<void> {
 		const sessionId = this.sessionId;
+		const processGeneration = this.processGeneration;
 		if (!sessionId || this.closed) return;
 		const generation = ++this.historyGeneration;
 		this.model.historyOffset = Math.max(0, offset);
@@ -168,12 +177,12 @@ export class AppInspectorController {
 				offset: this.model.historyOffset,
 				includeSystemMessages: true,
 			});
-			if (this.closed || generation !== this.historyGeneration || this.sessionId !== sessionId) return;
+			if (this.closed || generation !== this.historyGeneration || this.processGeneration !== processGeneration || this.sessionId !== sessionId) return;
 			this.model.historyMessages = messages;
 		} catch (error) {
-			if (generation === this.historyGeneration) this.model.historyError = errorText(error);
+			if (generation === this.historyGeneration && this.processGeneration === processGeneration) this.model.historyError = errorText(error);
 		} finally {
-			if (generation === this.historyGeneration) {
+			if (generation === this.historyGeneration && this.processGeneration === processGeneration) {
 				this.model.historyLoading = false;
 				this.onChange();
 			}
@@ -190,13 +199,14 @@ export class AppInspectorController {
 		this.workspaceRefreshTimer = undefined;
 		this.scheduledWorkspaceCwd = undefined;
 		const generation = ++this.workspaceGeneration;
+		const processGeneration = this.processGeneration;
 		try {
 			const workspace = await this.dependencies.readWorkspace(cwd);
-			if (this.closed || generation !== this.workspaceGeneration || this.state.cwd !== cwd) return;
+			if (this.closed || generation !== this.workspaceGeneration || this.processGeneration !== processGeneration || this.state.cwd !== cwd) return;
 			this.model.workspace = workspace;
 			this.onChange();
 		} catch (error) {
-			if (this.closed || generation !== this.workspaceGeneration || this.state.cwd !== cwd) return;
+			if (this.closed || generation !== this.workspaceGeneration || this.processGeneration !== processGeneration || this.state.cwd !== cwd) return;
 			this.model.workspace = { kind: "error", cwd, error: errorText(error) };
 			this.onChange();
 		}
@@ -206,10 +216,11 @@ export class AppInspectorController {
 		if (this.scheduledWorkspaceCwd === cwd && this.workspaceRefreshTimer) return;
 		if (this.workspaceRefreshTimer) clearTimeout(this.workspaceRefreshTimer);
 		this.scheduledWorkspaceCwd = cwd;
+		const processGeneration = this.processGeneration;
 		this.workspaceRefreshTimer = setTimeout(() => {
 			this.workspaceRefreshTimer = undefined;
 			this.scheduledWorkspaceCwd = undefined;
-			void this.refreshWorkspace(cwd);
+			if (processGeneration === this.processGeneration) void this.refreshWorkspace(cwd);
 		}, 100);
 	}
 
@@ -277,15 +288,16 @@ export class AppInspectorController {
 
 	private async loadChildAgentIds(): Promise<void> {
 		const sessionId = this.sessionId;
+		const processGeneration = this.processGeneration;
 		if (!sessionId || this.closed) return;
 		const generation = this.historyGeneration;
 		try {
 			const childIds = await this.getReader().agents(sessionId, { dir: this.launchCwd });
-			if (this.closed || generation !== this.historyGeneration || this.sessionId !== sessionId) return;
+			if (this.closed || generation !== this.historyGeneration || this.processGeneration !== processGeneration || this.sessionId !== sessionId) return;
 			this.model.childAgentIds = [...new Set([...childIds, ...this.state.childMessages.keys()])];
 			this.onChange();
 		} catch (error) {
-			if (generation !== this.historyGeneration) return;
+			if (generation !== this.historyGeneration || this.processGeneration !== processGeneration) return;
 			this.model.historyError = errorText(error);
 			this.onChange();
 		}

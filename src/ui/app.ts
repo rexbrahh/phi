@@ -444,62 +444,210 @@ export class AppController {
 
 	private async runInternal(): Promise<number> {
 		if (!this.dependencies.isInteractive()) return 2;
+		let result = 0;
 		try {
 			this.startTerminal();
 			this.registerSignals();
-			const launch = await this.dependencies.resolveLaunchOptions(
+			this.launch = await this.dependencies.resolveLaunchOptions(
 				this.launch,
 				this.dependencies.listSessions,
 			);
-			if (this.exitRequested) return await this.exitPromise;
-			void this.refreshWorkspace(launch.cwd);
-			const observer = new AppSessionObserver(
-				this.state,
-				this.interactions,
-				this.views.inspectors,
-				() => this.dialogController.sync(),
-				(sessionId) => { this.sessionId = sessionId; },
-				() => this.render(),
-				(message) => this.showNotice(message),
-				() => this.closing,
-			);
-			const callbacks = observer.callbacks();
-			const options = buildOptions(launch, {
-				canUseTool: callbacks.canUseTool,
-				onElicitation: callbacks.onElicitation,
-				hooks: callbacks.hooks,
-			});
-			this.sessionId = launch.resume ?? options.sessionId;
-			if (this.sessionId) this.views.inspectors.setSession(this.sessionId);
-			this.session = startSession(options, callbacks, this.dependencies.createQuery);
-			void this.session.done.then(
-				() => this.requestExit(0),
-				(error: unknown) => {
-					this.showNotice(`Session ended with an error: ${errorText(error)}`);
+			if (!this.exitRequested) {
+				this.resetSessionControls(this.launch);
+				const generation = ++this.processGeneration;
+				await this.openSession(this.launch, generation, false);
+				if (!this.exitRequested) void this.refreshWorkspace(this.state.cwd);
+				result = await this.exitPromise;
+			} else {
+				result = this.exitCode;
+			}
+		} catch (error) {
+			this.showNotice(`Could not start Phi: ${errorText(error)}`);
+			result = this.exitRequested ? this.exitCode : 1;
+		}
+		const cleanupErrors = await this.cleanup();
+		if (cleanupErrors.length > 0 && result === 0) result = 1;
+		return result;
+	}
+
+	private async openSession(launch: LaunchOptions, generation: number, replacement: boolean): Promise<void> {
+		const isCurrent = (): boolean => generation === this.processGeneration && !this.closing;
+		const observer = new AppSessionObserver(
+			this.state,
+			this.interactions,
+			this.views.inspectors,
+			() => this.dialogController.sync(),
+			(sessionId) => { if (isCurrent()) this.sessionId = sessionId; },
+			() => this.render(),
+			(message) => this.showNotice(message),
+			() => this.closing,
+			isCurrent,
+			(commands) => this.refreshNativeCommands(commands),
+			(uuid) => { this.lastCheckpointId = uuid; },
+			() => { this.completedInteractionVersion = this.userInteractionVersion; this.sessionError = undefined; },
+			(message) => { this.sessionError = message; },
+		);
+		const callbacks = observer.callbacks();
+		const options = buildOptions(launch, {
+			canUseTool: callbacks.canUseTool,
+			onElicitation: callbacks.onElicitation,
+			hooks: callbacks.hooks,
+		});
+		this.sessionId = launch.sessionId ?? launch.resume ?? options.sessionId;
+		this.views.inspectors.setSession(this.sessionId ?? "", generation, launch.cwd);
+		this.session = startSession(options, callbacks, this.dependencies.createQuery);
+		const session = this.session;
+		this.ready = undefined;
+		this.sessionError = undefined;
+		this.pendingRewindId = undefined;
+		void session.done.then(
+			() => {
+				if (!isCurrent()) return;
+				if (replacement) {
+					this.session = undefined;
+					this.ready = undefined;
+					this.sessionError = "The SDK output stream ended.";
+					this.showNotice(`Session ${this.sessionId ?? "unknown"} ended.`);
+				} else {
+					this.requestExit(0);
+				}
+			},
+			(error: unknown) => {
+				if (!isCurrent()) return;
+				const detail = `Session ended with an error: ${errorText(error)}`;
+				this.sessionError = detail;
+				this.showNotice(detail);
+				if (replacement) {
+					this.session = undefined;
+					this.ready = undefined;
+				} else {
 					this.requestExit(1);
-				},
-			);
+				}
+			},
+		);
+		try {
 			const ready = await Promise.race([
-				this.session.ready,
+				session.ready,
 				this.exitPromise.then(() => undefined),
 			]);
-			if (!ready) return await this.exitPromise;
+			if (!ready) return;
+			if (!isCurrent()) return;
 			this.ready = ready;
-			this.views.editor.setAutocompleteProvider(new CombinedAutocompleteProvider(ready.commands, launch.cwd));
+			this.refreshNativeCommands(ready.commands);
 			if (ready.hooks_applied === false) this.showNotice("The SDK did not apply this session's hooks.");
 			if (ready.plugins_applied === false) this.showNotice("The SDK did not load every requested plugin.");
 			try {
-				const statuses = await this.session.query.mcpServerStatus();
-				this.dialogController.showMcpStatus(statuses);
+				const statuses = await session.query.mcpServerStatus();
+				if (isCurrent()) this.dialogController.showMcpStatus(statuses);
 			} catch (error) {
-				this.showNotice(`MCP status is unavailable: ${errorText(error)}`);
+				if (isCurrent()) this.showNotice(`MCP status is unavailable: ${errorText(error)}`);
 			}
-			return await this.exitPromise;
 		} catch (error) {
-			this.showNotice(`Could not start Phi: ${errorText(error)}`);
-			return this.exitRequested ? this.exitCode : 1;
-		} finally {
-			await this.cleanup();
+			if (isCurrent()) {
+				this.sessionError = `Could not open session ${this.sessionId ?? "unknown"}: ${errorText(error)}`;
+				this.showNotice(this.sessionError);
+			}
+			if (replacement) {
+				try {
+					await session.close();
+					if (isCurrent()) this.session = undefined;
+				} catch (closeError) {
+					if (isCurrent()) {
+						this.sessionError = `Could not open session ${this.sessionId ?? "unknown"}: ${errorText(error)}. Query cleanup failed: ${errorText(closeError)}`;
+						this.showNotice(this.sessionError);
+					}
+				}
+			}
+			throw error;
+		}
+	}
+
+	private async replaceSessionNow(command: SessionTransition): Promise<void> {
+		let target: PendingSessionTransition | undefined;
+		const key = command.kind === "resume" ? `resume:${command.sessionId}` : command.kind;
+		if (this.pendingTransition?.key === key && this.pendingTransition.expiresAt >= Date.now()) {
+			target = this.pendingTransition;
+		} else {
+			target = await this.createSessionTarget(command, key);
+		}
+		const confirmed = this.pendingTransition?.key === key && this.pendingTransition.expiresAt >= Date.now();
+		this.pendingTransition = undefined;
+		if (this.hasActiveWork() && !confirmed) {
+			this.pendingTransition = { ...target, expiresAt: Date.now() + 30_000 };
+			this.showNotice(`Active SDK or local work must stop before this session switch. Run ${this.transitionCommand(command)} again within 30 seconds to confirm stop-and-switch.`);
+			return;
+		}
+
+		const oldSession = this.session;
+		const oldQuery = oldSession?.query;
+		if (oldQuery) {
+			try {
+				if (this.state.effectiveStatus.foreground === "running") await oldQuery.interrupt();
+				for (const taskId of this.tasksToStopBeforeSwitch()) await oldQuery.stopTask(taskId);
+			} catch (error) {
+				this.showNotice(`Could not stop current SDK work; ${target.sessionId} was not opened: ${errorText(error)}`);
+				return;
+			}
+		}
+
+		this.interactions.cancelAll("Session switch requested");
+		const generation = ++this.processGeneration;
+		this.views.inspectors.setSession(this.sessionId ?? "", generation, this.state.cwd);
+		await this.shell.stop();
+		this.shell.leave();
+		try {
+			await oldSession?.close();
+		} catch (error) {
+			if (this.session === oldSession) this.session = undefined;
+			this.ready = undefined;
+			this.sessionError = `Could not close the current SDK query; ${target.sessionId} was not opened: ${errorText(error)}`;
+			this.showNotice(this.sessionError);
+			return;
+		}
+		if (this.session === oldSession) this.session = undefined;
+		this.ready = undefined;
+		this.sessionError = undefined;
+		this.lastCheckpointId = undefined;
+		this.reportedModelValueOverride = undefined;
+		this.state.cwd = target.launch.cwd;
+		resetStateForProcess(this.state, target.launch.cwd);
+		this.sessionId = target.sessionId;
+		this.launch = target.launch;
+		this.resetSessionControls(target.launch);
+		this.userInteractionVersion = 0;
+		this.completedInteractionVersion = -1;
+		this.pendingRewindId = undefined;
+		this.showNotice(`Opening session ${target.sessionId}.`);
+		try {
+			await this.openSession(target.launch, generation, true);
+			if (!this.exitRequested && generation === this.processGeneration) void this.refreshWorkspace(target.launch.cwd);
+		} catch (error) {
+			if (generation === this.processGeneration && !this.sessionError) {
+				this.sessionError = `Could not open session ${target.sessionId}: ${errorText(error)}`;
+				this.showNotice(this.sessionError);
+			}
+		}
+	}
+
+	private async createSessionTarget(command: SessionTransition, key: string): Promise<PendingSessionTransition> {
+		if (command.kind === "new") {
+			const sessionId = randomUUID();
+			return {
+				key,
+				expiresAt: Date.now() + 30_000,
+				sessionId,
+				launch: { ...this.launch, cwd: this.state.cwd, resume: undefined, forkSession: false, sessionId, continue: false },
+			};
+		}
+		if (command.kind === "fork") {
+			if (!this.sessionId) throw new Error("There is no current SDK session to fork.");
+			const sessionId = randomUUID();
+			return {
+				key,
+				expiresAt: Date.now() + 30_000,
+				sessionId,
+				launch: { ...this.launch, cwd: this.state.cwd, resume: this.sessionId, forkSession: true, sessionId, continue: false },
+			};
 		}
 		let sessionCwd = this.launch.cwd;
 		try {
@@ -595,13 +743,29 @@ export class AppController {
 	private updateProgramStatus(): void {
 		const pending = this.interactions.pending[0];
 		const kind: ProgramStatus["kind"] = pending?.kind === "permission" ? "permission" : pending ? "question" : undefined;
+		const runningTask = [...this.state.tasks.values()].some((task) => task.status === "running" && !task.ambient);
+		const taskFailed = [...this.state.tasks.values()].some((task) => task.status === "failed");
+		const working = this.shell.running || this.state.effectiveStatus.foreground === "running" || runningTask;
+		const completed = this.userInteractionVersion > 0 && this.completedInteractionVersion === this.userInteractionVersion;
 		const status: ProgramStatus = pending
 			? { state: "blocked", app: "phi", ...(kind ? { kind } : {}), message: pending.kind }
-			: this.shell.running || this.state.effectiveStatus.foreground === "running"
-				? { state: "working" as const, app: "phi", message: this.shellMode ? "local shell" : "session" }
-				: { state: "idle" as const, app: "phi" };
-		this.dependencies.terminal.setProgramStatus(status);
-		this.dependencies.terminal.setProgress(Boolean(this.shell.running || this.state.effectiveStatus.foreground === "running"));
+			: this.sessionError || taskFailed
+				? { state: "error" as const, app: "phi", message: "session error" }
+				: working
+					? { state: "working" as const, app: "phi", message: this.shellMode ? "local shell" : "session" }
+					: completed
+						? { state: "done" as const, app: "phi" }
+						: { state: "idle" as const, app: "phi" };
+		const signature = JSON.stringify(status);
+		if (signature !== this.lastProgramStatus) {
+			this.dependencies.terminal.setProgramStatus(status);
+			this.lastProgramStatus = signature;
+		}
+		const progress = status.state === "working";
+		if (progress !== this.lastProgressState) {
+			this.dependencies.terminal.setProgress(progress);
+			this.lastProgressState = progress;
+		}
 	}
 
 	private requestExit(code: number): void {
@@ -626,26 +790,54 @@ export class AppController {
 		this.startTerminal();
 	}
 
-	private async cleanup(): Promise<void> {
-		if (this.closing) return;
+	private async cleanup(): Promise<string[]> {
+		if (this.closing) return [];
 		this.closing = true;
+		this.processGeneration += 1;
 		this.removeInputListener?.();
 		this.removeInputListener = undefined;
 		for (const [signal, listener] of this.signalListeners) this.dependencies.signals.off(signal, listener);
 		this.signalListeners.clear();
-		await this.views.inspectors.close().catch(() => undefined);
-		await this.session?.close().catch(() => undefined);
-		await this.shell.close();
-		await this.attachmentController.close();
+		this.interactions.cancelAll("Phi is shutting down");
+		const errors: string[] = [];
+		try {
+			await this.session?.close();
+		} catch (error) {
+			errors.push(`SDK query: ${errorText(error)}`);
+		}
+		try {
+			await this.shell.close();
+		} catch (error) {
+			errors.push(`local shell: ${errorText(error)}`);
+		}
+		try {
+			await this.views.inspectors.close();
+		} catch (error) {
+			errors.push(`history and polling: ${errorText(error)}`);
+		}
+		try {
+			await this.attachmentController.close();
+		} catch (error) {
+			errors.push(`attachment operations: ${errorText(error)}`);
+		}
+		if (errors.length > 0) this.showNotice(`Cleanup failed: ${errors.join("; ")}`);
 		if (this.terminalStarted || this.suspended) {
 			this.terminalStarted = false;
 			this.suspended = false;
 			try {
+				this.dependencies.terminal.setProgramStatus({ state: "clear" });
+				this.dependencies.terminal.setProgress(false);
 				this.views.tui.stop();
-			} catch {
-				this.dependencies.terminal.stop();
+			} catch (error) {
+				errors.push(`terminal UI: ${errorText(error)}`);
+				try {
+					this.dependencies.terminal.stop();
+				} catch (fallbackError) {
+					errors.push(`terminal restore: ${errorText(fallbackError)}`);
+				}
 			}
 		}
+		return errors;
 	}
 }
 

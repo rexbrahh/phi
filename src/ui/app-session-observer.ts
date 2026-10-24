@@ -1,4 +1,4 @@
-import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { Options, SDKMessage, SlashCommand } from "@anthropic-ai/claude-agent-sdk";
 import { InteractionQueue } from "../interactions.js";
 import { applySdkMessage, type PhiState } from "../state.js";
 import type { AppInspectorController } from "./app-inspectors.js";
@@ -22,23 +22,32 @@ export class AppSessionObserver {
 		private readonly render: () => void,
 		private readonly showNotice: (message: string) => void,
 		private readonly isClosing: () => boolean,
+		private readonly isCurrentGeneration: () => boolean,
+		private readonly onCommandsChanged: (commands: SlashCommand[]) => void,
+		private readonly onCheckpoint: (uuid: string) => void,
+		private readonly onResult: () => void,
+		private readonly onSdkError: (message: string) => void,
 	) {}
 
 	callbacks(): AppSessionCallbacks {
 		return {
 			canUseTool: (toolName, input, options) => {
+				if (!this.isCurrentGeneration()) {
+					return Promise.resolve({ behavior: "deny", message: "The Phi session changed before this permission request could be handled." });
+				}
 				const pending = this.interactions.canUseTool(toolName, input, options);
 				this.syncInteractions();
 				return pending;
 			},
 			onElicitation: (request, options) => {
+				if (!this.isCurrentGeneration()) return Promise.resolve({ action: "decline" });
 				const pending = this.interactions.onElicitation(request, options);
 				this.syncInteractions();
 				return pending;
 			},
 			hooks: {
 				CwdChanged: [{ hooks: [async (input) => {
-					if (input.hook_event_name === "CwdChanged") {
+					if (this.isCurrentGeneration() && input.hook_event_name === "CwdChanged") {
 						this.state.cwd = input.new_cwd;
 						this.inspectors.scheduleWorkspaceRefresh(input.new_cwd);
 						this.render();
@@ -46,20 +55,29 @@ export class AppSessionObserver {
 					return { continue: true };
 				}] }],
 				PostToolUse: [{ hooks: [async () => {
-					this.inspectors.scheduleWorkspaceRefresh(this.state.cwd);
+					if (this.isCurrentGeneration()) this.inspectors.scheduleWorkspaceRefresh(this.state.cwd);
 					return { continue: true };
 				}] }],
 			},
 			onMessage: (message) => this.onMessage(message),
 			onError: (error) => {
-				if (!this.isClosing()) this.showNotice(`SDK error: ${errorText(error)}`);
+				if (!this.isClosing() && this.isCurrentGeneration()) {
+					const message = `SDK error: ${errorText(error)}`;
+					this.onSdkError(message);
+					this.showNotice(message);
+				}
 			},
-			onClosing: (reason) => this.interactions.cancelAll(reason),
+			onClosing: (reason) => {
+				if (this.isCurrentGeneration()) this.interactions.cancelAll(reason);
+			},
 		};
 	}
 
 	private onMessage(message: SDKMessage): void {
-		if (this.isClosing()) return;
+		if (this.isClosing() || !this.isCurrentGeneration()) return;
+		if (message.type === "system" && message.subtype === "commands_changed") this.onCommandsChanged(message.commands);
+		if (message.type === "user" && typeof message.uuid === "string") this.onCheckpoint(message.uuid);
+		if (message.type === "result") this.onResult();
 		applySdkMessage(this.state, message);
 		if ("session_id" in message && typeof message.session_id === "string") {
 			this.setSessionId(message.session_id);
