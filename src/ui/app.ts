@@ -45,6 +45,7 @@ interface PendingSessionTransition {
 	expiresAt: number;
 	launch: LaunchOptions;
 	sessionId: string;
+	cwdWarning?: string;
 }
 
 export interface AppViews {
@@ -617,7 +618,9 @@ export class AppController {
 		this.userInteractionVersion = 0;
 		this.completedInteractionVersion = -1;
 		this.pendingRewindId = undefined;
-		this.showNotice(`Opening session ${target.sessionId}.`);
+		this.showNotice(target.cwdWarning
+			? `Opening session ${target.sessionId} with working directory ${target.launch.cwd}. ${target.cwdWarning}`
+			: `Opening session ${target.sessionId}.`);
 		try {
 			await this.openSession(target.launch, generation, true);
 			if (!this.exitRequested && generation === this.processGeneration) void this.refreshWorkspace(target.launch.cwd);
@@ -650,17 +653,22 @@ export class AppController {
 			};
 		}
 		let sessionCwd = this.launch.cwd;
+		let cwdWarning: string | undefined;
 		try {
 			const sessions = await this.listAllSessions({ limit: 1_000, offset: 0 });
 			const session = sessions.find((candidate) => candidate.sessionId === command.sessionId);
 			if (session?.cwd) sessionCwd = session.cwd;
-		} catch {
-			// The SDK resume request remains authoritative if local listing is unavailable.
+			else cwdWarning = session
+				? `Local history did not report a working directory for ${command.sessionId}; this resume uses the current directory.`
+				: `Local history did not contain ${command.sessionId}; this resume uses the current directory.`;
+		} catch (error) {
+			cwdWarning = `Local session metadata could not be read (${errorText(error)}); this resume uses the current directory.`;
 		}
 		return {
 			key,
 			expiresAt: Date.now() + 30_000,
 			sessionId: command.sessionId,
+			...(cwdWarning ? { cwdWarning } : {}),
 			launch: { ...this.launch, cwd: sessionCwd, resume: command.sessionId, forkSession: false, sessionId: undefined, continue: false },
 		};
 	}
