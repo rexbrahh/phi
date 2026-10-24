@@ -9,6 +9,8 @@ export const MAX_SUBMISSION_ATTACHMENT_BYTES = 20_000_000;
 
 const MAX_STDERR_BYTES = 8_192;
 const MAX_CLIPBOARD_BASE64_BYTES = 4 * Math.ceil(MAX_IMAGE_BYTES / 3);
+const DEFAULT_SUBPROCESS_TIMEOUT_MS = 10_000;
+const KILL_ESCALATION_MS = 250;
 
 class SubprocessOutputLimitError extends Error {}
 
@@ -33,13 +35,15 @@ export interface SubprocessRequest {
 	args: readonly string[];
 	stdin?: string;
 	maxOutputBytes: number;
+	signal?: AbortSignal;
+	timeoutMs?: number;
 }
 
 export type RunSubprocess = (request: SubprocessRequest) => Promise<Buffer>;
 
 export interface ClipboardActions {
-	readClipboardImage(): Promise<ImageAttachment | null>;
-	copyText(text: string): Promise<void>;
+	readClipboardImage(signal?: AbortSignal): Promise<ImageAttachment | null>;
+	copyText(text: string, signal?: AbortSignal): Promise<void>;
 }
 
 const APPKIT_IMAGE_SCRIPT = `use framework "AppKit"
@@ -57,8 +61,8 @@ set pngData to bitmap's representationUsingType:(current application's NSBitmapI
 if pngData is missing value then return ""
 return (pngData's base64EncodedStringWithOptions:0) as text`;
 
-export async function loadImage(path: string): Promise<ImageAttachment> {
-	const bytes = await readBoundedFile(path);
+export async function loadImage(path: string, signal?: AbortSignal): Promise<ImageAttachment> {
+	const bytes = await readBoundedFile(path, signal);
 	return makeImageAttachment(basename(path) || "Image", bytes, `Image "${path}"`);
 }
 
@@ -88,7 +92,7 @@ export function assertAttachmentTotalWithinLimit(
 
 export function createClipboardActions(runSubprocess: RunSubprocess): ClipboardActions {
 	return {
-		async readClipboardImage(): Promise<ImageAttachment | null> {
+		async readClipboardImage(signal?: AbortSignal): Promise<ImageAttachment | null> {
 			requireMacOS("clipboard image paste");
 			let output: Buffer;
 			try {
@@ -96,8 +100,12 @@ export function createClipboardActions(runSubprocess: RunSubprocess): ClipboardA
 					command: "osascript",
 					args: ["-e", APPKIT_IMAGE_SCRIPT],
 					maxOutputBytes: MAX_CLIPBOARD_BASE64_BYTES + 2,
+					signal,
 				});
 			} catch (error) {
+				if (signal?.aborted) {
+					throw new AttachmentError("Clipboard image read was cancelled.", { cause: error });
+				}
 				if (error instanceof SubprocessOutputLimitError) {
 					throw new AttachmentError(
 						"Clipboard image exceeds the 5,000,000-byte limit. Copy a smaller image and try again.",
@@ -126,7 +134,7 @@ export function createClipboardActions(runSubprocess: RunSubprocess): ClipboardA
 			return makeImageAttachment("Clipboard image", Buffer.from(encoded, "base64"), "Clipboard image");
 		},
 
-		async copyText(text: string): Promise<void> {
+		async copyText(text: string, signal?: AbortSignal): Promise<void> {
 			requireMacOS("copying text");
 			try {
 				await runSubprocess({
@@ -134,8 +142,12 @@ export function createClipboardActions(runSubprocess: RunSubprocess): ClipboardA
 					args: [],
 					stdin: text,
 					maxOutputBytes: 0,
+					signal,
 				});
 			} catch (error) {
+				if (signal?.aborted) {
+					throw new AttachmentError("Text copy was cancelled.", { cause: error });
+				}
 				throw new AttachmentError(
 					`Could not copy text with pbcopy. Check that pbcopy is available and try again. ${errorMessage(error)}`,
 					{ cause: error },
@@ -147,22 +159,25 @@ export function createClipboardActions(runSubprocess: RunSubprocess): ClipboardA
 
 const defaultClipboardActions = createClipboardActions(runSubprocess);
 
-export function readClipboardImage(): Promise<ImageAttachment | null> {
-	return defaultClipboardActions.readClipboardImage();
+export function readClipboardImage(signal?: AbortSignal): Promise<ImageAttachment | null> {
+	return defaultClipboardActions.readClipboardImage(signal);
 }
 
-export function copyText(text: string): Promise<void> {
-	return defaultClipboardActions.copyText(text);
+export function copyText(text: string, signal?: AbortSignal): Promise<void> {
+	return defaultClipboardActions.copyText(text, signal);
 }
 
-async function readBoundedFile(path: string): Promise<Buffer> {
+async function readBoundedFile(path: string, signal?: AbortSignal): Promise<Buffer> {
 	let file: FileHandle | undefined;
 	let bytes: Buffer | undefined;
 	let failure: unknown;
 
 	try {
+		throwIfAborted(signal, "Image load");
 		file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+		throwIfAborted(signal, "Image load");
 		const fileStat = await file.stat();
+		throwIfAborted(signal, "Image load");
 		if (!fileStat.isFile()) {
 			throw new AttachmentError(`Image "${path}" is not a regular file. Choose a PNG, JPEG, GIF, or WebP file.`);
 		}
@@ -174,12 +189,14 @@ async function readBoundedFile(path: string): Promise<Buffer> {
 		const buffer = Buffer.allocUnsafe(expectedBytes + 1);
 		let totalBytes = 0;
 		while (totalBytes < buffer.byteLength) {
+			throwIfAborted(signal, "Image load");
 			const { bytesRead } = await file.read(
 				buffer,
 				totalBytes,
 				buffer.byteLength - totalBytes,
 				null,
 			);
+			throwIfAborted(signal, "Image load");
 			if (bytesRead === 0) break;
 			totalBytes += bytesRead;
 			if (totalBytes > MAX_IMAGE_BYTES) throw imageSizeError(path);
@@ -292,9 +309,25 @@ function imageSizeError(path: string): AttachmentError {
 	);
 }
 
-function runSubprocess(request: SubprocessRequest): Promise<Buffer> {
+function throwIfAborted(signal: AbortSignal | undefined, action: string): void {
+	if (!signal?.aborted) return;
+	throw new AttachmentError(`${action} was cancelled.`, { cause: signal.reason });
+}
+
+export function runSubprocess(request: SubprocessRequest): Promise<Buffer> {
+	const timeoutMs = request.timeoutMs ?? DEFAULT_SUBPROCESS_TIMEOUT_MS;
+	if (!Number.isSafeInteger(request.maxOutputBytes) || request.maxOutputBytes < 0) {
+		return Promise.reject(new TypeError("Subprocess output limit must be a non-negative safe integer."));
+	}
+	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+		return Promise.reject(new TypeError("Subprocess timeout must be greater than zero milliseconds."));
+	}
+	if (request.signal?.aborted) {
+		return Promise.reject(new Error("Subprocess was cancelled before it started."));
+	}
+
 	return new Promise((resolve, reject) => {
-		let child;
+		let child: ReturnType<typeof spawn>;
 		try {
 			child = spawn(request.command, [...request.args], {
 				stdio: ["pipe", "pipe", "pipe"],
@@ -304,49 +337,97 @@ function runSubprocess(request: SubprocessRequest): Promise<Buffer> {
 			reject(error);
 			return;
 		}
+		const stdin = child.stdin;
+		const stdoutStream = child.stdout;
+		const stderrStream = child.stderr;
+		if (!stdin || !stdoutStream || !stderrStream) {
+			child.kill("SIGKILL");
+			reject(new Error("Subprocess pipes were not available."));
+			return;
+		}
 
 		const stdout: Buffer[] = [];
 		const stderr: Buffer[] = [];
 		let stdoutBytes = 0;
 		let stderrBytes = 0;
 		let settled = false;
-		const fail = (error: Error): void => {
+		let failure: Error | undefined;
+		let timeout: NodeJS.Timeout | undefined;
+		let killTimer: NodeJS.Timeout | undefined;
+
+		const cleanup = (): void => {
+			if (timeout) clearTimeout(timeout);
+			if (killTimer) clearTimeout(killTimer);
+			request.signal?.removeEventListener("abort", onAbort);
+		};
+		const settle = (error: Error | undefined, output?: Buffer): void => {
 			if (settled) return;
 			settled = true;
-			child.kill();
-			reject(error);
+			cleanup();
+			if (error) reject(error);
+			else resolve(output ?? Buffer.alloc(0));
+		};
+		const stop = (error: Error): void => {
+			if (settled || failure) return;
+			failure = error;
+			try {
+				child.kill("SIGTERM");
+			} catch {
+				// The close event will settle the request if the process has exited.
+			}
+			killTimer = setTimeout(() => {
+				if (settled) return;
+				try {
+					child.kill("SIGKILL");
+				} catch {
+					// The close event will settle the request if the process has exited.
+				}
+			}, KILL_ESCALATION_MS);
+			killTimer.unref();
+		};
+		const onAbort = (): void => {
+			stop(new Error("Subprocess was cancelled."));
 		};
 
-		child.stdout.on("data", (chunk: Buffer) => {
+		stdoutStream.on("data", (chunk: Buffer) => {
 			stdoutBytes += chunk.byteLength;
 			if (stdoutBytes > request.maxOutputBytes) {
-				fail(new SubprocessOutputLimitError(`subprocess output exceeded ${request.maxOutputBytes} bytes`));
+				stop(new SubprocessOutputLimitError(`Subprocess output exceeded ${request.maxOutputBytes} bytes.`));
 				return;
 			}
 			stdout.push(chunk);
 		});
-		child.stderr.on("data", (chunk: Buffer) => {
+		stderrStream.on("data", (chunk: Buffer) => {
 			const remaining = MAX_STDERR_BYTES - stderrBytes;
 			if (remaining <= 0) return;
 			const retained = chunk.subarray(0, remaining);
 			stderr.push(retained);
 			stderrBytes += retained.byteLength;
 		});
-		child.stdin.on("error", (error) => fail(error));
-		child.once("error", (error) => fail(error));
+		stdin.on("error", (error) => stop(error));
+		stdoutStream.on("error", (error) => stop(error));
+		stderrStream.on("error", (error) => stop(error));
+		child.once("error", (error) => settle(error));
 		child.once("close", (code, signal) => {
-			if (settled) return;
-			settled = true;
-			if (code !== 0) {
-				const diagnostic = Buffer.concat(stderr).toString("utf8").trim();
-				const status = code === null ? `signal ${signal ?? "unknown"}` : `exit code ${code}`;
-				reject(new Error(`${request.command} exited with ${status}${diagnostic ? `: ${diagnostic}` : ""}`));
+			if (failure) {
+				settle(failure);
 				return;
 			}
-			resolve(Buffer.concat(stdout, stdoutBytes));
+			if (code !== 0) {
+				const diagnostic = Buffer.concat(stderr).toString("utf8").trim();
+				const status = code === null ? `signal ${signal ?? "unknown"}` : `code ${code}`;
+				settle(new Error(`${request.command} exited with ${status}${diagnostic ? `: ${diagnostic}` : ""}.`));
+				return;
+			}
+			settle(undefined, Buffer.concat(stdout, stdoutBytes));
 		});
+		request.signal?.addEventListener("abort", onAbort, { once: true });
+		timeout = setTimeout(() => {
+			stop(new Error(`Subprocess timed out after ${timeoutMs} ms.`));
+		}, timeoutMs);
+		if (request.signal?.aborted) onAbort();
 
-		if (request.stdin === undefined) child.stdin.end();
-		else child.stdin.end(request.stdin);
+		if (request.stdin === undefined) stdin.end();
+		else stdin.end(request.stdin);
 	});
 }

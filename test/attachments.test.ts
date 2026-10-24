@@ -7,6 +7,7 @@ import {
 	assertAttachmentTotalWithinLimit,
 	createClipboardActions,
 	loadImage,
+	runSubprocess,
 	type SubprocessRequest,
 } from "../src/attachments.js";
 
@@ -100,6 +101,17 @@ test("loadImage rejects files above the per-image limit", async () => {
 	});
 });
 
+test("loadImage rejects a cancelled request before it reads the file", async () => {
+	await withTemporaryDirectory(async (directory) => {
+		const path = join(directory, "cancelled.png");
+		await writeFile(path, imageFixtures[0].bytes);
+		const controller = new AbortController();
+		controller.abort(new Error("draft changed"));
+
+		await assert.rejects(loadImage(path, controller.signal), /cancel/i);
+	});
+});
+
 test("aggregate attachment validation allows 20 MB and rejects excess or oversized images", () => {
 	assert.doesNotThrow(() => assertAttachmentTotalWithinLimit([
 		{ sizeBytes: 5_000_000 },
@@ -143,6 +155,18 @@ test("clipboard image reading uses injected osascript and returns a typed image 
 	assert.equal(requests[0]?.maxOutputBytes, 6_666_670);
 });
 
+test("clipboard image reading forwards its cancellation signal", async () => {
+	const controller = new AbortController();
+	let receivedSignal: AbortSignal | undefined;
+	const clipboard = createClipboardActions(async (request) => {
+		receivedSignal = request.signal;
+		return Buffer.from(`${imageFixtures[0].bytes.toString("base64")}\n`);
+	});
+
+	await clipboard.readClipboardImage(controller.signal);
+	assert.equal(receivedSignal, controller.signal);
+});
+
 test("clipboard image reading returns null when AppKit has no image", async () => {
 	const clipboard = createClipboardActions(async () => Buffer.from("\n"));
 	assert.equal(await clipboard.readClipboardImage(), null);
@@ -178,4 +202,54 @@ test("copyText sends exact text to pbcopy stdin without shell interpolation", as
 	assert.equal(requests[0]?.command, "pbcopy");
 	assert.deepEqual(requests[0]?.args, []);
 	assert.equal(requests[0]?.stdin, text);
+});
+
+test("production subprocess runner rejects output above its byte limit", async () => {
+	await assert.rejects(
+		runSubprocess({
+			command: process.execPath,
+			args: ["-e", "process.stdout.write('four')"],
+			maxOutputBytes: 3,
+			timeoutMs: 2_000,
+		}),
+		/output exceeded 3 bytes/,
+	);
+});
+
+test("production subprocess runner reports non-zero exit and bounded stderr", async () => {
+	await assert.rejects(
+		runSubprocess({
+			command: process.execPath,
+			args: ["-e", "process.stderr.write('command failed'); process.exit(7)"],
+			maxOutputBytes: 0,
+			timeoutMs: 2_000,
+		}),
+		/exited with code 7: command failed/,
+	);
+});
+
+test("production subprocess runner stops an aborted child", async () => {
+	const controller = new AbortController();
+	const pending = runSubprocess({
+		command: process.execPath,
+		args: ["-e", "setInterval(() => {}, 1000)"],
+		maxOutputBytes: 0,
+		signal: controller.signal,
+		timeoutMs: 2_000,
+	});
+	setTimeout(() => controller.abort(new Error("user cancelled")), 30);
+
+	await assert.rejects(pending, /cancel/i);
+});
+
+test("production subprocess runner enforces its deadline", async () => {
+	await assert.rejects(
+		runSubprocess({
+			command: process.execPath,
+			args: ["-e", "setInterval(() => {}, 1000)"],
+			maxOutputBytes: 0,
+			timeoutMs: 30,
+		}),
+		/timed out after 30 ms/,
+	);
 });
