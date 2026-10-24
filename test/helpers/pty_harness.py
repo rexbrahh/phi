@@ -119,6 +119,8 @@ class PTYChild:
 		self.responded_queries = 0
 		self.stop_signal: int | None = None
 		self.continued_observed = False
+		self.continued_source: str | None = None
+		self.post_resume_input_observed = False
 		self.supervisor_pid = os.fork()
 		if self.supervisor_pid == 0:
 			self._supervise()
@@ -159,14 +161,14 @@ class PTYChild:
 					elif status.si_code == os.CLD_CONTINUED:
 						stopped = False
 						terminal_restored_while_stopped = False
-						self._record_supervisor("process-continued")
+						self._record_supervisor("process-continued", source="kernel-wait-event")
 					else:
 						break
 					continue
 				if stopped and terminal_restored_while_stopped and mode_snapshot(termios.tcgetattr(self.slave))["raw"]:
 					stopped = False
 					terminal_restored_while_stopped = False
-					self._record_supervisor("process-continued")
+					self._record_supervisor("process-continued", source="termios-transition")
 					continue
 				time.sleep(0.01)
 			os.tcsetpgrp(self.slave, os.getpgrp())
@@ -244,6 +246,8 @@ class PTYChild:
 				self.stopped = True
 			elif event.get("event") == "process-continued":
 				self.continued_observed = True
+				source = event.get("source")
+				self.continued_source = source if isinstance(source, str) else None
 				self.stopped = False
 			elif event.get("event") == "process-exited":
 				self.node_exit_code = int(event["code"])

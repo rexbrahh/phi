@@ -110,11 +110,17 @@ def run_suspend(child: PTYChild, issues: list[str]) -> None:
 	os.kill(child.pid, signal.SIGCONT)
 	child.wait_continued()
 	check(issues, child.continued_observed, "supervisor did not observe the child continue after SIGCONT")
+	check(
+		issues,
+		child.continued_source in {"kernel-wait-event", "termios-transition"},
+		f"supervisor continuation marker had unknown source {child.continued_source!r}",
+	)
 	child.wait_raw_mode(raw=True)
 	resumed = termios.tcgetattr(child.slave)
 	child.mode_history["resumed"] = mode_snapshot(resumed)
 	child.send(b"after resume\r")
 	child.wait_event("user-input", lambda event: event.get("content") == "after resume")
+	child.post_resume_input_observed = True
 	child.send(b"\x03")
 	exit_event = child.wait_event("exit")
 	check(issues, exit_event.get("code") == 0, "resumed scenario did not close through Ctrl+C")
@@ -185,6 +191,8 @@ def main() -> int:
 					"exitCode": child.exit_code() if child.node_exit_code is not None else None,
 					"events": len(child.events),
 					"terminalModes": modes,
+					"continuedSource": child.continued_source if scenario == "suspend" else None,
+					"postResumeInputObserved": child.post_resume_input_observed if scenario == "suspend" else None,
 				})
 				for descriptor in (child.master, child.slave):
 					try:
@@ -202,6 +210,11 @@ def main() -> int:
 	print(f"PTY scenarios: {passed}/{len(results)} passed")
 	for result in results:
 		print(f"  {result['name']}: {json.dumps(result['terminalModes'])}")
+		if result["continuedSource"] is not None:
+			print(
+				f"    continuation source={result['continuedSource']}; "
+				f"post-resume input observed={result['postResumeInputObserved']}"
+			)
 	return 0 if passed == len(results) else 1
 
 
