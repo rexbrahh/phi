@@ -581,7 +581,7 @@ export class AppController {
 			hooks: callbacks.hooks,
 		});
 		this.sessionId = launch.sessionId ?? launch.resume ?? options.sessionId;
-		this.views.inspectors.setSession(this.sessionId ?? "", generation, launch.cwd);
+		this.views.inspectors.setSession(this.sessionId ?? "", generation, launch.cwd, true);
 		this.session = startSession(options, callbacks, this.dependencies.createQuery);
 		const session = this.session;
 		this.ready = undefined;

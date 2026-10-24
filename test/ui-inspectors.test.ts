@@ -46,6 +46,104 @@ test("history page generations reject an older response and close the reader", a
 	assert.equal(await running, 0);
 });
 
+test("active History refreshes and clears transient state after a same-ID resume", async () => {
+	const terminal = new FakeTerminal();
+	const first = new FakeQueryHarness();
+	const second = new FakeQueryHarness();
+	let queryCount = 0;
+	let sessionId: string | undefined;
+	const historyReads: string[] = [];
+	let resolveStaleHistory: ((messages: SessionMessage[]) => void) | undefined;
+	const staleHistory = new Promise<SessionMessage[]>((resolve) => { resolveStaleHistory = resolve; });
+	const reader = {
+		list: async () => sessionId ? [{ sessionId, summary: "current session", lastModified: 1, cwd: parseArgs([]).cwd }] : [],
+		messages: async (id: string) => {
+			historyReads.push(id);
+			if (historyReads.length === 1) return staleHistory;
+			return [historyMessage(`history-${historyReads.length}`, `history revision ${historyReads.length}`)];
+		},
+		agents: async () => [],
+		agentMessages: async () => [],
+		close: async () => undefined,
+	};
+	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+		createQuery: (parameters) => (queryCount++ === 0 ? first : second).createQuery(parameters),
+		createHistoryReader: () => reader,
+	}));
+	const running = controller.run();
+	await waitFor(() => controller.ready !== undefined);
+	sessionId = controller.currentSessionId;
+	assert.ok(sessionId);
+	controller.showInspector("history");
+	await waitFor(() => historyReads.length === 1 && controller.views.inspectors.model.historyLoading);
+
+	await controller.replaceSession({ kind: "resume", sessionId });
+	await waitFor(() => historyReads.length === 2 && controller.views.inspectors.model.historyMessages[0]?.uuid === "history-2");
+
+	assert.equal(controller.views.inspectors.model.panel, "history");
+	assert.equal(controller.views.inspectors.model.historyLoading, false);
+	assert.equal(controller.views.inspectors.model.historyError, undefined);
+	assert.deepEqual(historyReads, [sessionId, sessionId]);
+	assert.equal(first.closeCalls, 1);
+	assert.ok(resolveStaleHistory);
+	resolveStaleHistory([historyMessage("stale-history", "stale history revision")]);
+	await new Promise<void>((resolve) => setTimeout(resolve, 0));
+	assert.equal(controller.views.inspectors.model.historyMessages[0]?.uuid, "history-2");
+	await controller.close(0);
+	assert.equal(await running, 0);
+});
+
+test("active Tasks refreshes child transcripts and drops stale loading state after replacement", async () => {
+	const terminal = new FakeTerminal();
+	const first = new FakeQueryHarness();
+	const second = new FakeQueryHarness();
+	let queryCount = 0;
+	let sessionId: string | undefined;
+	let agentReads = 0;
+	let childReads = 0;
+	let resolveStaleChild: ((messages: SessionMessage[]) => void) | undefined;
+	const reader = {
+		list: async () => sessionId ? [{ sessionId, summary: "current session", lastModified: 1, cwd: parseArgs([]).cwd }] : [],
+		messages: async () => [],
+		agents: async () => agentReads++ === 0 ? ["old-child"] : ["resumed-child"],
+		agentMessages: async () => {
+			childReads += 1;
+			if (childReads === 1) throw new Error("old child read failed");
+			return new Promise<SessionMessage[]>((resolve) => { resolveStaleChild = resolve; });
+		},
+		close: async () => undefined,
+	};
+	const controller = new AppController(parseArgs([]), appDependencies(first, terminal, {
+		createQuery: (parameters) => (queryCount++ === 0 ? first : second).createQuery(parameters),
+		createHistoryReader: () => reader,
+	}));
+	const running = controller.run();
+	await waitFor(() => controller.ready !== undefined);
+	sessionId = controller.currentSessionId;
+	assert.ok(sessionId);
+	controller.showInspector("tasks");
+	await waitFor(() => controller.views.inspectors.model.childAgentIds.includes("old-child"));
+	await controller.views.inspectors.selectChild("old-child");
+	assert.equal(controller.views.inspectors.model.historyError, "old child read failed");
+	const staleChildRead = controller.views.inspectors.selectChild("old-child");
+	await waitFor(() => controller.views.inspectors.model.historyLoading);
+
+	await controller.replaceSession({ kind: "resume", sessionId });
+	await waitFor(() => controller.views.inspectors.model.childAgentIds.includes("resumed-child"));
+	assert.equal(controller.views.inspectors.model.panel, "tasks");
+	assert.equal(controller.views.inspectors.model.historyLoading, false);
+	assert.equal(controller.views.inspectors.model.historyError, undefined);
+	assert.equal(controller.views.inspectors.model.selectedChildId, undefined);
+
+	assert.ok(resolveStaleChild);
+	resolveStaleChild([historyMessage("stale-child", "stale child transcript")]);
+	await staleChildRead;
+	assert.deepEqual(controller.views.inspectors.model.childMessages, []);
+	assert.equal(first.closeCalls, 1);
+	await controller.close(0);
+	assert.equal(await running, 0);
+});
+
 test("CwdChanged refreshes the displayed workspace and rejects the previous cwd result", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();

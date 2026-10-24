@@ -34,8 +34,12 @@ export class AppInspectorController {
 		this.view = new InspectorView(state, this.model);
 	}
 
-	setSession(sessionId: string, processGeneration = this.processGeneration, cwd = this.launchCwd): void {
-		if (this.sessionId === sessionId && this.processGeneration === processGeneration && this.launchCwd === cwd) return;
+	setSession(sessionId: string, processGeneration = this.processGeneration, cwd = this.launchCwd, refreshActive = false): void {
+		const activePanel = this.model.panel;
+		if (this.sessionId === sessionId && this.processGeneration === processGeneration && this.launchCwd === cwd) {
+			if (refreshActive && (activePanel === "history" || activePanel === "tasks")) this.show(activePanel);
+			return;
+		}
 		this.sessionId = sessionId;
 		this.processGeneration = processGeneration;
 		this.launchCwd = cwd;
@@ -51,16 +55,24 @@ export class AppInspectorController {
 		this.model.historyMessages = [];
 		this.model.childMessages = [];
 		this.model.childAgentIds = [];
+		this.model.historyError = undefined;
+		this.model.historyLoading = false;
 		this.model.historyOffset = 0;
 		this.model.selectedChildId = undefined;
 		this.model.selectedTaskId = undefined;
 		this.model.workflowRecords = [];
+		this.model.workflowWarnings = [];
+		this.model.workflowScriptPath = undefined;
+		this.model.workflowUnavailable = undefined;
 		this.stopWorkflowPolling();
-		this.onChange();
+		if (refreshActive && (activePanel === "history" || activePanel === "tasks")) this.show(activePanel);
+		else this.onChange();
 	}
 
 	onSdkMessage(message: SDKMessage): void {
-		if ("session_id" in message && typeof message.session_id === "string") this.setSession(message.session_id);
+		if ("session_id" in message && typeof message.session_id === "string" && message.session_id !== this.sessionId) {
+			this.setSession(message.session_id, this.processGeneration, this.launchCwd, true);
+		}
 		if (message.type === "user") this.rememberWorkflowReference(message);
 		this.mergeObservedChildren();
 		if (this.model.panel === "tasks" && this.model.selectedTaskId) {

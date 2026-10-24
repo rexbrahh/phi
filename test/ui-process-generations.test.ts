@@ -135,8 +135,7 @@ test("process generations discard late query callbacks, history, image, cwd, and
 		}, undefined, { signal: new AbortController().signal });
 		assert.equal(controller.state.cwd, launch.cwd);
 
-		controller.showInspector("history");
-		await waitFor(() => historyReads === 2 && controller.views.inspectors.model.historyMessages.some((message) => JSON.stringify(message.message).includes("new history")));
+		await waitFor(() => historyReads >= 2 && controller.views.inspectors.model.historyMessages.some((message) => JSON.stringify(message.message).includes("new history")));
 		oldHistory.resolve([historyMessage("old-history", "stale history")]);
 		oldWorkspace.resolve({ kind: "error", cwd: launch.cwd, error: "stale workspace read" });
 		resolveImage(image);
