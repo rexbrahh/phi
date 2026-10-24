@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import type { ElicitationRequest, ElicitationResult } from "@anthropic-ai/claude-agent-sdk";
 import {
 	inspectElicitationForm,
@@ -10,7 +11,10 @@ import { InteractionValidationError } from "./question-validation.js";
 type ElicitationContent = NonNullable<ElicitationResult["content"]>;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
 const INVALID_PERCENT_ESCAPE_PATTERN = /%(?![0-9a-f]{2})/iu;
-const URI_REFERENCE_TEXT_PATTERN = /^[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]*$/u;
+const URI_PATH_PATTERN = /^[A-Za-z0-9\-._~!$&'()*+,;=:@/%]*$/u;
+const URI_QUERY_OR_FRAGMENT_PATTERN = /^[A-Za-z0-9\-._~!$&'()*+,;=:@/%?]*$/u;
+const URI_USERINFO_PATTERN = /^[A-Za-z0-9\-._~!$&'()*+,;=:%]*$/u;
+const URI_REG_NAME_PATTERN = /^[A-Za-z0-9\-._~!$&'()*+,;=%]*$/u;
 
 export { inspectElicitationForm };
 export type { ElicitationFormField, ElicitationFormSupport, SupportedStringFormat };
@@ -226,7 +230,57 @@ function isUriReference(value: string): boolean {
 }
 
 function isValidUriReferenceText(value: string): boolean {
-	return URI_REFERENCE_TEXT_PATTERN.test(value) && !INVALID_PERCENT_ESCAPE_PATTERN.test(value);
+	if (INVALID_PERCENT_ESCAPE_PATTERN.test(value)) return false;
+
+	const fragmentIndex = value.indexOf("#");
+	const beforeFragment = fragmentIndex < 0 ? value : value.slice(0, fragmentIndex);
+	const fragment = fragmentIndex < 0 ? "" : value.slice(fragmentIndex + 1);
+	if (!URI_QUERY_OR_FRAGMENT_PATTERN.test(fragment)) return false;
+
+	const queryIndex = beforeFragment.indexOf("?");
+	const hierarchy = queryIndex < 0 ? beforeFragment : beforeFragment.slice(0, queryIndex);
+	const query = queryIndex < 0 ? "" : beforeFragment.slice(queryIndex + 1);
+	if (!URI_QUERY_OR_FRAGMENT_PATTERN.test(query)) return false;
+
+	const scheme = /^[A-Za-z][A-Za-z0-9+.-]*:/u.exec(hierarchy);
+	let remainder = scheme ? hierarchy.slice(scheme[0].length) : hierarchy;
+	let authority: string | undefined;
+	if (remainder.startsWith("//")) {
+		const pathStart = remainder.indexOf("/", 2);
+		authority = pathStart < 0 ? remainder.slice(2) : remainder.slice(2, pathStart);
+		remainder = pathStart < 0 ? "" : remainder.slice(pathStart);
+	}
+	if (!URI_PATH_PATTERN.test(remainder)) return false;
+	if (!scheme && authority === undefined && !remainder.startsWith("/")) {
+		const firstSegment = remainder.split("/", 1)[0] ?? "";
+		if (firstSegment.includes(":")) return false;
+	}
+	return authority === undefined || isValidUriAuthority(authority);
+}
+
+function isValidUriAuthority(value: string): boolean {
+	const userInfoEnd = value.indexOf("@");
+	if (userInfoEnd >= 0) {
+		if (!URI_USERINFO_PATTERN.test(value.slice(0, userInfoEnd))) return false;
+		value = value.slice(userInfoEnd + 1);
+	}
+
+	if (value.startsWith("[")) {
+		const literalEnd = value.indexOf("]");
+		if (literalEnd < 0 || !isValidIpLiteral(value.slice(1, literalEnd))) return false;
+		const suffix = value.slice(literalEnd + 1);
+		return suffix === "" || /^:\d*$/u.test(suffix);
+	}
+	if (value.includes("[") || value.includes("]")) return false;
+
+	const portStart = value.indexOf(":");
+	const host = portStart < 0 ? value : value.slice(0, portStart);
+	const port = portStart < 0 ? "" : value.slice(portStart);
+	return URI_REG_NAME_PATTERN.test(host) && (port === "" || /^:\d*$/u.test(port));
+}
+
+function isValidIpLiteral(value: string): boolean {
+	return isIP(value) === 6 || /^v[0-9a-f]+\.[A-Za-z0-9\-._~!$&'()*+,;=:]+$/iu.test(value);
 }
 
 function isMultipleOf(value: number, divisor: number): boolean {

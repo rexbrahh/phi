@@ -605,6 +605,84 @@ test("URI formats and HTTP URL guard reject raw spaces and controls", async () =
 	});
 });
 
+test("URI formats reject raw brackets outside IP-literal hosts", async () => {
+	const queue = new InteractionQueue();
+	const request = elicitationRequest(queue, "elicitation-uri-brackets", {
+		mode: "form",
+		serverName: "test-server",
+		message: "Provide URI values",
+		requestedSchema: {
+			type: "object",
+			properties: {
+				destination: { type: "string", format: "uri" },
+				reference: { type: "string", format: "uri-reference" },
+			},
+			required: ["destination", "reference"],
+		},
+	});
+	const invalidContent = [
+		{ destination: "https://example.test/a[b]", reference: "../valid" },
+		{ destination: "https://example.test/?q=[x]", reference: "../valid" },
+		{ destination: "https://example.test/#[x]", reference: "../valid" },
+		{ destination: "https://example.test/#first#second", reference: "../valid" },
+		{ destination: "https://user[name]@example.test/", reference: "../valid" },
+		{ destination: "https://example.test/", reference: "../a[b]" },
+		{ destination: "https://example.test/", reference: "../?q=[x]" },
+		{ destination: "https://example.test/", reference: "../#[x]" },
+		{ destination: "https://example.test/", reference: "../#first#second" },
+		{ destination: "https://example.test/", reference: "//user[name]@example.test/" },
+	];
+
+	for (const content of invalidContent) {
+		assert.throws(() => queue.answer("elicitation-uri-brackets", {
+			kind: "elicitation",
+			response: { action: "accept", content },
+		}), /URI|format/i);
+		assert.deepEqual(pendingIds(queue), ["elicitation-uri-brackets"]);
+	}
+
+	assert.equal(isHttpElicitationUrl("https://example.test/a[b]"), false);
+	assert.equal(isHttpElicitationUrl("https://example.test/?q=[x]"), false);
+	assert.equal(isHttpElicitationUrl("https://example.test/#[x]"), false);
+	assert.equal(isHttpElicitationUrl("https://example.test/#first#second"), false);
+	assert.equal(isHttpElicitationUrl("https://user[name]@example.test/"), false);
+	assert.equal(isHttpElicitationUrl("https://example.test/a%5Bb%5D"), true);
+	assert.equal(isHttpElicitationUrl("https://[2001:db8::1]/path"), true);
+});
+
+test("URI formats retain encoded brackets, IPv6 hosts, and absolute and relative references", async () => {
+	const queue = new InteractionQueue();
+	const request = elicitationRequest(queue, "elicitation-uri-valid-components", {
+		mode: "form",
+		serverName: "test-server",
+		message: "Provide valid URI values",
+		requestedSchema: {
+			type: "object",
+			properties: {
+				uri: { type: "string", format: "uri" },
+				uriReference: { type: "string", format: "uri-reference" },
+				absoluteUri: { type: "string", format: "uri" },
+				relativeReference: { type: "string", format: "uri-reference" },
+			},
+			required: ["uri", "uriReference", "absoluteUri", "relativeReference"],
+		},
+	});
+	const content = {
+		uri: "https://[2001:db8::1]/a%5Bb%5D?q=%5Bx%5D#%5By%5D",
+		uriReference: "//[2001:db8::2]/a%5Bb%5D?q=%5Bx%5D#%5By%5D",
+		absoluteUri: "urn:example:resource",
+		relativeReference: "../a%5Bb%5D?q=%5Bx%5D#%5By%5D",
+	};
+
+	assert.equal(queue.answer("elicitation-uri-valid-components", {
+		kind: "elicitation",
+		response: { action: "accept", content },
+	}), true);
+	assert.deepEqual((await elicitationResult(request.promise)).content, content);
+	assert.equal(isHttpElicitationUrl(content.uri), true);
+	assert.equal(isHttpElicitationUrl("https://[2001:db8::2]/a%5Bb%5D"), true);
+});
+
 test("unsupported elicitation schema can only be declined or cancelled", async () => {
 	const queue = new InteractionQueue();
 	const request = elicitationRequest(queue, "elicitation-unsupported", {
