@@ -152,6 +152,7 @@ test("late image failures restore a command only for the same draft and session"
 		editor: { setText: (text: string) => { editorText = text; } } as unknown as Editor,
 		draftRevision: () => draftRevision,
 		sessionId: () => sessionId,
+		processGeneration: () => 0,
 		selectedOutput: () => undefined,
 		isClosing: () => false,
 		showNotice: (message) => { notices.push(message); },
