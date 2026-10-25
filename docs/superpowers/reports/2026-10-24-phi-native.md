@@ -6,6 +6,8 @@ Date: 2026-10-25. Tested SDK: `0.3.310`. Tested CLI: `2.1.310`.
 
 Native SDK acceptance remains incomplete. The user requires an independent TUI control for each native Workflow child. Phi does not implement this control because the inspected SDK host has no route to the native child-stop callback.
 
+Native settings/skills loading and Workflow-specific backgrounding also remain open. Earlier native receipts establish two concurrent agent lifecycles and phase metadata. They do not establish every later gate in the failed composite run.
+
 This finding applies to SDK `0.3.310` and CLI `2.1.310` checked on 2026-10-25. The [official package registry](https://registry.npmjs.org/%40anthropic-ai%2Fclaude-agent-sdk) and [SDK release](https://github.com/anthropics/claude-agent-sdk-typescript/releases/tag/v0.3.310) identify the checked SDK version. This report does not claim that every SDK version lacks this operation.
 
 [SDK issue 518](https://github.com/anthropics/claude-agent-sdk-typescript/issues/518) requests access to the existing native child-scoped operation. It was posted with user authorization on 2026-10-25. The operation and its live acceptance remain open.
@@ -28,6 +30,7 @@ A local Bash stop does not meet the TUI Workflow-child requirement. Do not inven
 
 | Run | Source and cap | Result |
 |---|---|---|
+| Attempt 7 | `aa9eea470ab0edb519f73a8b5ddbb9886bd82f2a`; $0.10 cap; $0.0046 SDK estimate | The Workflow tool returned success. Two distinct subagent-start hooks, matching journal identities, two pending Monitor calls, and two phase-start records establish concurrent lifecycles and phase metadata. Backgrounding returned an acknowledgement without positive Workflow-background evidence. Child stop and continuing-sibling gates did not pass. |
 | Controls 1 | `3561fc3`; $0.05 cap; $0.003488 SDK estimate | Its recorded gates passed. The resume prompt revealed the marker, and the success receipt preceded cleanup. Do not use this run as genuine-recall or final-cleanup proof. |
 | Controls 2 | `8b4fa7a4e7affdd1b52a7ea313bb12ccb17215f8`; $0.02 cap; $0.003502 SDK estimate | Passed route, edit, task registration, registered-task stop notification, signal-driven server termination, continued input, checkpoint dry-run, genuine resumed-marker recall, and query termination. No tool actions were denied. `workflowChildStopClaimed=false`. |
 
