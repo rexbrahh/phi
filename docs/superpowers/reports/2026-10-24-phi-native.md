@@ -2,7 +2,7 @@
 
 Date: 2026-10-24. Source: `40741182ad6de93b9595534f40fbbc04a462a9f6`.
 
-Four authorized attempts ran. The latest attempt passed Workflow launch, then timed out while observing two child agents. Native acceptance remains incomplete. The available evidence does not establish a production Workflow defect or its cause.
+Five authorized attempts ran. The latest passed Workflow launch, then timed out while observing two child agents. Offline inspection identified a native block on the fixture's foreground wait command. Native acceptance remains incomplete. No production Workflow defect is established.
 
 ## Cost and credentials
 
@@ -121,3 +121,35 @@ Failure diagnostics now include task-event counts, task-type categories, expecte
 Build, typecheck, and 24 focused offline checks passed after joining the changes. No further native query ran. The missing task and journal evidence from attempt 4 cannot be recovered.
 
 Primary references: [Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing), [Haiku 5.5](https://platform.claude.com/docs/en/models/haiku-5-5/overview), [SDK dynamic workflows](https://platform.claude.com/cookbook/claude-agent-sdk-08-dynamic-workflows), and [runtime environment variables](https://code.claude.com/docs/en/env-vars).
+
+## Fifth authorized attempt
+
+The user approved the prepared $0.03 test. It used source `32294bfaa552ccaae7bae0e70b58e09b34d7dcc3` from 02:12:08 to 02:15:08 UTC on 2026-10-25. It exited with status 1. Query termination was observed, and the outer watchdog did not fire.
+
+Workflow launch succeeded again. The next wait still timed out while observing two native child task starts. The retained diagnostic records five task starts: four `local_bash` and one `local_workflow`, with no `local_agent` starts. The Workflow journal has one launch, two starts, two results, and no failed records. Both expected agent labels and phase starts were present. This evidence requires a causal review of the task observation and control contract.
+
+The fixture also denied a Monitor action and an additional Bash action. Their exact synthetic requests remain for offline inspection. This report does not justify changing permissions or removing acceptance assertions.
+
+Private failure retention succeeded. The harness preserved its test-owned root after query termination and reported the root pointer without dumping contents. The retained journal now permits offline diagnosis.
+
+The reported model was `claude-haiku-5-5`. The latest observed SDK estimate was **$0.0108**. The five latest estimates sum to **$0.0350**, not actual billing or a remaining balance.
+
+During this run, the user authorized further API usage under a total v1 budget. That authorization supersedes the earlier per-test approval boundary. Keep individual probes small, inspect retained failures before a new paid verification, and preserve headroom for in-flight costs.
+
+Follow-up source `c697511` preserves the collected initial and resumed SDK events on a real scenario failure. It writes only inside the private fixture root after query close attempts. The trace uses exclusive creation, mode `0600`, selected-key redaction, and a 2 MiB UTF-8 limit. A write failure joins the existing diagnostic without replacing the original scenario failure. No trace contents enter public output.
+
+Build and 12 focused evidence checks passed for this addition. The acceptance predicates, permissions, prompts, and deadlines remain unchanged. The next diagnostic run can compare native control identifiers privately instead of relying on counters alone.
+
+## Native wait correction
+
+Correlated child transcripts show that both first `sleep 90` requests omitted background execution and returned a native standalone-sleep error. The fixture callback permits that command. The native error explicitly recommends Monitor for condition waits. Later background sleep jobs do not prove that the agent calls remain active.
+
+Source `766ef36` gives each real Workflow agent an exact Monitor command waiting for its own release file. The callback admits only the two fixed input objects. Other commands, process scanning, WebSocket inputs, and path/script/environment overrides remain denied. Source `fc6ba86` preserves both individual native stop assertions before release files are written for cleanup.
+
+Source `587e176` requires positively typed native agent task IDs. Labels alone cannot classify a workflow or shell job as an agent. This correction prevents a false pass of the two-agent gate.
+
+Source `8fc13b6` also includes up to three exact denied callback requests in the private failure trace. It keeps only the tool-use identifier from callback context. The existing selected-key redaction, exclusive mode-`0600` creation, and 2 MiB total limit apply. Public summaries still omit input values.
+
+These are fixture and diagnostic corrections. The next native run must verify agent discovery, both stops, sibling activity, continued input, resume, and checkpoint behavior.
+
+Build and 32 focused offline checks passed after joining the changes. The mixed-type diagnostic regression now attributes only its positively typed agent record to agent counts. A separate lookup regression excludes labelled workflow/shell tasks and the known parent ID.
