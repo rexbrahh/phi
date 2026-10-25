@@ -1029,16 +1029,17 @@ async function main(): Promise<void> {
 			"background Bash completion",
 			session,
 		);
+		await withDeadline(session.query.stopTask(secondAgentTaskId), deadline, "stop remaining Workflow agent", session);
+		await waitFor(
+			() => hasTaskNotification(events.messages, secondAgentTaskId, "stopped"),
+			events,
+			deadline,
+			"cleanup stop for the remaining Workflow agent",
+			session,
+		);
 		await Promise.all(Object.values(fixture.workflowReleaseFiles).map((releaseFile) =>
 			writeFile(releaseFile, "release\n", { flag: "wx", mode: 0o600 }),
 		));
-		await waitFor(
-			() => hasTaskNotification(events.messages, secondAgentTaskId, "completed"),
-			events,
-			deadline,
-			"released Workflow agent completion",
-			session,
-		);
 
 		assertCleanClose(await closeSession(session, TERMINATION_TIMEOUT_MS, "initial session close"), "initial session close");
 
