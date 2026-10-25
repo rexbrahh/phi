@@ -6,7 +6,7 @@ Date: 2026-10-25. Tested SDK: `0.3.310`. Tested CLI: `2.1.310`.
 
 Native SDK acceptance remains incomplete. The user requires an independent TUI control for each native Workflow child. Phi does not implement this control because the inspected SDK host has no route to the native child-stop callback.
 
-Native settings, project instructions, and Skill invocation have positive receipts. Workflow launch, two agent starts, and matching phase/journal identities also passed. Workflow-specific backgrounding and later continuation remain open.
+Native settings, project instructions, Skill invocation, Workflow launch, and both phase/child identities have positive receipts. Runs 6 and 7 proved main input responded while two native children remained held and the Workflow remained nonterminal. Retained run 7 data also proves both `SubagentStop` callbacks, normal journal results, exact final assistant markers, and parent completion through the post-parallel phase. Same-query main continuation after that completion remains unverified; the mandatory child-stop control is still absent.
 
 This finding applies to SDK `0.3.310` and CLI `2.1.310` checked on 2026-10-25. The [official package registry](https://registry.npmjs.org/%40anthropic-ai%2Fclaude-agent-sdk) and [SDK release](https://github.com/anthropics/claude-agent-sdk-typescript/releases/tag/v0.3.310) identify the checked SDK version. This report does not claim that every SDK version lacks this operation.
 
@@ -34,6 +34,8 @@ A local Bash stop does not meet the TUI Workflow-child requirement. Do not inven
 | Controls 1 | `3561fc3`; $0.05 cap; $0.003488 SDK estimate | Its recorded gates passed. The resume prompt revealed the marker, and the success receipt preceded cleanup. Do not use this run as genuine-recall or final-cleanup proof. |
 | Controls 2 | `8b4fa7a4e7affdd1b52a7ea313bb12ccb17215f8`; $0.02 cap; $0.003502 SDK estimate | Passed route, edit, task registration, registered-task stop notification, signal-driven server termination, continued input, checkpoint dry-run, genuine resumed-marker recall, and query termination. No tool actions were denied. `workflowChildStopClaimed=false`. |
 | Configuration 4 | `59fe84b`; $0.03 cap; $0.01115793 SDK estimate | Passed project settings and instruction markers, native Skill invocation, Workflow launch, two agent starts, two phase records, and two matching child journal IDs. No permission was denied. Neither Monitor barrier appeared before the work deadline. The query terminated once and met the total deadline. Backgrounding and continuation remain unverified. |
+| Configuration 6 | `59fe84b`; $0.03 cap; $0.00778436 SDK estimate | Both native Monitor hooks stayed pending with exact inputs and journal-matched IDs while the main session answered. The Workflow remained nonterminal. After release, both commands exited 0, both children returned, and the parent completed both phases. The composite probe stopped at its stop-and-journal predicate. |
+| Configuration 7 | `59fe84b`; $0.03 cap; $0.007396835 SDK estimate | Repeated native background-continuity evidence. Captured two matching `SubagentStart` and `SubagentStop` callbacks, with no event mismatch. The private predicate incorrectly required `result.phase` and timed out. Offline replay through the actual journal reader passed the corrected ID-based predicate. Phi's history reader found both exact final assistant markers. The native parent record reports `completed` and both phases. The original composite result remains incomplete because no later main prompt was sent. |
 
 Controls 2 passed its recorded scope. It did not pass the mandatory Workflow-child stop. Earlier attempts 6 and 7 also failed that child-control gate. Attempt 7's `stopTask(agent_id)` call produced no matching stopped notification and did not prove sibling isolation.
 
@@ -49,4 +51,18 @@ The native Bash stop does not satisfy the fourth gate. No more paid Workflow-sto
 
 Three later configuration probes on `b17508c` used one query and a $0.03 cap each. Native Skill invocation and the project settings hook produced positive evidence. Workflow launch remained incomplete: the callback included a nonempty `script` string that the private empty-script guard denied. No child started. All three queries terminated; their final costs are unreported, not zero. The fixtures remain preserved. This result does not establish backgrounding or continuation and does not change the child-stop blocker.
 
-The private guard now supplies the exact owned Workflow source to the existing strict validator. Configuration 4 passed launch and identity gates without widening permission to arbitrary scripts. Its later Monitor barrier timeout remains under offline investigation.
+The private guard now supplies the exact owned Workflow source to the existing strict validator. Configuration 4 passed launch and identity gates without widening permission to arbitrary scripts. The retained traces then identified the fixture's output-limit and instruction-scope defects.
+
+The later fixture review found a 256-token ceiling that truncated thinking before tool use and project instructions that incorrectly applied main-session setup restrictions to children. The private fixture now uses the existing 1,024-token ceiling and scopes instructions by role. These limits came from the private fixture.
+
+Native Workflows launch asynchronously. The published `WorkflowOutput` identifies `local_workflow` as a registered background task. The public `backgroundTasks()` method targets foreground Bash and subagent tasks. The private probe now checks the actual native async launch and a successful main reply while both child hooks remain pending; it does not require a foreground control to return `true` for an already-background Workflow. See the [official Workflow guide](https://code.claude.com/docs/en/workflows).
+
+Both later queries terminated once, met the total deadline, and preserved their fixtures. No further paid run is planned in this probe series. The original failed probe reports remain unchanged.
+
+## Retained completion and history evidence
+
+The native journal places `phase` on `started` records. Its `result` records identify the child with `agentId` and omit `phase`. The corrected private predicate obtains child IDs from the target phase's starts, then requires two distinct, nonfailed, nonnull results for those IDs. It rejects unknown IDs, duplicates, and explicit phase mismatches. The product reader already preserves this optional field correctly; no product change was needed.
+
+Offline replay of run 7 found two valid results and no reader warnings. The actual `HistoryReader.agentMessages()` returned six messages for one child and seven for the other. Each final assistant text matched its assigned marker; user-message echoes were not accepted. The reader closed and its worker terminated. No API request was made for these reads.
+
+The owned native run record has `status=completed`, two agents, and both the parallel and post-parallel phase titles. This establishes parent completion independently of the failed probe predicate. It does not establish a later main response: the original probe halted before sending that prompt. Full composite success remains open, and the original receipt has not been rewritten as a pass.
