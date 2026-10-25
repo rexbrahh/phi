@@ -183,12 +183,7 @@ test("native control summary reports counts and classes without private identiti
 		}],
 		stopAttempts: [{
 			agentId: privateAgentId,
-			targetId: privateToolUseId,
-			candidateKind: "agent-id-diagnostic",
-			callResolved: true,
-			stoppedNotification: true,
-			monitorCancelled: true,
-			siblingPending: true,
+			candidateKind: "missing-native-control",
 		}],
 		journalPhaseStarts: 2,
 		journalMatchedAgentStarts: 2,
@@ -207,11 +202,23 @@ test("native control summary reports counts and classes without private identiti
 	assert.match(summary, /backgroundTasksReturned=false/);
 	assert.match(summary, /backgroundTargetClass=all-foreground/);
 	assert.match(summary, /backgroundTaskClasses=\[local_agent,local_workflow\]/);
-	assert.match(summary, /firstStopConfirmed=true/);
-	assert.match(summary, /firstStopTargetClass=agent-id-diagnostic/);
+	assert.match(summary, /firstStopConfirmed=false/);
+	assert.match(summary, /firstStopTargetClass=missing-native-control/);
 	assert.match(summary, /siblingPendingAfterFirstStop=true/);
 	assert.match(summary, /secondStopConfirmed=false/);
 	for (const privateValue of [privateAgentId, privateSiblingAgentId, privateToolUseId, privateSiblingToolUseId, privatePrompt, privatePath]) {
 		assert.equal(summary.includes(privateValue), false);
 	}
+	const confirmedSummary = live.formatNativeControlSummary!({
+		...trace,
+		stopAttempts: [{
+			agentId: privateAgentId,
+			targetId: "registered-task",
+			candidateKind: "native-task",
+			callResolved: true,
+			stoppedNotification: true,
+			monitorCancelled: true,
+		}],
+	});
+	assert.match(confirmedSummary, /firstStopConfirmed=true/);
 });

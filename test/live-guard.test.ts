@@ -52,6 +52,13 @@ type DiagnosticHarness = {
 	observedResultTotalCostUsd(message: unknown): number | undefined;
 };
 
+type NativeAgentStopHarness = {
+	stopNativeAgentTask?: (
+		nativeTaskId: string | undefined,
+		stopTask: (taskId: string) => Promise<unknown>,
+	) => Promise<string>;
+};
+
 type PermissionEvidence = {
 	deniedActionCount: number;
 	denials: Array<{ toolName: string; inputKeys: string; reason: string }>;
@@ -469,6 +476,24 @@ test("deadline closes the query and waits for iterator termination", async () =>
 	const outcome = await harness.closeSession(unconfirmedSession, 5, "unconfirmed fake query");
 	assert.equal(unconfirmedCloseCalls, 1);
 	assert.equal(outcome.terminated, false, "fixture cleanup must know when iterator termination was not observed");
+});
+
+test("Workflow child stop requires a registered native task handle", async () => {
+	const harness = await import("./live.js") as unknown as NativeAgentStopHarness;
+	assert.equal(typeof harness.stopNativeAgentTask, "function", "native child stop guard must be available offline");
+	const stopTaskCalls: string[] = [];
+	const stopTask = async (taskId: string): Promise<void> => {
+		stopTaskCalls.push(taskId);
+	};
+
+	await assert.rejects(
+		harness.stopNativeAgentTask!(undefined, stopTask),
+		/Missing native control: no registered native task handle is available/,
+	);
+	assert.deepEqual(stopTaskCalls, [], "missing native control must fail before calling stopTask");
+
+	await harness.stopNativeAgentTask!("registered-native-task", stopTask);
+	assert.deepEqual(stopTaskCalls, ["registered-native-task"], "a registered task ID must be passed to stopTask");
 });
 
 test("successful fixture cleanup removes its owned root", async () => {

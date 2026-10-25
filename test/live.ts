@@ -122,7 +122,8 @@ export function formatNativeControlSummary(trace: NativeControlTrace): string {
 	const firstStop = trace.stopAttempts[0];
 	const secondStop = trace.stopAttempts[1];
 	const stopConfirmed = (attempt: NativeStopAttemptRecord | undefined) =>
-		attempt?.stoppedNotification === true && attempt.monitorCancelled === true;
+		attempt?.candidateKind === "native-task" && attempt.callResolved === true &&
+		attempt.stoppedNotification === true && attempt.monitorCancelled === true;
 	const countRequests = (settlement: NativeMonitorRequestRecord["settlement"]) =>
 		trace.monitorRequests.filter((record) => record.settlement === settlement).length;
 	return [
@@ -214,8 +215,8 @@ export interface NativeBackgroundControlRecord {
 
 export interface NativeStopAttemptRecord {
 	agentId: string;
-	targetId: string;
-	candidateKind: "native-task" | "agent-id-diagnostic";
+	targetId?: string;
+	candidateKind: "native-task" | "missing-native-control";
 	callResolved?: boolean;
 	stoppedNotification?: boolean;
 	monitorCancelled?: boolean;
@@ -1154,16 +1155,18 @@ async function main(): Promise<void> {
 			const matchingNativeTaskId = agentStart === undefined
 				? undefined
 				: findMatchingNativeAgentTaskID(events.messages, nativeWorkflowTaskId, agentStart);
-			const candidateId = matchingNativeTaskId ?? selectedAgentId;
+			const candidateId = matchingNativeTaskId;
 			const attempt: NativeStopAttemptRecord = {
 				agentId: selectedAgentId,
-				targetId: candidateId,
-				candidateKind: matchingNativeTaskId === undefined ? "agent-id-diagnostic" : "native-task",
+				...(candidateId === undefined ? {} : { targetId: candidateId }),
+				candidateKind: candidateId === undefined ? "missing-native-control" : "native-task",
 			};
 			nativeControl.stopAttempts.push(attempt);
 			const stopDeadline = Math.min(deadline, Date.now() + NATIVE_STOP_OBSERVATION_MS);
 			try {
-				await withDeadline(session.query.stopTask(candidateId), stopDeadline, label, session);
+				const stoppedTaskId = await stopNativeAgentTask(candidateId, (nativeTaskId) =>
+					withDeadline(session.query.stopTask(nativeTaskId), stopDeadline, label, session),
+				);
 				attempt.callResolved = true;
 				await waitFor(() => {
 					if (requireSiblingActive && workflowTaskTerminalStatus(events.messages, nativeWorkflowTaskId) !== undefined) {
@@ -1177,7 +1180,7 @@ async function main(): Promise<void> {
 					)) {
 						throw new Error("The sibling agent completed before the selected stop was observed.");
 					}
-					const stoppedNotification = hasTaskNotification(events.messages, candidateId, "stopped");
+					const stoppedNotification = hasTaskNotification(events.messages, stoppedTaskId, "stopped");
 					const monitorCancelled = selected.settlement === "signal-aborted";
 					const siblingPending = !requireSiblingActive || pendingMonitorGate.isPending(siblingToolUseId);
 					const siblingStopped = hasTerminalTaskNotification(events.messages, siblingAgentId) ||
@@ -1190,7 +1193,14 @@ async function main(): Promise<void> {
 						(!requireSiblingActive || !siblingStopped)) return true;
 					return undefined;
 				}, events, stopDeadline, label, session);
+				attempt.stoppedNotification = hasTaskNotification(events.messages, stoppedTaskId, "stopped");
+				attempt.monitorCancelled = selected.settlement === "signal-aborted";
+				attempt.siblingPending = pendingMonitorGate.isPending(siblingToolUseId);
+				attempt.subagentStopObserved = nativeControl.lifecycle.some((record) =>
+					record.event === "SubagentStop" && record.agentId === selectedAgentId,
+				);
 			} catch (error) {
+				if (candidateId === undefined) throw error;
 				attempt.stoppedNotification = hasTaskNotification(events.messages, candidateId, "stopped");
 				attempt.monitorCancelled = selected.settlement === "signal-aborted";
 				attempt.siblingPending = pendingMonitorGate.isPending(siblingToolUseId);
@@ -1199,12 +1209,6 @@ async function main(): Promise<void> {
 				);
 				throw new Error("Native agent stop candidate did not produce an exact stopped notification and isolated Monitor cancellation.", { cause: error });
 			}
-			attempt.stoppedNotification = hasTaskNotification(events.messages, candidateId, "stopped");
-			attempt.monitorCancelled = selected.settlement === "signal-aborted";
-			attempt.siblingPending = pendingMonitorGate.isPending(siblingToolUseId);
-			attempt.subagentStopObserved = nativeControl.lifecycle.some((record) =>
-				record.event === "SubagentStop" && record.agentId === selectedAgentId,
-			);
 		};
 
 		await stopHeldAgent(pendingAgents.stopped, pendingAgents.continued, "first isolated Workflow agent stop", true);
@@ -1927,6 +1931,17 @@ export function findMatchingNativeAgentTaskID(
 	if (agentStart.callbackToolUseId === undefined) return undefined;
 	const matches = agentTasks.filter((task) => task.tool_use_id === agentStart.callbackToolUseId);
 	return matches.length === 1 ? asString(matches[0]?.task_id) : undefined;
+}
+
+export async function stopNativeAgentTask(
+	nativeTaskId: string | undefined,
+	stopTask: (taskId: string) => Promise<unknown>,
+): Promise<string> {
+	if (!nativeTaskId) {
+		throw new Error("Missing native control: no registered native task handle is available for this Workflow child.");
+	}
+	await stopTask(nativeTaskId);
+	return nativeTaskId;
 }
 
 function isNativeWorkflowAgentTask(task: Record<string, unknown>, workflowTaskId?: string): boolean {

@@ -433,12 +433,7 @@ test("private SDK failure trace retains typed native control evidence without ch
 		}],
 		stopAttempts: [{
 			agentId: "private-native-agent-id",
-			targetId: "private-native-agent-id",
-			candidateKind: "agent-id-diagnostic",
-			callResolved: true,
-			stoppedNotification: true,
-			monitorCancelled: true,
-			siblingPending: true,
+			candidateKind: "missing-native-control",
 		}],
 		journalPhaseStarts: 2,
 		journalMatchedAgentStarts: 2,
