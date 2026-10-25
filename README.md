@@ -10,6 +10,7 @@ Read the [v1 implementation and acceptance report](docs/superpowers/reports/2026
 - Use an interactive terminal for a coding session.
 - Phi targets macOS first. Ghostty is the first terminal for manual acceptance. Manual acceptance is not complete.
 - Python 3 is needed only for the PTY developer check.
+- GitHub workflows need Git and an authenticated `gh` executable on `PATH`.
 
 Phi is a normal terminal process. It can also run inside Rex. Phi preserves its inherited environment for tools that use Rex. It does not create or move Rex sessions. Rex-specific behavior is not verified.
 
