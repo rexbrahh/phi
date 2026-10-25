@@ -1,6 +1,8 @@
 import {
 	Input,
 	Text,
+	truncateToWidth,
+	visibleWidth,
 	type Component,
 	type Focusable,
 	type TuiMouseEvent,
@@ -134,48 +136,48 @@ export class DialogView implements Component, Focusable {
 	render(width: number): string[] {
 		const request = this.request;
 		if (!request) return [];
-		const lines = [theme.accent(`Waiting for you · ${request.kind}`)];
+		const lines = wrapLine(theme.accent(`Waiting for you · ${request.kind}`), width);
 		if (request.kind === "permission") {
-			lines.push(theme.dim(sanitizeTerminalText(request.title ?? request.displayName ?? request.toolName)));
-			if (request.description) lines.push(sanitizeTerminalText(request.description));
+			lines.push(...wrapLine(theme.dim(sanitizeTerminalText(request.title ?? request.displayName ?? request.toolName)), width));
+			if (request.description) lines.push(...wrapLine(sanitizeTerminalText(request.description), width));
 			lines.push(...new Text(sanitizeTerminalText(boundedPreviewValue(request.input))).render(width));
-			lines.push("1 Allow once · d Deny" + (request.canAlwaysAllow ? " · a Allow suggested" : ""));
+			lines.push(...wrapLine("1 Allow once · d Deny" + (request.canAlwaysAllow ? " · a Allow suggested" : ""), width));
 		} else if (request.kind === "question") {
 			const question = this.currentQuestion();
-			lines.push(theme.dim(`${request.title ?? request.displayName ?? "Question"} · ${this.questionIndex + 1}/${request.questions.length}`));
+			lines.push(...wrapLine(theme.dim(`${request.title ?? request.displayName ?? "Question"} · ${this.questionIndex + 1}/${request.questions.length}`), width));
 			if (question) {
 				lines.push(...new Text(sanitizeTerminalText(question.question)).render(width));
 				if (question.options?.length) {
-					lines.push(...question.options.map((option, index) => {
+					for (const [index, option] of question.options.entries()) {
 						const mark = this.selectedOptions.has(index) ? "[x]" : "[ ]";
-						return `${mark} ${index + 1}. ${sanitizeTerminalText(option.label)}${option.description ? ` — ${sanitizeTerminalText(option.description)}` : ""}`;
-					}));
-					lines.push(question.multiSelect ? "Choose numbers, then Enter." : "Choose a number.");
+						lines.push(...wrapLine(`${mark} ${index + 1}. ${sanitizeTerminalText(option.label)}${option.description ? ` — ${sanitizeTerminalText(option.description)}` : ""}`, width));
+					}
+					lines.push(...wrapLine(question.multiSelect ? "Choose numbers, then Enter." : "Choose a number.", width));
 				} else {
 					lines.push(...this.input.render(width));
 				}
 			}
 		} else if (request.mode === "url") {
 			lines.push(...new Text(sanitizeTerminalText(request.url ?? "URL unavailable")).render(width));
-			lines.push(request.canOpenUrl ? "o Open URL · a Continue · d Decline · c Cancel" : "d Decline · c Cancel");
+			lines.push(...wrapLine(request.canOpenUrl ? "o Open URL · a Continue · d Decline · c Cancel" : "d Decline · c Cancel", width));
 		} else {
 			const formTitle = request.form.supported ? request.form.title : "Form response";
 			lines.push(...new Text(sanitizeTerminalText(formTitle ?? "Form response")).render(width));
 			if (request.form.supported) {
 				for (const field of request.form.fields) {
-					lines.push(`${sanitizeTerminalText(field.title ?? field.name)}${field.required ? " *" : ""} (${field.type})`);
-					if (field.description) lines.push(theme.dim(sanitizeTerminalText(field.description)));
+					lines.push(...wrapLine(`${sanitizeTerminalText(field.title ?? field.name)}${field.required ? " *" : ""} (${field.type})`, width));
+					if (field.description) lines.push(...wrapLine(theme.dim(sanitizeTerminalText(field.description)), width));
 				}
-				lines.push("Enter a JSON object to accept; Ctrl+D Decline · Ctrl+C Cancel.");
+				lines.push(...wrapLine("Enter a JSON object to accept; Ctrl+D Decline · Ctrl+C Cancel.", width));
 				lines.push(...this.input.render(width));
 			} else {
-				lines.push(theme.dim(`Unsupported form: ${sanitizeTerminalText(request.form.reason)}`));
-				lines.push("d Decline · c Cancel");
+				lines.push(...wrapLine(theme.dim(`Unsupported form: ${sanitizeTerminalText(request.form.reason)}`), width));
+				lines.push(...wrapLine("d Decline · c Cancel", width));
 			}
 		}
-		if (this.validationMessage) lines.push(theme.dim(sanitizeTerminalText(this.validationMessage)));
-		lines.push(theme.dim("Esc hides this dialog without answering."));
-		return lines;
+		if (this.validationMessage) lines.push(...wrapLine(theme.dim(sanitizeTerminalText(this.validationMessage)), width));
+		lines.push(...wrapLine(theme.dim("Esc hides this dialog without answering."), width));
+		return fitLines(lines, width);
 	}
 
 	invalidate(): void {
@@ -257,4 +259,13 @@ export class DialogView implements Component, Focusable {
 		this.validationMessage = error instanceof Error ? error.message : String(error);
 		this.actions.error(this.validationMessage);
 	}
+}
+
+function wrapLine(text: string, width: number): string[] {
+	return new Text(text, 0, 0).render(Math.max(1, width));
+}
+
+function fitLines(lines: string[], width: number): string[] {
+	const availableWidth = Math.max(1, width);
+	return lines.map((line) => visibleWidth(line) <= availableWidth ? line : truncateToWidth(line, availableWidth));
 }

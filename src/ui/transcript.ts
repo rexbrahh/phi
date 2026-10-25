@@ -1,4 +1,4 @@
-import { Markdown, Text, type Component } from "@earendil-works/pi-tui";
+import { Markdown, Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import type { ConversationBlock, PhiState, ProvisionalBlock, ToolReceipt } from "../state.js";
 import { boundedPreviewValue, getContentType, getDisplayText, getProperty, getStringProperty } from "../state-utils.js";
 import { sanitizeTerminalText } from "./safe-text.js";
@@ -59,8 +59,8 @@ export class TranscriptView implements Component {
 			if (!currentKeys.has(key)) this.renderedBlocks.delete(key);
 		}
 
-		if (lines.length === 0) return new Text("Waiting for a message. Type a prompt below.").render(width);
-		return lines;
+		if (lines.length === 0) return fitLines(new Text("Waiting for a message. Type a prompt below.").render(width), width);
+		return fitLines(lines, width);
 	}
 
 	invalidate(): void {
@@ -165,6 +165,11 @@ export class TranscriptView implements Component {
 		}
 		return undefined;
 	}
+}
+
+function fitLines(lines: string[], width: number): string[] {
+	const availableWidth = Math.max(1, width);
+	return lines.map((line) => visibleWidth(line) <= availableWidth ? line : truncateToWidth(line, availableWidth));
 }
 
 function formatToolReceipt(content: unknown, receipt: ToolReceipt | undefined, preview: string | undefined): string {

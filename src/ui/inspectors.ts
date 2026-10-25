@@ -1,4 +1,4 @@
-import { Text, type Component } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import type { SessionMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { JournalPage, WorkflowJournalRecord } from "../workflows.js";
 import type { PhiState, TaskRecord } from "../state.js";
@@ -49,40 +49,43 @@ export class InspectorView implements Component {
 	render(width: number): string[] {
 		if (!this.model.panel) return [];
 		switch (this.model.panel) {
-			case "tasks": return this.renderTasks(width);
-			case "history": return this.renderHistory(width);
-			case "workspace": return this.renderWorkspace(width);
+			case "tasks": return fitLines(this.renderTasks(width), width);
+			case "history": return fitLines(this.renderHistory(width), width);
+			case "workspace": return fitLines(this.renderWorkspace(width), width);
 		}
 	}
 
 	invalidate(): void {}
 
 	private renderTasks(width: number): string[] {
-		const lines = [theme.accent("Tasks · Ctrl+T"), "Tab cycles tasks and children · Enter opens · x stops selected task"];
+		const lines = [
+			...wrapLine(theme.accent("Tasks · Ctrl+T"), width),
+			...wrapLine("Tab cycles tasks and children · Enter opens · x stops selected task", width),
+		];
 		const tasks = [...this.state.tasks.values()].filter((task) => !task.ambient);
-		if (tasks.length === 0) lines.push("No SDK tasks have been reported.");
+		if (tasks.length === 0) lines.push(...wrapLine("No SDK tasks have been reported.", width));
 		for (const task of tasks) lines.push(...this.renderTaskRow(task, width));
 
 		const selectedTask = this.model.selectedTaskId ? this.state.tasks.get(this.model.selectedTaskId) : undefined;
 		if (selectedTask) {
 			lines.push("");
-			lines.push(theme.accent(`Selected task · ${sanitizeTerminalText(selectedTask.taskId)}`));
+			lines.push(...wrapLine(theme.accent(`Selected task · ${sanitizeTerminalText(selectedTask.taskId)}`), width));
 			const taskType = selectedTask.taskType ? ` · ${sanitizeTerminalText(selectedTask.taskType)}` : "";
-			lines.push(`Status: ${selectedTask.status}${taskType}`);
+			lines.push(...wrapLine(`Status: ${selectedTask.status}${taskType}`, width));
 			if (selectedTask.description) lines.push(...new Text(sanitizeTerminalText(selectedTask.description)).render(width));
 			if (selectedTask.progressSummary) lines.push(...new Text(sanitizeTerminalText(selectedTask.progressSummary)).render(width));
 			if (selectedTask.error) lines.push(...new Text(theme.dim(`Error: ${sanitizeTerminalText(selectedTask.error)}`)).render(width));
 			if (selectedTask.outputFile) lines.push(...new Text(`Output: ${sanitizeTerminalText(selectedTask.outputFile)}`).render(width));
 			if (selectedTask.workflowRunId || selectedTask.taskType === "local_workflow" || selectedTask.workflowName) {
-				lines.push(`Workflow run: ${sanitizeTerminalText(selectedTask.workflowRunId ?? "unavailable")}`);
-				lines.push(`Workflow script: ${sanitizeTerminalText(this.model.workflowScriptPath ?? "unavailable")}`);
-				lines.push("Workflow journal events are observations. SDK task state determines completion.");
+				lines.push(...wrapLine(`Workflow run: ${sanitizeTerminalText(selectedTask.workflowRunId ?? "unavailable")}`, width));
+				lines.push(...wrapLine(`Workflow script: ${sanitizeTerminalText(this.model.workflowScriptPath ?? "unavailable")}`, width));
+				lines.push(...wrapLine("Workflow journal events are observations. SDK task state determines completion.", width));
 				const phaseCounts = new Map<string, number>();
 				for (const record of this.model.workflowRecords) {
 					if (record.phase) phaseCounts.set(record.phase, (phaseCounts.get(record.phase) ?? 0) + 1);
 				}
 			if (phaseCounts.size) {
-					lines.push(`Observed phases: ${[...phaseCounts].map(([phase, count]) => `${sanitizeTerminalText(phase)} ×${count}`).join(" · ")}`);
+					lines.push(...wrapLine(`Observed phases: ${[...phaseCounts].map(([phase, count]) => `${sanitizeTerminalText(phase)} ×${count}`).join(" · ")}`, width));
 				}
 				for (const record of this.model.workflowRecords) lines.push(...new Text(formatWorkflowRecord(record)).render(width));
 				for (const warning of this.model.workflowWarnings) lines.push(...new Text(theme.dim(sanitizeTerminalText(warning))).render(width));
@@ -92,11 +95,11 @@ export class InspectorView implements Component {
 
 		const children = this.model.childAgentIds;
 		lines.push("");
-		lines.push(theme.accent("Child conversations"));
-		if (children.length === 0) lines.push("No child transcripts have been reported.");
+		lines.push(...wrapLine(theme.accent("Child conversations"), width));
+		if (children.length === 0) lines.push(...wrapLine("No child transcripts have been reported.", width));
 		for (const childId of children) {
 			const selected = childId === this.model.selectedChildId ? "› " : "  ";
-			lines.push(`${selected}${sanitizeTerminalText(childId)}`);
+			lines.push(...wrapLine(`${selected}${sanitizeTerminalText(childId)}`, width));
 		}
 		if (this.model.selectedChildId) {
 			lines.push(...this.renderMessages(this.model.childMessages, width, `Child ${sanitizeTerminalText(this.model.selectedChildId)}`));
@@ -114,24 +117,30 @@ export class InspectorView implements Component {
 	}
 
 	private renderHistory(width: number): string[] {
-		const lines = [theme.accent("Session history · Ctrl+R"), `Session: ${sanitizeTerminalText(this.state.conversationId ?? "waiting for SDK session metadata")}`];
-		lines.push(`Messages ${this.model.historyOffset + 1}–${this.model.historyOffset + this.model.historyMessages.length} · page size 200 · [ older · ] newer`);
-		if (this.model.historyLoading) lines.push(theme.dim("Loading history…"));
-		if (this.model.historyError) lines.push(theme.dim(`History unavailable: ${sanitizeTerminalText(this.model.historyError)}`));
-		if (this.model.searchText) lines.push(`Search: ${sanitizeTerminalText(this.model.searchText)}`);
+		const lines = [
+			...wrapLine(theme.accent("Session history · Ctrl+R"), width),
+			...wrapLine(`Session: ${sanitizeTerminalText(this.state.conversationId ?? "waiting for SDK session metadata")}`, width),
+		];
+		lines.push(...wrapLine(`Messages ${this.model.historyOffset + 1}–${this.model.historyOffset + this.model.historyMessages.length} · page size 200 · [ older · ] newer`, width));
+		if (this.model.historyLoading) lines.push(...wrapLine(theme.dim("Loading history…"), width));
+		if (this.model.historyError) lines.push(...wrapLine(theme.dim(`History unavailable: ${sanitizeTerminalText(this.model.historyError)}`), width));
+		if (this.model.searchText) lines.push(...wrapLine(`Search: ${sanitizeTerminalText(this.model.searchText)}`, width));
 		lines.push(...this.renderMessages(this.model.historyMessages, width, "Transcript"));
-		lines.push("Children: open Tasks (Ctrl+T); Tab selects the next task or child transcript.");
+		lines.push(...wrapLine("Children: open Tasks (Ctrl+T); Tab selects the next task or child transcript.", width));
 		return lines;
 	}
 
 	private renderWorkspace(width: number): string[] {
 		const workspace = this.model.workspace;
-		const lines = [theme.accent("Workspace · Ctrl+W"), "Ctrl+G refreshes Git status."];
-		if (!workspace) return [...lines, theme.dim("Reading workspace status…")];
-		if (workspace.kind === "error") return [...lines, `Unavailable: ${sanitizeTerminalText(workspace.error)}`];
-		if (workspace.kind === "not-repository") return [...lines, `Not a Git repository · ${sanitizeTerminalText(workspace.cwd)}`];
-		lines.push(`Root: ${sanitizeTerminalText(workspace.root)}`);
-		lines.push(`Branch: ${sanitizeTerminalText(workspace.branch ?? "detached HEAD")}${workspace.dirty ? " · changes present" : " · clean"}`);
+		const lines = [
+			...wrapLine(theme.accent("Workspace · Ctrl+W"), width),
+			...wrapLine("Ctrl+G refreshes Git status.", width),
+		];
+		if (!workspace) return [...lines, ...wrapLine(theme.dim("Reading workspace status…"), width)];
+		if (workspace.kind === "error") return [...lines, ...wrapLine(`Unavailable: ${sanitizeTerminalText(workspace.error)}`, width)];
+		if (workspace.kind === "not-repository") return [...lines, ...wrapLine(`Not a Git repository · ${sanitizeTerminalText(workspace.cwd)}`, width)];
+		lines.push(...wrapLine(`Root: ${sanitizeTerminalText(workspace.root)}`, width));
+		lines.push(...wrapLine(`Branch: ${sanitizeTerminalText(workspace.branch ?? "detached HEAD")}${workspace.dirty ? " · changes present" : " · clean"}`, width));
 		lines.push(...new Text("Observed worktrees:").render(width));
 		for (const worktree of workspace.worktrees) {
 			const details = [worktree.detached ? worktree.head.slice(0, 12) : worktree.branch ?? "no branch", worktree.locked ? "locked" : "", worktree.prunable ? "prunable" : ""]
@@ -142,17 +151,26 @@ export class InspectorView implements Component {
 	}
 
 	private renderMessages(messages: readonly SessionMessage[], width: number, heading: string): string[] {
-		const lines = [theme.dim(heading)];
-		if (messages.length === 0) return [...lines, this.model.historyLoading ? "" : "No messages loaded."];
+		const lines = wrapLine(theme.dim(heading), width);
+		if (messages.length === 0) return [...lines, ...(this.model.historyLoading ? [""] : wrapLine("No messages loaded.", width))];
 		for (const message of messages) {
 			const role = message.type === "assistant" ? "Phi" : message.type === "user" ? "You" : "System";
 			const content = getHistoryMessageSearchText(message.message);
 			if (this.model.searchText && !content.toLocaleLowerCase().includes(this.model.searchText.toLocaleLowerCase())) continue;
-			lines.push(theme.accent(`${role}:`));
+			lines.push(...wrapLine(theme.accent(`${role}:`), width));
 			lines.push(...new Text(boundedPreview(sanitizeTerminalText(content))).render(width));
 		}
 		return lines;
 	}
+}
+
+function wrapLine(text: string, width: number): string[] {
+	return new Text(text, 0, 0).render(Math.max(1, width));
+}
+
+function fitLines(lines: string[], width: number): string[] {
+	const availableWidth = Math.max(1, width);
+	return lines.map((line) => visibleWidth(line) <= availableWidth ? line : truncateToWidth(line, availableWidth));
 }
 
 export function getHistoryMessageText(message: unknown): string | undefined {

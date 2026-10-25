@@ -1,4 +1,4 @@
-import { Text, VStack, type TUI } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth, visibleWidth, VStack, type Component, type TUI } from "@earendil-works/pi-tui";
 import type { Editor } from "@earendil-works/pi-tui";
 import type { PhiState } from "../state.js";
 import type { ImageAttachment } from "../attachments.js";
@@ -21,6 +21,7 @@ export interface ScreenUpdate {
 
 export class MainScreen {
 	readonly root: VStack;
+	private readonly editorView: Component;
 	private readonly heading = new Text();
 	private readonly notice = new Text();
 	private readonly attachmentLine = new Text();
@@ -34,14 +35,15 @@ export class MainScreen {
 		readonly inspector: InspectorView,
 		readonly editor: Editor,
 	) {
-		this.root = new VStack([
+		this.editorView = new WidthSafeEditor(editor);
+		this.root = new WidthSafeVStack([
 			this.heading,
 			this.transcript,
 			this.inspector,
 			this.notice,
 			this.attachmentLine,
 			this.activity,
-			this.editor,
+			this.editorView,
 			this.footer,
 		]);
 	}
@@ -82,6 +84,29 @@ export class MainScreen {
 		this.footer.setText(theme.dim("Enter send · Ctrl+T tasks · Ctrl+B background · Ctrl+R history · Ctrl+W workspace · Ctrl+V image · Ctrl+C interrupt or exit · Esc close view"));
 		this.tui.requestRender();
 	}
+}
+
+class WidthSafeEditor implements Component {
+	constructor(private readonly editor: Editor) {}
+
+	render(width: number): string[] {
+		return fitLines(this.editor.render(Math.max(3, width)), width);
+	}
+
+	invalidate(): void {
+		this.editor.invalidate();
+	}
+}
+
+class WidthSafeVStack extends VStack {
+	override render(width: number): string[] {
+		return fitLines(super.render(width), width);
+	}
+}
+
+function fitLines(lines: string[], width: number): string[] {
+	const availableWidth = Math.max(1, width);
+	return lines.map((line) => visibleWidth(line) <= availableWidth ? line : truncateToWidth(line, availableWidth));
 }
 
 function statusLabel(state: PhiState): string {
