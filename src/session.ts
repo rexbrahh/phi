@@ -171,6 +171,16 @@ export function startSession(
 		input.close();
 
 		let closeError: unknown;
+		closePromise = (async () => {
+			const outcomes = await Promise.allSettled([ready, done]);
+			state = "closed";
+			if (closeError !== undefined) throw closeError;
+			for (const outcome of outcomes) {
+				if (outcome.status === "rejected") throw outcome.reason;
+			}
+		})();
+		void closePromise.catch(() => undefined);
+
 		try {
 			query.close();
 		} catch (error) {
@@ -182,15 +192,6 @@ export function startSession(
 			closeError ??= error;
 		}
 
-		closePromise = (async () => {
-			const outcomes = await Promise.allSettled([ready, done]);
-			state = "closed";
-			if (closeError !== undefined) throw closeError;
-			for (const outcome of outcomes) {
-				if (outcome.status === "rejected") throw outcome.reason;
-			}
-		})();
-		void closePromise.catch(() => undefined);
 		return closePromise;
 	}
 

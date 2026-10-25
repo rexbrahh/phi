@@ -146,6 +146,50 @@ test("repeated close shares one native shutdown", async () => {
 	assert.equal(fake.closeCalls, 1);
 });
 
+test("reentrant close from onClosing shares the published promise", async () => {
+	const initializationError = new Error("initialization failed");
+	const nativeCloseError = new Error("native close failed");
+	const callbackError = new Error("onClosing failed");
+	const fake = new FakeQueryHarness(Promise.reject(initializationError));
+	fake.closeError = nativeCloseError;
+	let session: ReturnType<typeof startSession>;
+	let reentrantClose: Promise<void> | undefined;
+	let onClosingCalls = 0;
+	session = startSession(buildOptions(parseArgs([]), optionCallbacks()), {
+		onMessage() {},
+		onError() {},
+		onClosing() {
+			onClosingCalls += 1;
+			if (onClosingCalls === 1) reentrantClose = session.close();
+			throw callbackError;
+		},
+	}, fake.createQuery);
+
+	await assert.rejects(session.ready, initializationError);
+	const closing = session.close();
+	const nativeCloseCallsAtReturn = fake.closeCalls;
+	const onClosingCallsAtReturn = onClosingCalls;
+	const outcomes = await Promise.allSettled([closing, reentrantClose!]);
+
+	assert.deepEqual({
+		reentrantReturnedSamePromise: reentrantClose === closing,
+		nativeCloseCallsAtReturn,
+		nativeCloseCalls: fake.closeCalls,
+		onClosingCallsAtReturn,
+		onClosingCalls,
+	}, {
+		reentrantReturnedSamePromise: true,
+		nativeCloseCallsAtReturn: 1,
+		nativeCloseCalls: 1,
+		onClosingCallsAtReturn: 1,
+		onClosingCalls: 1,
+	});
+	assert.deepEqual(outcomes, [
+		{ status: "rejected", reason: nativeCloseError },
+		{ status: "rejected", reason: nativeCloseError },
+	]);
+});
+
 test("send rejects as soon as shutdown begins", async () => {
 	const fake = new FakeQueryHarness();
 	const session = startSession(buildOptions(parseArgs([]), optionCallbacks()), {
