@@ -9,16 +9,76 @@ import signal
 import sys
 import tempfile
 import termios
+import traceback
 from pathlib import Path
 from typing import Callable
 
 sys.dont_write_bytecode = True
 
-from helpers.pty_harness import APP, AUTH_APP, PTYChild, mode_snapshot
+from helpers.pty_harness import APP, AUTH_APP, ROOT, PTYChild, mode_snapshot
 
 
 AUTH_TEST_KEY = b"phi_pty_test_saved_secret"
 AUTH_CANCEL_PARTIAL = b"phi_pty_cancel_partial_secret"
+MAX_FAILURE_MARKERS = 64 * 1024
+MAX_FAILURE_OUTPUT = 32 * 1024
+
+
+def write_private_file(path: Path, content: bytes) -> None:
+	file_descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+	with os.fdopen(file_descriptor, "wb") as output:
+		output.write(content)
+
+
+def preserve_failure_artifact(
+	name: str,
+	scenario: str,
+	child: PTYChild,
+	issues: list[str],
+	primary_error: dict[str, str] | None,
+	snapshot: dict[str, object],
+	*,
+	phase: str,
+	artifact_dir: Path | None = None,
+) -> Path:
+	if artifact_dir is None:
+		artifact_root = ROOT / ".superpowers" / "pty-render-diagnostics"
+		artifact_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+		os.chmod(artifact_root, 0o700)
+		artifact_dir = Path(tempfile.mkdtemp(prefix=f"{scenario}-", dir=artifact_root))
+		os.chmod(artifact_dir, 0o700)
+	secret_values = (AUTH_TEST_KEY, AUTH_CANCEL_PARTIAL)
+
+	def redact(data: bytes) -> bytes:
+		for secret in secret_values:
+			data = data.replace(secret, b"<redacted>")
+		return data
+
+	events = snapshot.get("supervisorEvents")
+	if isinstance(events, list):
+		snapshot["supervisorEvents"] = summarize_events(events[-128:])
+	metadata = {
+		"case": name,
+		"scenario": scenario,
+		"primaryError": primary_error,
+		"issues": issues,
+		phase: snapshot,
+		"artifacts": {
+			"markers": f"markers-{phase}.jsonl (tail, at most {MAX_FAILURE_MARKERS} bytes)",
+			"terminalOutput": f"terminal-output-{phase}.bin (tail, at most {MAX_FAILURE_OUTPUT} bytes; synthetic keys redacted)",
+		},
+	}
+	metadata_name = "failure.json" if phase == "before-cleanup" else "after-cleanup.json"
+	write_private_file(artifact_dir / metadata_name, redact(json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8")))
+	try:
+		marker_bytes = redact(child.markers_path.read_bytes())
+	except OSError as error:
+		marker_bytes = f"<could not read marker file: {type(error).__name__}: {error}>".encode()
+	marker_tail = marker_bytes[-MAX_FAILURE_MARKERS:]
+	write_private_file(artifact_dir / f"markers-{phase}.jsonl", marker_tail)
+	output_bytes = redact(bytes(child.output))
+	write_private_file(artifact_dir / f"terminal-output-{phase}.bin", output_bytes[-MAX_FAILURE_OUTPUT:])
+	return artifact_dir
 
 
 def check(issues: list[str], condition: bool, message: str) -> None:
@@ -324,6 +384,9 @@ def main() -> int:
 			child = PTYChild(scenario, Path(temporary), application=application)
 			issues: list[str] = []
 			modes = child.mode_history
+			primary_error: dict[str, str] | None = None
+			before_cleanup: dict[str, object] | None = None
+			failure_artifact: str | None = None
 			try:
 				child.wait_event("terminal-raw")
 				modes["during"] = mode_snapshot(termios.tcgetattr(child.slave))
@@ -335,13 +398,86 @@ def main() -> int:
 					child.wait_event("app-ready")
 				action(child, issues)
 			except Exception as error:
+				primary_error = {
+					"type": type(error).__name__,
+					"message": str(error),
+					"traceback": traceback.format_exc(),
+				}
 				issues.append(f"{type(error).__name__}: {error}")
+				try:
+					before_cleanup = child.diagnostic_snapshot()
+				except BaseException as snapshot_error:
+					issues.append(f"pre-cleanup diagnostic capture failed: {type(snapshot_error).__name__}: {snapshot_error}")
+				if before_cleanup is not None:
+					try:
+						failure_artifact = str(preserve_failure_artifact(
+							name,
+							scenario,
+							child,
+							issues,
+							primary_error,
+							before_cleanup,
+							phase="before-cleanup",
+						))
+					except BaseException as artifact_error:
+						issues.append(f"pre-cleanup failure artifact write failed: {type(artifact_error).__name__}: {artifact_error}")
 			finally:
-				issues.extend(child.cleanup())
-				actual = termios.tcgetattr(child.slave)
-				modes["after"] = mode_snapshot(actual)
-				modes["exactlyRestored"] = actual == child.original
-				child.release_supervisor()
+				if issues and before_cleanup is None:
+					try:
+						before_cleanup = child.diagnostic_snapshot()
+					except BaseException as snapshot_error:
+						issues.append(f"pre-cleanup diagnostic capture failed: {type(snapshot_error).__name__}: {snapshot_error}")
+				if issues and failure_artifact is None and before_cleanup is not None:
+					try:
+						failure_artifact = str(preserve_failure_artifact(
+							name,
+							scenario,
+							child,
+							issues,
+							primary_error,
+							before_cleanup,
+							phase="before-cleanup",
+						))
+					except BaseException as artifact_error:
+						issues.append(f"pre-cleanup failure artifact write failed: {type(artifact_error).__name__}: {artifact_error}")
+				try:
+					issues.extend(child.cleanup())
+				except BaseException as cleanup_error:
+					issues.append(f"cleanup raised {type(cleanup_error).__name__}: {cleanup_error}")
+				try:
+					actual = termios.tcgetattr(child.slave)
+					modes["after"] = mode_snapshot(actual)
+					modes["exactlyRestored"] = actual == child.original
+				except BaseException as terminal_error:
+					actual = None
+					issues.append(f"post-cleanup terminal inspection failed: {type(terminal_error).__name__}: {terminal_error}")
+				try:
+					issues.extend(child.release_supervisor())
+				except BaseException as supervisor_error:
+					issues.append(f"supervisor release raised {type(supervisor_error).__name__}: {supervisor_error}")
+				try:
+					after_cleanup = child.diagnostic_snapshot()
+				except BaseException as snapshot_error:
+					after_cleanup = {"error": f"{type(snapshot_error).__name__}: {snapshot_error}"}
+				if issues or failure_artifact:
+					try:
+						failure_artifact = str(preserve_failure_artifact(
+							name,
+							scenario,
+							child,
+							issues,
+							primary_error,
+							after_cleanup,
+							phase="after-cleanup",
+							artifact_dir=Path(failure_artifact) if failure_artifact else None,
+						))
+					except BaseException as artifact_error:
+						issues.append(f"failure artifact write failed: {type(artifact_error).__name__}: {artifact_error}")
+				for descriptor in (child.master, child.slave):
+					try:
+						os.close(descriptor)
+					except OSError:
+						pass
 				results.append({
 					"name": name,
 					"passed": not issues,
@@ -351,17 +487,15 @@ def main() -> int:
 					"terminalModes": modes,
 					"continuedSource": child.continued_source if scenario == "suspend" else None,
 					"postResumeInputObserved": child.post_resume_input_observed if scenario == "suspend" else None,
+					"failureArtifact": failure_artifact,
 				})
-				for descriptor in (child.master, child.slave):
-					try:
-						os.close(descriptor)
-					except OSError:
-						pass
 		status = "PASS" if results[-1]["passed"] else "FAIL"
 		print(f"{status}: {name}")
 		for issue in results[-1]["issues"]:
 			print(f"  {issue}")
-		if not results[-1]["passed"]:
+		if results[-1]["failureArtifact"]:
+			print(f"  failure_artifact={results[-1]['failureArtifact']}")
+		if not results[-1]["passed"] and not results[-1]["failureArtifact"]:
 			print(f"  markers={json.dumps(summarize_events(child.events), ensure_ascii=False)}")
 			tail = child.output[-800:].replace(AUTH_TEST_KEY, b"<redacted>").replace(AUTH_CANCEL_PARTIAL, b"<redacted>")
 			print(f"  terminal_output_tail={tail.decode('utf-8', errors='replace')!r}")
