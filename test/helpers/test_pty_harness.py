@@ -16,6 +16,28 @@ import pty_harness
 
 
 class SupervisorSetupTests(unittest.TestCase):
+	def test_cleanup_keeps_unobserved_emergency_exit_as_a_reported_issue(self) -> None:
+		child = pty_harness.PTYChild.__new__(pty_harness.PTYChild)
+		child.node_exit_code = None
+		child.scenario = "input"
+		child.stopped = False
+		child.pid = 4242
+		child.termination_attempts = []
+		child.wait_exit = mock.Mock(side_effect=AssertionError("supervisor exit marker was not observed"))
+		child.pump = mock.Mock()
+		child.mode_error = mock.Mock(return_value=None)
+		with mock.patch.object(pty_harness.os, "kill") as kill:
+			issues = child.cleanup()
+
+		self.assertEqual(kill.call_args_list, [
+			mock.call(4242, signal.SIGTERM),
+			mock.call(4242, signal.SIGKILL),
+		])
+		self.assertEqual(len(issues), 1)
+		self.assertIn("supervisor did not report its exit", issues[0])
+		self.assertFalse(child.termination_attempts[-1]["exitObserved"])
+		self.assertEqual(child.termination_attempts[-1]["pid"], 4242)
+
 	def test_setpgid_eacces_requires_expected_child_group(self) -> None:
 		child_pid = 4242
 		with mock.patch.object(
