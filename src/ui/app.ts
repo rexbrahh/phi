@@ -625,13 +625,18 @@ export class AppController {
 				if (!isCurrent()) return;
 				const detail = `Session ended with an error: ${errorText(error)}`;
 				this.setSessionError(detail);
-				this.showNotice(detail);
 				if (replacement) {
 					this.session = undefined;
 					this.ready = undefined;
-				} else {
-					this.requestExit(1);
 				}
+				try {
+					this.showNotice(detail);
+					this.views.tui.renderNow();
+				} catch (renderError) {
+					this.setSessionError(`${detail}; terminal diagnostic rendering failed: ${errorText(renderError)}`);
+					if (replacement) this.requestExit(1);
+				}
+				if (!replacement) this.requestExit(1);
 			},
 		);
 		try {
@@ -979,7 +984,13 @@ export class AppController {
 		} catch (error) {
 			errors.push(`attachment operations: ${errorText(error)}`);
 		}
-		if (errors.length > 0) this.showNotice(`Cleanup failed: ${errors.join("; ")}`);
+		if (errors.length > 0) {
+			try {
+				this.showNotice(`Cleanup failed: ${errors.join("; ")}`);
+			} catch (error) {
+				errors.push(`diagnostic rendering: ${errorText(error)}`);
+			}
+		}
 		if (this.terminalStarted || this.suspended) {
 			this.terminalStarted = false;
 			this.suspended = false;
