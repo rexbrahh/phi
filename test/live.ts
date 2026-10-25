@@ -28,6 +28,10 @@ const MAX_WORKFLOW_FAILURE_EVIDENCE_CHARS = 1_900;
 const MAX_WORKFLOW_ERROR_EXCERPT_CHARS = 320;
 const MAX_DIAGNOSTIC_LIST_ITEMS = 6;
 const MAX_DIAGNOSTIC_LABEL_CHARS = 40;
+const MAX_PERMISSION_DENIALS = 3;
+const MAX_PERMISSION_SUMMARY_CHARS = 640;
+const MAX_PERMISSION_INPUT_KEYS = 3;
+const MAX_PERMISSION_INPUT_KEY_CHARS = 32;
 
 let failureDiagnosticEmitted = false;
 
@@ -41,10 +45,22 @@ export interface LiveCloseOutcome {
 	error?: unknown;
 }
 
+export interface LivePermissionDenial {
+	toolName: string;
+	inputKeys: string;
+	reason: string;
+}
+
+export interface LivePermissionEvidence {
+	deniedActionCount: number;
+	denials: LivePermissionDenial[];
+}
+
 export interface LiveFailureDiagnosticOptions {
 	latestObservedTotalCostUsd?: number;
 	cleanupTerminationObserved?: boolean;
 	cleanupErrors?: unknown[];
+	permissionEvidence?: LivePermissionEvidence;
 	selectedApiKey?: string;
 }
 
@@ -172,8 +188,9 @@ export function formatLiveFailureDiagnostic(
 		? `; cleanup error: ${cleanupErrors.join("; ")}${omittedCleanupErrors ? "; additional cleanup errors omitted" : ""}`
 		: "";
 	const safeCleanupDetail = boundedDiagnosticText(cleanupDetail, key, 300);
+	const permissionDetail = formatPermissionEvidence(options.permissionEvidence, key);
 	const prefix = "Live fixture failure: ";
-	const summary = `; latest total_cost_usd=${spend}; cleanup termination observed=${termination}${safeCleanupDetail}`;
+	const summary = `; latest total_cost_usd=${spend}; cleanup termination observed=${termination}${safeCleanupDetail}; ${permissionDetail}`;
 	const causeLimit = Math.max(0, MAX_FAILURE_DIAGNOSTIC_CHARS - prefix.length - summary.length);
 	const diagnostic = `${prefix}${boundedDiagnosticText(cause, key, causeLimit)}${summary}`;
 	return boundedDiagnosticText(diagnostic, key, MAX_FAILURE_DIAGNOSTIC_CHARS);
@@ -314,6 +331,23 @@ function formatDiagnosticLabels(values: string[], selectedApiKey?: string, omitt
 	return `[${labels.join(",")}${omitted > 0 ? `${labels.length > 0 ? "," : ""}${omitted} more omitted` : ""}]`;
 }
 
+function formatPermissionEvidence(evidence: LivePermissionEvidence | undefined, selectedApiKey?: string): string {
+	if (evidence === undefined) return "permissionDenials=not-captured";
+	const samples = evidence.denials.slice(0, MAX_PERMISSION_DENIALS).map((denial) => {
+		const toolName = boundedDiagnosticText(denial.toolName, selectedApiKey, MAX_DIAGNOSTIC_LABEL_CHARS) || "unknown";
+		const inputKeys = boundedDiagnosticText(denial.inputKeys, selectedApiKey, 128);
+		const reason = boundedDiagnosticText(denial.reason, selectedApiKey, 48) || "unknown";
+		return `${toolName} keys=${inputKeys} reason=${reason}`;
+	});
+	const omitted = Math.max(
+		0,
+		Math.max(evidence.deniedActionCount, evidence.denials.length) - samples.length,
+	);
+	if (samples.length === 0) return "permissionDenials=none";
+	const summary = `permissionDenials=[${samples.join(";")}${omitted > 0 ? `;${omitted} more omitted` : ""}]`;
+	return boundedDiagnosticText(summary, selectedApiKey, MAX_PERMISSION_SUMMARY_CHARS);
+}
+
 function diagnosticType(value: unknown): string {
 	if (value === null) return "null";
 	if (Array.isArray(value)) return "array";
@@ -390,6 +424,7 @@ async function main(): Promise<void> {
 	let scenarioFailed = false;
 	let scenarioFailure: unknown;
 	const initialEvents: EventLog = { messages: [], errors: [] };
+	const permissionEvidence: LivePermissionEvidence = { deniedActionCount: 0, denials: [] };
 	try {
 		const firstBudgetUsd = maxBudgetUsd * INITIAL_BUDGET_SHARE;
 		const initialLaunch = parseArgs([
@@ -398,7 +433,7 @@ async function main(): Promise<void> {
 			"--permission-mode", "acceptEdits",
 			"--max-budget-usd", String(firstBudgetUsd),
 		], environment);
-		const firstOptions = buildOptions(initialLaunch, fixtureCallbacks(fixture), environment);
+		const firstOptions = buildOptions(initialLaunch, fixtureCallbacks(fixture, permissionEvidence), environment);
 		assert.equal(firstOptions.model, LIVE_MODEL);
 		firstOptions.maxTurns = MAX_MAIN_TURNS;
 		firstOptions.effort = "low";
@@ -655,7 +690,7 @@ async function main(): Promise<void> {
 				"--permission-mode", "acceptEdits",
 				"--max-budget-usd", String(remainingBudgetUsd),
 			], environment),
-			fixtureCallbacks(fixture),
+			fixtureCallbacks(fixture, permissionEvidence),
 			environment,
 		);
 		assert.equal(resumeOptions.model, LIVE_MODEL);
@@ -762,38 +797,72 @@ async function main(): Promise<void> {
 				latestObservedTotalCostUsd,
 				cleanupTerminationObserved: closeOutcomes.length === 0 ? undefined : allQueriesTerminated,
 				cleanupErrors: scenarioFailed ? cleanupErrors : cleanupErrors.slice(1),
+				permissionEvidence,
 				selectedApiKey: process.env.ANTHROPIC_API_KEY,
 			});
 		}
 	}
 }
 
-function fixtureCallbacks(fixture: HarnessFixture): Pick<Options, "canUseTool" | "onElicitation" | "hooks"> {
+export function fixtureCallbacks(
+	fixture: Pick<HarnessFixture, "repository" | "toolEditTarget">,
+	permissionEvidence: LivePermissionEvidence,
+	selectedApiKey = process.env.ANTHROPIC_API_KEY,
+): Pick<Options, "canUseTool" | "onElicitation" | "hooks"> {
 	return {
 		canUseTool: async (toolName, input) => {
-			if (toolName === "Read" && isFixturePath(fixture.repository, input.file_path)) {
-				return { behavior: "allow", updatedInput: input };
-			}
-			if (toolName === "Skill" && input.skill === SKILL_NAME) {
-				return { behavior: "allow", updatedInput: input };
-			}
-			if (
-				toolName === "Edit" &&
-				isExactFixtureTarget(fixture.repository, fixture.toolEditTarget, input.file_path)
-			) {
-				return { behavior: "allow", updatedInput: input };
-			}
-			if (toolName === "Workflow" && isNamedFixtureWorkflow(input, SKILL_NAME)) {
-				return { behavior: "allow", updatedInput: input };
-			}
-			if (toolName === "Bash" && (input.command === MAIN_SLEEP_COMMAND || input.command === AGENT_SLEEP_COMMAND)) {
-				return { behavior: "allow", updatedInput: input };
+			const rejectionReason = fixturePermissionRejectionReason(toolName, input, fixture);
+			if (rejectionReason === undefined) return { behavior: "allow", updatedInput: input };
+			permissionEvidence.deniedActionCount += 1;
+			if (permissionEvidence.denials.length < MAX_PERMISSION_DENIALS) {
+				permissionEvidence.denials.push({
+					toolName: boundedDiagnosticText(toolName, selectedApiKey, MAX_DIAGNOSTIC_LABEL_CHARS) || "unknown",
+					inputKeys: formatPermissionInputKeys(input, selectedApiKey),
+					reason: rejectionReason,
+				});
 			}
 			return { behavior: "deny", message: "The live fixture denied an unlisted tool action." };
 		},
 		onElicitation: async () => ({ action: "decline" }),
 		hooks: {},
 	};
+}
+
+function fixturePermissionRejectionReason(
+	toolName: string,
+	input: Record<string, unknown>,
+	fixture: Pick<HarnessFixture, "repository" | "toolEditTarget">,
+): string | undefined {
+	if (toolName === "Read") {
+		return isFixturePath(fixture.repository, input.file_path) ? undefined : "read-path-outside-fixture";
+	}
+	if (toolName === "Skill") return input.skill === SKILL_NAME ? undefined : "skill-name-not-fixture";
+	if (toolName === "Edit") {
+		return isExactFixtureTarget(fixture.repository, fixture.toolEditTarget, input.file_path)
+			? undefined
+			: "edit-target-not-fixture-target";
+	}
+	if (toolName === "Workflow") {
+		if (input.name !== SKILL_NAME) return "workflow-name-not-fixture";
+		if (["script", "scriptPath", "resumeFromRunId"].some((key) => Object.hasOwn(input, key))) {
+			return "workflow-execution-override";
+		}
+		return isNamedFixtureWorkflow(input, SKILL_NAME) ? undefined : "workflow-input-not-allowlisted";
+	}
+	if (toolName === "Bash") {
+		return input.command === MAIN_SLEEP_COMMAND || input.command === AGENT_SLEEP_COMMAND
+			? undefined
+			: "bash-command-not-allowlisted";
+	}
+	return "tool-not-allowlisted";
+}
+
+function formatPermissionInputKeys(input: Record<string, unknown>, selectedApiKey?: string): string {
+	const keys = Object.keys(input).sort();
+	const selected = keys.slice(0, MAX_PERMISSION_INPUT_KEYS)
+		.map((key) => boundedDiagnosticText(key, selectedApiKey, MAX_PERMISSION_INPUT_KEY_CHARS));
+	const omitted = keys.length - selected.length;
+	return `[${selected.join(",")}${omitted > 0 ? `,${omitted} more omitted` : ""}]`;
 }
 
 export function isExactFixtureTarget(repository: string, target: string, value: unknown): boolean {

@@ -39,10 +39,26 @@ type DiagnosticHarness = {
 			latestObservedTotalCostUsd?: number;
 			cleanupTerminationObserved?: boolean;
 			cleanupErrors?: unknown[];
+			permissionEvidence?: PermissionEvidence;
 			selectedApiKey?: string;
 		},
 	): string;
 	observedResultTotalCostUsd(message: unknown): number | undefined;
+};
+
+type PermissionEvidence = {
+	deniedActionCount: number;
+	denials: Array<{ toolName: string; inputKeys: string; reason: string }>;
+};
+
+type FixtureCallbackHarness = {
+	fixtureCallbacks(
+		fixture: { repository: string; toolEditTarget: string },
+		permissionEvidence: PermissionEvidence,
+		selectedApiKey?: string,
+	): {
+		canUseTool: NonNullable<import("@anthropic-ai/claude-agent-sdk").Options["canUseTool"]>;
+	};
 };
 
 const runner = join(dirname(fileURLToPath(import.meta.url)), "live.js");
@@ -190,6 +206,85 @@ test("tool assertions constrain Edit, Workflow, active tasks, and fixture skill 
 		{ type: "assistant", message: { content: [{ type: "text", text: "phi-live-skill-ok" }] } },
 	], "phi-live-skill-ok"), true);
 	assert.equal(harness.hasSkillMarker([], "phi-live-skill-ok"), false);
+});
+
+test("native SDK Workflow callback allows the fixture and rejects execution overrides", async () => {
+	const harness = await import("./live.js") as unknown as FixtureCallbackHarness;
+	const permissionEvidence: PermissionEvidence = { deniedActionCount: 0, denials: [] };
+	const callback = harness.fixtureCallbacks({
+		repository: "/tmp/phi-live-fixture",
+		toolEditTarget: "/tmp/phi-live-fixture/target.txt",
+	}, permissionEvidence).canUseTool;
+	const options = {
+		signal: new AbortController().signal,
+		toolUseID: "fixture-workflow-use",
+		requestId: "fixture-workflow-request",
+	};
+	const input = { name: "phi-live-acceptance" };
+
+	const allowed = await callback("Workflow", input, options);
+	if (allowed?.behavior !== "allow") assert.fail("the named fixture Workflow callback must be allowed");
+	assert.equal(allowed.behavior, "allow");
+	assert.deepEqual(allowed.updatedInput, input);
+	assert.deepEqual(permissionEvidence, { deniedActionCount: 0, denials: [] });
+
+	for (const override of [
+		{ script: "export const meta = {};" },
+		{ scriptPath: "/tmp/other-workflow.js" },
+		{ resumeFromRunId: "another-run" },
+	]) {
+		const denied = await callback("Workflow", { ...input, ...override }, options);
+		if (denied?.behavior !== "deny") assert.fail("Workflow execution overrides must be denied");
+		assert.equal(denied.behavior, "deny");
+	}
+	assert.equal(permissionEvidence.deniedActionCount, 3);
+	assert.deepEqual(permissionEvidence.denials.map(({ reason }) => reason), [
+		"workflow-execution-override",
+		"workflow-execution-override",
+		"workflow-execution-override",
+	]);
+});
+
+test("failure diagnostics summarize only bounded denied tool names, input keys, and reasons", async () => {
+	const harness = await import("./live.js") as unknown as DiagnosticHarness & FixtureCallbackHarness;
+	const syntheticKey = "offline-synthetic-api-key-permission-summary";
+	const secretValue = "PRIVATE_PERMISSION_INPUT_VALUE";
+	const permissionEvidence: PermissionEvidence = { deniedActionCount: 0, denials: [] };
+	const callback = harness.fixtureCallbacks({
+		repository: "/tmp/phi-live-fixture",
+		toolEditTarget: "/tmp/phi-live-fixture/target.txt",
+	}, permissionEvidence, syntheticKey).canUseTool;
+
+	const callbackOptions = {
+		signal: new AbortController().signal,
+		toolUseID: "fixture-bash-use",
+		requestId: "fixture-bash-request",
+	};
+	const denied = await callback("Bash", {
+		command: secretValue,
+		[`private-${syntheticKey}`]: secretValue,
+	}, callbackOptions);
+	if (denied?.behavior !== "deny") assert.fail("an unlisted Bash command must be denied");
+	assert.equal(denied.behavior, "deny");
+	for (let index = 0; index < 4; index += 1) {
+		await callback("Bash", { command: `private-command-${index}` }, callbackOptions);
+	}
+	assert.equal(permissionEvidence.deniedActionCount, 5);
+	assert.equal(permissionEvidence.denials.length, 3, "permission evidence retains only three denied actions");
+
+	const diagnostic = harness.formatLiveFailureDiagnostic(new Error("fixture failed"), {
+		permissionEvidence,
+		selectedApiKey: syntheticKey,
+	});
+	assert.match(diagnostic, /permissionDenials=/);
+	assert.match(diagnostic, /Bash/);
+	assert.match(diagnostic, /command/);
+	assert.match(diagnostic, /not-allowlisted/);
+	assert.match(diagnostic, /2 more omitted/);
+	assert.match(diagnostic, /\[redacted API key\]/);
+	assert.equal(diagnostic.includes(secretValue), false);
+	assert.equal(diagnostic.includes(syntheticKey), false);
+	assert.ok(diagnostic.length <= 1_200);
 });
 
 test("deadline closes the query and waits for iterator termination", async () => {
