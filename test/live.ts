@@ -372,18 +372,16 @@ function formatWorkflowTaskFailureEvidence(
 
 			const labelValues = [record.label, record.description, record.prompt]
 				.filter((value): value is string => typeof value === "string");
-			let expectedLabelMatched = false;
 			for (const [name, label] of Object.entries(WORKFLOW_AGENT_LABELS)) {
 				if (labelValues.some((value) => value.includes(label))) {
-					expectedLabelMatched = true;
 					expectedLabelMatches.set(name, (expectedLabelMatches.get(name) ?? 0) + 1);
 				}
 			}
-			const workflowParentMatched = workflowTaskId !== undefined && record.parent_task_id === workflowTaskId;
-			if (record.task_type === "local_agent" || expectedLabelMatched || workflowParentMatched) {
+			if (record.task_type === "local_agent" && !asString(record.task_id)) {
+				workflowTaskStartsWithoutId += 1;
+			} else if (isNativeWorkflowAgentTask(record, workflowTaskId)) {
 				const taskId = asString(record.task_id);
 				if (taskId) workflowTaskIds.add(taskId);
-				else workflowTaskStartsWithoutId += 1;
 			}
 		}
 		if (record.subtype === "task_notification") {
@@ -911,12 +909,7 @@ async function main(): Promise<void> {
 
 		const workflowAgents = await waitFor(
 			() => {
-				const agents = uniqueTaskStarts(events.messages).filter((task) => {
-					const prompt = asString(task.prompt) ?? "";
-					const description = asString(task.description) ?? "";
-					return task.task_type === "local_agent" ||
-						prompt.includes("phi-live-agent-") || description.includes("phi-live-agent-");
-				});
+				const agents = findAgentTaskIDs(events.messages, workflowTaskId);
 				return agents.length >= 2 ? agents.slice(0, 2) : undefined;
 			},
 			events,
@@ -924,8 +917,7 @@ async function main(): Promise<void> {
 			"two native Workflow agent tasks",
 			session,
 		);
-		const firstAgentTaskId = asString(asRecord(workflowAgents[0])?.task_id);
-		const secondAgentTaskId = asString(asRecord(workflowAgents[1])?.task_id);
+		const [firstAgentTaskId, secondAgentTaskId] = workflowAgents;
 		assert.ok(firstAgentTaskId && secondAgentTaskId);
 		const secondAgentStartIndex = events.messages.findIndex((message) => {
 			const record = asRecord(message);
@@ -1518,7 +1510,7 @@ function findTaskStarted(
 	return uniqueTaskStarts(messages).find(predicate);
 }
 
-function uniqueTaskStarts(messages: SDKMessage[]): Record<string, unknown>[] {
+function uniqueTaskStarts(messages: readonly unknown[]): Record<string, unknown>[] {
 	const byId = new Map<string, Record<string, unknown>>();
 	for (const message of messages) {
 		const record = asRecord(message);
@@ -1527,6 +1519,17 @@ function uniqueTaskStarts(messages: SDKMessage[]): Record<string, unknown>[] {
 		if (taskId) byId.set(taskId, record);
 	}
 	return [...byId.values()];
+}
+
+export function findAgentTaskIDs(messages: readonly unknown[], workflowTaskId?: string): string[] {
+	return uniqueTaskStarts(messages)
+		.filter((task) => isNativeWorkflowAgentTask(task, workflowTaskId))
+		.map((task) => asString(task.task_id)!);
+}
+
+function isNativeWorkflowAgentTask(task: Record<string, unknown>, workflowTaskId?: string): boolean {
+	const taskId = asString(task.task_id);
+	return task.task_type === "local_agent" && taskId !== undefined && taskId.length > 0 && taskId !== workflowTaskId;
 }
 
 function isTaskNotification(message: SDKMessage, taskId: string): boolean {
