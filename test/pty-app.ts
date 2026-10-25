@@ -6,7 +6,7 @@ import { parseArgs } from "../src/config.js";
 import { AppController, runApp, type AppDependencies } from "../src/ui/app.js";
 import { FakeQueryHarness, initializedResponse } from "./helpers/fake-query.js";
 
-type Scenario = "input" | "paste" | "resize" | "escape" | "dialog" | "suspend" | "initialization-failure" | "sigterm";
+type Scenario = "input" | "paste" | "resize" | "escape" | "dialog" | "kitty" | "repeat-interrupt-exit" | "suspend" | "initialization-failure" | "sigterm";
 
 const scenario = process.argv[2] as Scenario | undefined;
 const markerPath = process.env.PHI_PTY_MARKERS;
@@ -78,7 +78,7 @@ async function run(): Promise<void> {
 		copyText: async () => undefined,
 	};
 	const launch = parseArgs(["--cwd", cwd]);
-	const controller = scenario === "escape" || scenario === "dialog"
+	const controller = scenario === "escape" || scenario === "dialog" || scenario === "repeat-interrupt-exit"
 		? new AppController(launch, dependencies)
 		: undefined;
 	const running = controller ? controller.run() : runApp(launch, dependencies);
@@ -92,6 +92,8 @@ async function run(): Promise<void> {
 	let observedInputs = 0;
 	let observedInterrupts = 0;
 	let observedActive = controller?.views.active;
+	let observedKittyProtocol = false;
+	let observedDraft = controller?.views.editor.getExpandedText();
 	let observedDialogId: string | undefined;
 	let observedSize = `${terminal.columns}x${terminal.rows}`;
 	let madeIdleAfterInterrupt = false;
@@ -109,9 +111,22 @@ async function run(): Promise<void> {
 		if (observedInterrupts !== fake.interruptCalls) {
 			observedInterrupts = fake.interruptCalls;
 			record("interrupt", { count: observedInterrupts });
-			if (scenario === "escape" && !madeIdleAfterInterrupt) {
+			const shouldMakeIdle = scenario === "escape"
+				|| (scenario === "repeat-interrupt-exit" && observedInterrupts >= 2);
+			if (shouldMakeIdle && !madeIdleAfterInterrupt) {
 				madeIdleAfterInterrupt = true;
 				fake.pushMessage(sessionState("idle"));
+			}
+		}
+		if (terminal.kittyProtocolActive && !observedKittyProtocol) {
+			observedKittyProtocol = true;
+			record("kitty-protocol-active", { active: true });
+		}
+		if (scenario === "repeat-interrupt-exit" && controller) {
+			const draft = controller.views.editor.getExpandedText();
+			if (draft !== observedDraft) {
+				observedDraft = draft;
+				record("draft", { content: draft });
 			}
 		}
 		const active = controller?.views.active;
@@ -144,12 +159,13 @@ async function run(): Promise<void> {
 		await waitFor(() => fake.mcpStatusCalls > 0, "SDK initialization and terminal startup");
 		record("app-ready");
 
-		if (scenario === "escape") {
+		if (scenario === "escape" || scenario === "repeat-interrupt-exit") {
 			if (!controller) throw new Error("Escape scenario requires AppController");
 			fake.pushMessage(sessionState("running"));
 			await waitFor(() => controller.state.effectiveStatus.foreground === "running", "running session state");
 			record("foreground-running");
-			await waitFor(() => fake.interruptCalls > 0, "Escape interrupt after closing the inspector");
+			const requiredInterrupts = scenario === "repeat-interrupt-exit" ? 2 : 1;
+			await waitFor(() => fake.interruptCalls >= requiredInterrupts, "foreground interruption");
 			await waitFor(() => controller.state.effectiveStatus.foreground === "idle", "idle state after interrupt");
 			record("foreground-idle");
 		}
