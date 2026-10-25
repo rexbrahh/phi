@@ -6,7 +6,7 @@ Date: 2026-10-25. Tested SDK: `0.3.310`. Tested CLI: `2.1.310`.
 
 Native SDK acceptance remains incomplete. The user requires an independent TUI control for each native Workflow child. Phi does not implement this control because the inspected SDK host has no route to the native child-stop callback.
 
-Native settings, project instructions, Skill invocation, Workflow launch, and both phase/child identities have positive receipts. Runs 6 and 7 proved main input responded while two native children remained held and the Workflow remained nonterminal. Retained run 7 data also proves both `SubagentStop` callbacks, normal journal results, exact final assistant markers, and parent completion through the post-parallel phase. Same-query main continuation after that completion remains unverified; the mandatory child-stop control is still absent.
+Configuration run 8 passed native settings, project instructions, Skill invocation, Workflow launch, both phase/child identities, background continuity, normal child completion, final child history, actual parent post-parallel completion, and a later main reply on the same query. The mandatory independent child-stop control is still absent.
 
 This finding applies to SDK `0.3.310` and CLI `2.1.310` checked on 2026-10-25. The [official package registry](https://registry.npmjs.org/%40anthropic-ai%2Fclaude-agent-sdk) and [SDK release](https://github.com/anthropics/claude-agent-sdk-typescript/releases/tag/v0.3.310) identify the checked SDK version. This report does not claim that every SDK version lacks this operation.
 
@@ -36,6 +36,7 @@ A local Bash stop does not meet the TUI Workflow-child requirement. Do not inven
 | Configuration 4 | `59fe84b`; $0.03 cap; $0.01115793 SDK estimate | Passed project settings and instruction markers, native Skill invocation, Workflow launch, two agent starts, two phase records, and two matching child journal IDs. No permission was denied. Neither Monitor barrier appeared before the work deadline. The query terminated once and met the total deadline. Backgrounding and continuation remain unverified. |
 | Configuration 6 | `59fe84b`; $0.03 cap; $0.00778436 SDK estimate | Both native Monitor hooks stayed pending with exact inputs and journal-matched IDs while the main session answered. The Workflow remained nonterminal. After release, both commands exited 0, both children returned, and the parent completed both phases. The composite probe stopped at its stop-and-journal predicate. |
 | Configuration 7 | `59fe84b`; $0.03 cap; $0.007396835 SDK estimate | Repeated native background-continuity evidence. Captured two matching `SubagentStart` and `SubagentStop` callbacks, with no event mismatch. The private predicate incorrectly required `result.phase` and timed out. Offline replay through the actual journal reader passed the corrected ID-based predicate. Phi's history reader found both exact final assistant markers. The native parent record reports `completed` and both phases. The original composite result remains incomplete because no later main prompt was sent. |
+| Configuration 8 | `59fe84b`; $0.03 cap; $0.00783271 SDK estimate | Passed the complete native configuration and normal-continuation probe in 15.517 seconds. Both held children matched the journal; the main session answered while the Workflow remained nonterminal. Both children completed normally and their final assistant markers matched. The native parent record passed identity, status, child, and runtime-phase checks before a fresh main prompt received a successful result on the same query. Haiku-only usage and cleanup passed. `workflowChildStopClaimed=false`. |
 
 Controls 2 passed its recorded scope. It did not pass the mandatory Workflow-child stop. Earlier attempts 6 and 7 also failed that child-control gate. Attempt 7's `stopTask(agent_id)` call produced no matching stopped notification and did not prove sibling isolation.
 
@@ -57,7 +58,7 @@ The later fixture review found a 256-token ceiling that truncated thinking befor
 
 Native Workflows launch asynchronously. The published `WorkflowOutput` identifies `local_workflow` as a registered background task. The public `backgroundTasks()` method targets foreground Bash and subagent tasks. The private probe now checks the actual native async launch and a successful main reply while both child hooks remain pending; it does not require a foreground control to return `true` for an already-background Workflow. See the [official Workflow guide](https://code.claude.com/docs/en/workflows).
 
-Both later queries terminated once, met the total deadline, and preserved their fixtures. No further paid run is planned in this probe series. The original failed probe reports remain unchanged.
+Runs 6 and 7 terminated once, met the total deadline, and preserved their fixtures. After the offline predicate correction, one final $0.03-capped run verified the remaining sequence. The original failed probe reports remain unchanged.
 
 ## Retained completion and history evidence
 
@@ -65,4 +66,12 @@ The native journal places `phase` on `started` records. Its `result` records ide
 
 Offline replay of run 7 found two valid results and no reader warnings. The actual `HistoryReader.agentMessages()` returned six messages for one child and seven for the other. Each final assistant text matched its assigned marker; user-message echoes were not accepted. The reader closed and its worker terminated. No API request was made for these reads.
 
-The owned native run record has `status=completed`, two agents, and both the parallel and post-parallel phase titles. This establishes parent completion independently of the failed probe predicate. It does not establish a later main response: the original probe halted before sending that prompt. Full composite success remains open, and the original receipt has not been rewritten as a pass.
+The owned run 7 record has `status=completed`, two agents, and both the parallel and post-parallel phase titles. This establishes parent completion independently of its failed probe predicate. Run 7 did not send a later main prompt; its original receipt remains incomplete.
+
+## Complete normal-continuation run
+
+Configuration run 8 used the corrected phase-less-result predicate. The private probe also stopped treating phase text in the script as runtime observation. It checked the owned native run JSON for matching run/task/workflow identities, completed status, both expected children in `done` state, and both actual phase titles. The focused offline self-check rejected missing or wrong runtime metadata and mismatched record paths before the live run.
+
+The live sequence required the matching parent completion notification, validated runtime metadata, and both child histories before sending a fresh main message through the same `Session`. A successful SDK result matched that new message UUID. The single query used only `claude-haiku-5-5` and reported $0.00783271 under its $0.03 cap. The frozen private probe SHA-256 was `44051d7bc5bec16ccc5f79dae9fff8314405cc0c1ce773429a1f5e8890b43013`.
+
+The wrapper and probe exited 0. Both barriers released; the history worker and query terminated; pending journal reads settled; and the fixture was removed. One query-close attempt occurred and the run met the total deadline. No API run remains active. This result does not prove independent child cancellation, and v1 native acceptance remains incomplete for that mandatory control.
