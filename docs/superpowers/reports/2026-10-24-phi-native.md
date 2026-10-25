@@ -6,7 +6,7 @@ Date: 2026-10-25. Tested SDK: `0.3.310`. Tested CLI: `2.1.310`.
 
 Native SDK acceptance remains incomplete. The user requires an independent TUI control for each native Workflow child. Phi does not implement this control because the inspected SDK host has no route to the native child-stop callback.
 
-Native settings/skills loading and Workflow-specific backgrounding also remain open. Earlier native receipts establish two concurrent agent lifecycles and phase metadata. They do not establish every later gate in the failed composite run.
+Native settings, project instructions, and Skill invocation have positive receipts. Workflow launch, two agent starts, and matching phase/journal identities also passed. Workflow-specific backgrounding and later continuation remain open.
 
 This finding applies to SDK `0.3.310` and CLI `2.1.310` checked on 2026-10-25. The [official package registry](https://registry.npmjs.org/%40anthropic-ai%2Fclaude-agent-sdk) and [SDK release](https://github.com/anthropics/claude-agent-sdk-typescript/releases/tag/v0.3.310) identify the checked SDK version. This report does not claim that every SDK version lacks this operation.
 
@@ -33,6 +33,7 @@ A local Bash stop does not meet the TUI Workflow-child requirement. Do not inven
 | Attempt 7 | `aa9eea470ab0edb519f73a8b5ddbb9886bd82f2a`; $0.10 cap; $0.0046 SDK estimate | The Workflow tool returned success. Two distinct subagent-start hooks, matching journal identities, two pending Monitor calls, and two phase-start records establish concurrent lifecycles and phase metadata. Backgrounding returned an acknowledgement without positive Workflow-background evidence. Child stop and continuing-sibling gates did not pass. |
 | Controls 1 | `3561fc3`; $0.05 cap; $0.003488 SDK estimate | Its recorded gates passed. The resume prompt revealed the marker, and the success receipt preceded cleanup. Do not use this run as genuine-recall or final-cleanup proof. |
 | Controls 2 | `8b4fa7a4e7affdd1b52a7ea313bb12ccb17215f8`; $0.02 cap; $0.003502 SDK estimate | Passed route, edit, task registration, registered-task stop notification, signal-driven server termination, continued input, checkpoint dry-run, genuine resumed-marker recall, and query termination. No tool actions were denied. `workflowChildStopClaimed=false`. |
+| Configuration 4 | `59fe84b`; $0.03 cap; $0.01115793 SDK estimate | Passed project settings and instruction markers, native Skill invocation, Workflow launch, two agent starts, two phase records, and two matching child journal IDs. No permission was denied. Neither Monitor barrier appeared before the work deadline. The query terminated once and met the total deadline. Backgrounding and continuation remain unverified. |
 
 Controls 2 passed its recorded scope. It did not pass the mandatory Workflow-child stop. Earlier attempts 6 and 7 also failed that child-control gate. Attempt 7's `stopTask(agent_id)` call produced no matching stopped notification and did not prove sibling isolation.
 
@@ -47,3 +48,5 @@ Controls 2 passed its recorded scope. It did not pass the mandatory Workflow-chi
 The native Bash stop does not satisfy the fourth gate. No more paid Workflow-stop guess probes are planned. The latest budget ledger reports no active runs. Its SDK estimates are not a billing total. See the [v1 report](2026-10-24-phi-v1.md) for the full budget record.
 
 Three later configuration probes on `b17508c` used one query and a $0.03 cap each. Native Skill invocation and the project settings hook produced positive evidence. Workflow launch remained incomplete: the callback included a nonempty `script` string that the private empty-script guard denied. No child started. All three queries terminated; their final costs are unreported, not zero. The fixtures remain preserved. This result does not establish backgrounding or continuation and does not change the child-stop blocker.
+
+The private guard now supplies the exact owned Workflow source to the existing strict validator. Configuration 4 passed launch and identity gates without widening permission to arbitrary scripts. Its later Monitor barrier timeout remains under offline investigation.
