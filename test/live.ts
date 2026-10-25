@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Options, SDKMessage, SDKResultMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { MonitorInput } from "@anthropic-ai/claude-agent-sdk/sdk-tools.js";
 import type { WorkflowJournalMetadata, WorkflowOutput, WorkflowReference } from "../src/workflows.js";
 import { formatErrorText } from "../src/ui/error-text.js";
 
@@ -21,6 +22,23 @@ const INITIAL_BUDGET_SHARE = 0.75;
 const MAX_TOTAL_TIME_MS = 180_000;
 const STEP_TIMEOUT_MS = 60_000;
 const TERMINATION_TIMEOUT_MS = 15_000;
+const WORKFLOW_AGENT_RELEASE_FILE_NAMES = {
+	stopped: ".phi-live-agent-stopped.release",
+	continued: ".phi-live-agent-continued.release",
+} as const;
+type FixtureMonitorInput = Required<Pick<MonitorInput, "description" | "timeout_ms" | "command">>;
+export const FIXED_WORKFLOW_MONITOR_INPUTS = {
+	stopped: {
+		description: "Wait for the stopped agent release file",
+		timeout_ms: STEP_TIMEOUT_MS,
+		command: `until [ -f ${WORKFLOW_AGENT_RELEASE_FILE_NAMES.stopped} ]; do sleep 1; done`,
+	},
+	continued: {
+		description: "Wait for the continued agent release file",
+		timeout_ms: STEP_TIMEOUT_MS,
+		command: `until [ -f ${WORKFLOW_AGENT_RELEASE_FILE_NAMES.continued} ]; do sleep 1; done`,
+	},
+} as const satisfies Record<"stopped" | "continued", FixtureMonitorInput>;
 const MAX_FAILURE_DIAGNOSTIC_CHARS = 1_200;
 const MAX_CAUSE_DETAILS = 4;
 const MAX_CAUSE_MESSAGE_CHARS = 220;
@@ -179,6 +197,10 @@ interface HarnessFixture {
 	toolEditTarget: string;
 	workflowPath: string;
 	workflowScript: string;
+	workflowReleaseFiles: {
+		stopped: string;
+		continued: string;
+	};
 }
 
 interface ToolUse {
@@ -1007,12 +1029,14 @@ async function main(): Promise<void> {
 			"background Bash completion",
 			session,
 		);
-		await withDeadline(session.query.stopTask(secondAgentTaskId), deadline, "stop remaining Workflow agent", session);
+		await Promise.all(Object.values(fixture.workflowReleaseFiles).map((releaseFile) =>
+			writeFile(releaseFile, "release\n", { flag: "wx", mode: 0o600 }),
+		));
 		await waitFor(
-			() => hasTaskNotification(events.messages, secondAgentTaskId, "stopped"),
+			() => hasTaskNotification(events.messages, secondAgentTaskId, "completed"),
 			events,
 			deadline,
-			"cleanup stop for the remaining Workflow agent",
+			"released Workflow agent completion",
 			session,
 		);
 
@@ -1222,12 +1246,30 @@ function fixturePermissionRejectionReason(
 			? undefined
 			: "workflow-input-not-allowlisted";
 	}
+	if (toolName === "Monitor") {
+		return isAllowedFixtureMonitor(input) ? undefined : "monitor-input-not-allowlisted";
+	}
 	if (toolName === "Bash") {
 		return input.command === MAIN_SLEEP_COMMAND || input.command === AGENT_SLEEP_COMMAND
 			? undefined
 			: "bash-command-not-allowlisted";
 	}
 	return "tool-not-allowlisted";
+}
+
+function isAllowedFixtureMonitor(input: Record<string, unknown>): boolean {
+	const allowedKeys = ["command", "description", "timeout_ms"] as const;
+	const keys = Reflect.ownKeys(input);
+	if (keys.length !== allowedKeys.length || keys.some((key) =>
+		typeof key !== "string" || !allowedKeys.includes(key as (typeof allowedKeys)[number]),
+	)) {
+		return false;
+	}
+	return Object.values(FIXED_WORKFLOW_MONITOR_INPUTS).some((expected) =>
+		input.command === expected.command &&
+		input.description === expected.description &&
+		input.timeout_ms === expected.timeout_ms,
+	);
 }
 
 function formatPermissionInputKeys(input: Record<string, unknown>, selectedApiKey?: string): string {
@@ -1273,6 +1315,10 @@ async function createFixture(): Promise<HarnessFixture> {
 	const skillDir = join(claudeDir, "skills", SKILL_NAME);
 	const workflowsDir = join(claudeDir, "workflows");
 	const workflowPath = join(workflowsDir, `${SKILL_NAME}.js`);
+	const workflowReleaseFiles = {
+		stopped: join(repository, WORKFLOW_AGENT_RELEASE_FILE_NAMES.stopped),
+		continued: join(repository, WORKFLOW_AGENT_RELEASE_FILE_NAMES.continued),
+	};
 	const fixtureWorkflowSource = resolve(dirname(fileURLToPath(import.meta.url)), "../../test/live-workflow.js");
 
 	try {
@@ -1349,6 +1395,7 @@ async function createFixture(): Promise<HarnessFixture> {
 			toolEditTarget,
 			workflowPath,
 			workflowScript,
+			workflowReleaseFiles,
 		};
 	} catch (error) {
 		await rm(root, { recursive: true, force: true });

@@ -5,7 +5,13 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { assertPinnedModelUsage, LIVE_MODEL, LiveRunRefusal, parseLiveBudget } from "./live.js";
+import {
+	assertPinnedModelUsage,
+	FIXED_WORKFLOW_MONITOR_INPUTS,
+	LIVE_MODEL,
+	LiveRunRefusal,
+	parseLiveBudget,
+} from "./live.js";
 
 type HarnessAssertions = {
 	isExactFixtureTarget(repository: string, target: string, value: unknown): boolean;
@@ -112,6 +118,46 @@ test("the runner and both native Workflow agents stay pinned to Haiku 5.5", () =
 	const workflowSource = readFileSync(workflowPath, "utf8");
 	assert.match(workflowSource, new RegExp(`const LIVE_MODEL = "${LIVE_MODEL}";`));
 	assert.equal((workflowSource.match(/model: LIVE_MODEL/g) ?? []).length, 2);
+});
+
+test("Workflow agent prompts match the fixed Monitor inputs", () => {
+	const agentPrompts = [
+		{
+			inputName: "STOPPED_MONITOR_INPUT",
+			label: "phi-live-agent-stopped",
+			marker: "phi-live-agent-stopped",
+			input: FIXED_WORKFLOW_MONITOR_INPUTS.stopped,
+		},
+		{
+			inputName: "CONTINUED_MONITOR_INPUT",
+			label: "phi-live-agent-continued",
+			marker: "phi-live-agent-continued",
+			input: FIXED_WORKFLOW_MONITOR_INPUTS.continued,
+		},
+	];
+
+	for (const { inputName, label, marker, input } of agentPrompts) {
+		const labelOffset = workflowScript.indexOf(`label: "${label}"`);
+		assert.notEqual(labelOffset, -1, `${label} must remain in the Workflow fixture`);
+		const callOffset = workflowScript.lastIndexOf("() => agent(", labelOffset);
+		assert.notEqual(callOffset, -1, `${label} must remain a real Workflow agent`);
+		const prompt = workflowScript.slice(callOffset, labelOffset);
+		const inputOffset = workflowScript.indexOf(`const ${inputName} = {`);
+		assert.notEqual(inputOffset, -1, `${label} must have a fixed Monitor input`);
+		const inputEnd = workflowScript.indexOf("};", inputOffset);
+		assert.notEqual(inputEnd, -1, `${label} Monitor input must be complete`);
+		const inputDeclaration = workflowScript.slice(inputOffset, inputEnd + 2);
+		assert.ok(inputDeclaration.includes(`description: "${input.description}"`));
+		assert.ok(inputDeclaration.includes(`timeout_ms: ${input.timeout_ms}`));
+		assert.ok(inputDeclaration.includes(`command: "${input.command}"`));
+		assert.equal((inputDeclaration.match(/^\s*[A-Za-z_$][\w$]*\s*:/gm) ?? []).length, 3);
+		assert.ok(prompt.includes(`JSON.stringify(${inputName})`), `${label} prompt must pass its exact Monitor input`);
+		assert.ok(prompt.includes("Wait for the Monitor call to finish"));
+		assert.ok(prompt.includes(`return only ${marker}`));
+		assert.ok(prompt.includes("Do not use other tools or edit files"));
+	}
+
+	assert.doesNotMatch(workflowScript, /sleep 90|run_in_background|pgrep|ps -/);
 });
 
 test("failure diagnostics retain bounded nested causes and redact the selected key", async () => {
@@ -260,7 +306,8 @@ test("native SDK Workflow callback allows only the fixed fixture script forms", 
 		assert.equal(allowed.behavior, "allow");
 		assert.deepEqual(allowed.updatedInput, acceptedInput);
 	}
-	assert.deepEqual(permissionEvidence, { deniedActionCount: 0, denials: [] });
+	assert.equal(permissionEvidence.deniedActionCount, 0);
+	assert.equal(permissionEvidence.denials.length, 0);
 
 	for (const { input: deniedInput, reason } of [
 		{ input: { ...input, script: `${workflowScript}\n` }, reason: "workflow-input-not-allowlisted" },
@@ -278,6 +325,50 @@ test("native SDK Workflow callback allows only the fixed fixture script forms", 
 		assert.deepEqual(permissionEvidence.denials.map(({ reason: actualReason }) => actualReason), [reason]);
 	}
 	assert.equal(permissionEvidence.deniedActionCount, 7);
+});
+
+test("native SDK Monitor callback allows only the fixed Workflow release waits", async () => {
+	const harness = await import("./live.js") as unknown as FixtureCallbackHarness;
+	const permissionEvidence: PermissionEvidence = { deniedActionCount: 0, denials: [] };
+	const callback = harness.fixtureCallbacks({
+		repository: "/tmp/phi-live-fixture",
+		toolEditTarget: "/tmp/phi-live-fixture/target.txt",
+		workflowScript,
+	}, permissionEvidence).canUseTool;
+	const callbackOptions = {
+		signal: new AbortController().signal,
+		toolUseID: "fixture-monitor-use",
+		requestId: "fixture-monitor-request",
+	};
+
+	for (const acceptedInput of Object.values(FIXED_WORKFLOW_MONITOR_INPUTS)) {
+		const allowed = await callback("Monitor", acceptedInput, callbackOptions);
+		if (allowed?.behavior !== "allow") assert.fail("a fixed fixture Monitor wait must be allowed");
+		assert.equal(allowed.behavior, "allow");
+		assert.deepEqual(allowed.updatedInput, acceptedInput);
+	}
+	assert.deepEqual(permissionEvidence, { deniedActionCount: 0, denials: [] });
+
+	const stopped = FIXED_WORKFLOW_MONITOR_INPUTS.stopped;
+	const deniedInputs: Array<Record<string, unknown>> = [
+		{ ...stopped, command: "sleep 1" },
+		{ ...stopped, command: "ps -A" },
+		{ ...stopped, command: "until pgrep -f phi-live-agent; do sleep 1; done" },
+		{ ...stopped, command: "until [ -f /tmp/phi-live-agent.release ]; do sleep 1; done" },
+		{ ...stopped, timeout_ms: stopped.timeout_ms + 1 },
+		{ ...stopped, ws: { url: "ws://127.0.0.1" } },
+		{ ...stopped, path: "/tmp/override" },
+		{ ...stopped, script: "override" },
+		{ ...stopped, env: { PATH: "/tmp" } },
+		{ ...stopped, description: "Monitor an unrelated condition" },
+	];
+	for (const deniedInput of deniedInputs) {
+		const denied = await callback("Monitor", deniedInput, callbackOptions);
+		if (denied?.behavior !== "deny") assert.fail("an unlisted Monitor input must be denied");
+		assert.equal(denied.behavior, "deny");
+	}
+	assert.equal(permissionEvidence.deniedActionCount, deniedInputs.length);
+	assert.ok(permissionEvidence.denials.every(({ reason }) => reason === "monitor-input-not-allowlisted"));
 });
 
 test("failure diagnostics summarize only bounded denied tool names, input keys, and reasons", async () => {

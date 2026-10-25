@@ -410,7 +410,11 @@ test("private SDK failure trace retains native task IDs and event payloads", asy
 test("private SDK failure trace retains exact denied callbacks and keeps values out of the public summary", async () => {
 	const harness = await import("./live.js") as unknown as PermissionTraceHarness;
 	const selectedApiKey = "offline-synthetic-denied-input-api-key";
-	const permissionEvidence = { deniedActionCount: 0, denials: [] as Array<{ toolName: string; inputKeys: string; reason: string }> };
+	const permissionEvidence: {
+		deniedActionCount: number;
+		denials: Array<{ toolName: string; inputKeys: string; reason: string }>;
+		traceDenials?: PermissionTraceDenial[];
+	} = { deniedActionCount: 0, denials: [] };
 	const callback = harness.fixtureCallbacks({
 		repository: "/tmp/phi-live-fixture",
 		toolEditTarget: "/tmp/phi-live-fixture/target.txt",
@@ -424,6 +428,7 @@ test("private SDK failure trace retains exact denied callbacks and keeps values 
 	const callbackResult = await callback("Bash", deniedInput, {
 		signal: new AbortController().signal,
 		toolUseID: "private-denied-bash-use-id",
+		requestId: "private-denied-bash-request",
 	});
 	assert.equal(callbackResult?.behavior, "deny");
 	assert.equal(permissionEvidence.deniedActionCount, 1);
