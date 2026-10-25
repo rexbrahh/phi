@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Options, SDKMessage, SDKResultMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { WorkflowOutput } from "../src/workflows.js";
+import type { WorkflowJournalMetadata, WorkflowOutput, WorkflowReference } from "../src/workflows.js";
 import { formatErrorText } from "../src/ui/error-text.js";
 
 const SKILL_NAME = "phi-live-acceptance";
@@ -32,6 +32,19 @@ const MAX_PERMISSION_DENIALS = 3;
 const MAX_PERMISSION_SUMMARY_CHARS = 640;
 const MAX_PERMISSION_INPUT_KEYS = 3;
 const MAX_PERMISSION_INPUT_KEY_CHARS = 32;
+const WORKFLOW_AGENT_LABELS = {
+	stopped: "phi-live-agent-stopped",
+	continued: "phi-live-agent-continued",
+} as const;
+const WORKFLOW_TASK_EVENT_TYPES = [
+	"task_started",
+	"task_notification",
+	"task_updated",
+	"task_progress",
+	"background_tasks_changed",
+] as const;
+const SAFE_WORKFLOW_TASK_TYPES = new Set(["local_agent", "local_bash", "local_workflow", "mcp_task"]);
+const WORKFLOW_TERMINAL_STATUSES = ["completed", "failed", "stopped"] as const;
 
 let failureDiagnosticEmitted = false;
 
@@ -62,6 +75,12 @@ export interface LiveFailureDiagnosticOptions {
 	cleanupErrors?: unknown[];
 	permissionEvidence?: LivePermissionEvidence;
 	selectedApiKey?: string;
+}
+
+export interface WorkflowFailureEvidenceContext {
+	workflowTaskId?: string;
+	journal?: WorkflowJournalMetadata;
+	journalWarningCount?: number;
 }
 
 export class LiveRunRefusal extends Error {
@@ -201,6 +220,7 @@ export function formatWorkflowFailureEvidence(
 	messages: readonly unknown[],
 	selectedApiKey?: string,
 	fixtureName = SKILL_NAME,
+	context: WorkflowFailureEvidenceContext = {},
 ): string {
 	const call = findDiagnosticWorkflowUse(messages, fixtureName);
 	const matchedResult = call?.id ? findCorrelatedWorkflowResult(messages, call.id) : undefined;
@@ -253,6 +273,8 @@ export function formatWorkflowFailureEvidence(
 		`latestResultSubtype=${typeof subtype === "string" ? boundedDiagnosticText(subtype, selectedApiKey, 96) || "empty" : subtype === undefined ? "none" : diagnosticType(subtype)}`,
 		`latestResultNumTurns=${typeof numTurns === "number" && Number.isFinite(numTurns) ? numTurns : "none"}`,
 		`modelUsageModels=${formatDiagnosticLabels(modelNames, selectedApiKey, Math.max(0, modelNames.length - MAX_DIAGNOSTIC_LIST_ITEMS))}`,
+		formatWorkflowTaskFailureEvidence(messages, selectedApiKey, context.workflowTaskId, context.journal),
+		formatWorkflowJournalEvidence(context.journal, context.journalWarningCount),
 	];
 	if (toolError) {
 		const text = typeof content === "string"
@@ -264,9 +286,248 @@ export function formatWorkflowFailureEvidence(
 				}).filter(Boolean).join(" ")
 				: "";
 		const excerpt = text.split(/\r?\n/).find((line) => line.trim().length > 0) ?? "";
-		parts.push(`errorExcerpt=${boundedDiagnosticText(excerpt, selectedApiKey, MAX_WORKFLOW_ERROR_EXCERPT_CHARS) || "none"}`);
+		parts.push(`errorExcerpt=${redactNativeTaskFailureSummary(
+			excerpt,
+			messages,
+			selectedApiKey,
+			context.workflowTaskId,
+			context.journal,
+		) || "none"}`);
 	}
 	return boundedDiagnosticText(`Workflow failure evidence: ${parts.join("; ")}`, selectedApiKey, MAX_WORKFLOW_FAILURE_EVIDENCE_CHARS);
+}
+
+function formatWorkflowTaskFailureEvidence(
+	messages: readonly unknown[],
+	selectedApiKey: string | undefined,
+	workflowTaskId: string | undefined,
+	journal: WorkflowJournalMetadata | undefined,
+): string {
+	const eventCounts = new Map<string, number>(WORKFLOW_TASK_EVENT_TYPES.map((type) => [type, 0]));
+	const taskTypes = new Map<string, number>(
+		[...SAFE_WORKFLOW_TASK_TYPES, "other", "missing", "invalid"].map((type) => [type, 0] as const),
+	);
+	const labelShapes = new Map<string, number>();
+	const parentShapes = new Map<string, number>();
+	const expectedLabelMatches = new Map<string, number>(Object.keys(WORKFLOW_AGENT_LABELS).map((label) => [label, 0]));
+	const terminalStatuses = new Map<string, number>([
+		...WORKFLOW_TERMINAL_STATUSES.map((status) => [status, 0] as const),
+		["other", 0],
+	]);
+	const starts: Record<string, unknown>[] = [];
+	const workflowTaskIds = new Set<string>();
+	const taskNotifications: Record<string, unknown>[] = [];
+	let workflowTaskStartsWithoutId = 0;
+
+	for (const message of messages) {
+		const record = asRecord(message);
+		if (record?.type !== "system" || typeof record.subtype !== "string") continue;
+		if (eventCounts.has(record.subtype)) {
+			eventCounts.set(record.subtype, (eventCounts.get(record.subtype) ?? 0) + 1);
+		}
+		if (record.subtype === "task_started") {
+			starts.push(record);
+			const rawTaskType = record.task_type;
+			const taskType = typeof rawTaskType !== "string"
+				? rawTaskType === undefined ? "missing" : "invalid"
+				: SAFE_WORKFLOW_TASK_TYPES.has(rawTaskType) ? rawTaskType : "other";
+			taskTypes.set(taskType, (taskTypes.get(taskType) ?? 0) + 1);
+			incrementCount(labelShapes, Object.hasOwn(record, "label") ? diagnosticType(record.label) : "missing");
+			incrementCount(
+				parentShapes,
+				Object.hasOwn(record, "parent_task_id") ? diagnosticType(record.parent_task_id) : "missing",
+			);
+
+			const labelValues = [record.label, record.description, record.prompt]
+				.filter((value): value is string => typeof value === "string");
+			let expectedLabelMatched = false;
+			for (const [name, label] of Object.entries(WORKFLOW_AGENT_LABELS)) {
+				if (labelValues.some((value) => value.includes(label))) {
+					expectedLabelMatched = true;
+					expectedLabelMatches.set(name, (expectedLabelMatches.get(name) ?? 0) + 1);
+				}
+			}
+			const workflowParentMatched = workflowTaskId !== undefined && record.parent_task_id === workflowTaskId;
+			if (record.task_type === "local_agent" || expectedLabelMatched || workflowParentMatched) {
+				const taskId = asString(record.task_id);
+				if (taskId) workflowTaskIds.add(taskId);
+				else workflowTaskStartsWithoutId += 1;
+			}
+		}
+		if (record.subtype === "task_notification") {
+			taskNotifications.push(record);
+			const status = typeof record.status === "string" && terminalStatuses.has(record.status)
+				? record.status
+				: "other";
+			terminalStatuses.set(status, (terminalStatuses.get(status) ?? 0) + 1);
+		}
+	}
+
+	const parentMatches = workflowTaskId === undefined
+		? "unavailable"
+		: String(starts.filter((record) => record.parent_task_id === workflowTaskId).length);
+	const workflowTaskTerminalStatuses = new Map<string, number>([
+		...WORKFLOW_TERMINAL_STATUSES.map((status) => [status, 0] as const),
+		["other", 0],
+	]);
+	for (const notification of taskNotifications) {
+		if (!workflowTaskIds.has(asString(notification.task_id) ?? "")) continue;
+		const status = typeof notification.status === "string" && workflowTaskTerminalStatuses.has(notification.status)
+			? notification.status
+			: "other";
+		workflowTaskTerminalStatuses.set(status, (workflowTaskTerminalStatuses.get(status) ?? 0) + 1);
+	}
+	const counts = (values: Map<string, number>, includeZero = false) => [...values]
+		.filter(([, count]) => includeZero || count > 0)
+		.map(([name, count]) => `${name}:${count}`)
+		.join(",") || "none";
+	const taskFailureSummary = findNativeWorkflowTaskFailureSummary(messages, selectedApiKey, workflowTaskId, journal);
+	return [
+		`taskEvents=[${counts(eventCounts, true)}]`,
+		`taskTypes=[${counts(taskTypes, true)}]`,
+		`taskLabelShapes=[${counts(labelShapes)}]`,
+		`taskParentShapes=[${counts(parentShapes)}]`,
+		`expectedLabels=[${counts(expectedLabelMatches, true)}]`,
+		`workflowParentMatches=${parentMatches}`,
+		`workflowTaskStarts=${workflowTaskIds.size};withoutId=${workflowTaskStartsWithoutId}`,
+		`taskTerminalStatuses=[${counts(terminalStatuses, true)}]`,
+		`workflowTaskTerminalStatuses=[${counts(workflowTaskTerminalStatuses, true)}]`,
+		`nativeTaskFailureSummary=${taskFailureSummary}`,
+	].join("; ");
+}
+
+function findNativeWorkflowTaskFailureSummary(
+	messages: readonly unknown[],
+	selectedApiKey: string | undefined,
+	workflowTaskId: string | undefined,
+	journal: WorkflowJournalMetadata | undefined,
+): string {
+	let updateError: string | undefined;
+	let notificationSummary: string | undefined;
+	for (const message of messages) {
+		const record = asRecord(message);
+		if (record?.type !== "system") continue;
+		if (record.subtype === "task_updated") {
+			const patch = asRecord(record.patch);
+			if (patch?.status === "failed" && typeof patch.error === "string") updateError ??= patch.error;
+		}
+		if (record.subtype === "task_notification" && record.status === "failed" && typeof record.summary === "string") {
+			notificationSummary ??= record.summary;
+		}
+	}
+	const summary = updateError ?? notificationSummary;
+	return summary === undefined
+		? "none"
+		: redactNativeTaskFailureSummary(summary, messages, selectedApiKey, workflowTaskId, journal) || "empty";
+}
+
+function redactNativeTaskFailureSummary(
+	value: string,
+	messages: readonly unknown[],
+	selectedApiKey: string | undefined,
+	workflowTaskId: string | undefined,
+	journal: WorkflowJournalMetadata | undefined,
+): string {
+	const sensitiveValues = new Set<string>();
+	if (workflowTaskId) sensitiveValues.add(workflowTaskId);
+	const identifierFields = [
+		"task_id",
+		"parent_task_id",
+		"run_id",
+		"session_id",
+		"uuid",
+		"tool_use_id",
+		"taskId",
+		"runId",
+	];
+	for (const message of messages) {
+		const record = asRecord(message);
+		if (!record) continue;
+		for (const field of identifierFields) {
+			const identifier = asString(record[field]);
+			if (identifier) sensitiveValues.add(identifier);
+		}
+		if (record.type === "system" && record.subtype === "task_started") {
+			for (const field of ["prompt", "description"]) {
+				const prompt = asString(record[field]);
+				if (prompt) sensitiveValues.add(prompt);
+			}
+		}
+		const nestedResult = asRecord(record.tool_use_result);
+		for (const field of ["taskId", "runId", "transcriptDir"]) {
+			const sensitiveValue = asString(nestedResult?.[field]);
+			if (sensitiveValue) sensitiveValues.add(sensitiveValue);
+		}
+		const body = asRecord(record.message);
+		if (body && typeof body.content === "string") sensitiveValues.add(body.content);
+		if (Array.isArray(body?.content)) {
+			for (const blockValue of body.content) {
+				const block = asRecord(blockValue);
+				for (const field of ["id", "tool_use_id"]) {
+					const identifier = asString(block?.[field]);
+					if (identifier) sensitiveValues.add(identifier);
+				}
+				if (record.type === "user" && block?.type === "text" && typeof block.text === "string") {
+					sensitiveValues.add(block.text);
+				}
+			}
+		}
+	}
+	for (const record of journal?.records ?? []) {
+		for (const identifier of [record.id, record.key, record.agentId, record.taskId]) {
+			if (identifier) sensitiveValues.add(identifier);
+		}
+	}
+
+	let redacted = value;
+	for (const sensitiveValue of [...sensitiveValues].sort((left, right) => right.length - left.length)) {
+		if (sensitiveValue.length > 0) redacted = redacted.split(sensitiveValue).join("[redacted]");
+	}
+	redacted = redacted
+		.replace(/\bBearer\s+\S+/gi, "Bearer [redacted credential]")
+		.replace(/\b(?:sk-ant-|sk-)[A-Za-z0-9_-]{8,}\b/g, "[redacted credential]")
+		.replace(/(?:[A-Za-z]:\\|\\\\)[^\s"'`<>|,:;]*/g, "[redacted path]")
+		.replace(/~[\\/][^\s"'`<>|,:;]*/g, "[redacted path]")
+		.replace(/\/(?:[^\s"'`<>|,:;]+\/)*[^\s"'`<>|,:;]*/g, "[redacted path]")
+		.replace(/\b(?:[\w.-]+\/)+[\w.-]+\b/g, "[redacted path]")
+		.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "[redacted id]")
+		.replace(/\b((?:task|run|session|agent)[_-]?id)\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted id]");
+	return boundedDiagnosticText(redacted, selectedApiKey, MAX_WORKFLOW_ERROR_EXCERPT_CHARS);
+}
+
+function formatWorkflowJournalEvidence(
+	journal: WorkflowJournalMetadata | undefined,
+	warningCount: number | undefined,
+): string {
+	if (!journal) return "workflowJournal=unavailable";
+	const typeCounts = new Map<string, number>(["launched", "started", "result", "failed"].map((type) => [type, 0]));
+	const expectedPhaseStarted = journal.records.filter(
+		(record) => record.type === "started" && record.phase === "Parallel fixture probes",
+	).length;
+	const expectedLabelCounts = new Map<string, number>(Object.keys(WORKFLOW_AGENT_LABELS).map((label) => [label, 0]));
+	for (const record of journal.records) {
+		typeCounts.set(record.type, (typeCounts.get(record.type) ?? 0) + 1);
+		for (const [name, label] of Object.entries(WORKFLOW_AGENT_LABELS)) {
+			if (record.type === "started" && record.label === label) {
+				expectedLabelCounts.set(name, (expectedLabelCounts.get(name) ?? 0) + 1);
+			}
+		}
+	}
+	const counts = (values: Map<string, number>, includeZero = false) => [...values]
+		.filter(([, count]) => includeZero || count > 0)
+		.map(([name, count]) => `${name}:${count}`)
+		.join(",") || "none";
+	return [
+		`workflowJournalRecords=${journal.records.length}`,
+		`workflowJournalTypes=[${counts(typeCounts, true)}]`,
+		`expectedPhaseStarted=${expectedPhaseStarted}`,
+		`workflowJournalLabels=[${counts(expectedLabelCounts, true)}]`,
+		`workflowJournalWarnings=${warningCount ?? "unknown"}`,
+	].join("; ");
+}
+
+function incrementCount(counts: Map<string, number>, key: string): void {
+	counts.set(key, (counts.get(key) ?? 0) + 1);
 }
 
 function findDiagnosticWorkflowUse(
@@ -453,6 +714,9 @@ async function main(): Promise<void> {
 	let sessionId: string | undefined;
 	let workflowTaskId: string | undefined;
 	let workflowRunId: string | undefined;
+	let validatedWorkflowJournalRef: WorkflowReference | undefined;
+	let workflowJournal: WorkflowJournalMetadata | undefined;
+	let workflowJournalWarningCount: number | undefined;
 
 	let scenarioFailed = false;
 	let scenarioFailure: unknown;
@@ -566,7 +830,7 @@ async function main(): Promise<void> {
 		workflowTaskId = workflowOutput.taskId;
 		workflowRunId = workflowOutput.runId;
 
-		const journalRef = {
+		const journalRef: WorkflowReference = {
 			sessionId,
 			output: workflowOutput,
 			configRoot: fixture.configRoot,
@@ -578,6 +842,8 @@ async function main(): Promise<void> {
 			deadline,
 			session,
 		);
+		validatedWorkflowJournalRef = journalRef;
+		workflowJournal = journal;
 		const startedAgentRecords = journal.records.filter(
 			(record) => record.type === "started" && record.phase === "Parallel fixture probes",
 		);
@@ -790,7 +1056,21 @@ async function main(): Promise<void> {
 	} catch (error) {
 		scenarioFailed = true;
 		scenarioFailure = error;
-		console.error(formatWorkflowFailureEvidence(initialEvents.messages, process.env.ANTHROPIC_API_KEY));
+		if (validatedWorkflowJournalRef) {
+			try {
+				const page = await readWorkflowJournal(validatedWorkflowJournalRef);
+				workflowJournal = page.metadata;
+				workflowJournalWarningCount = page.warnings.length;
+			} catch {
+				workflowJournalWarningCount = undefined;
+			}
+		}
+		console.error(formatWorkflowFailureEvidence(
+			initialEvents.messages,
+			process.env.ANTHROPIC_API_KEY,
+			SKILL_NAME,
+			{ workflowTaskId, journal: workflowJournal, journalWarningCount: workflowJournalWarningCount },
+		));
 		throw error;
 	} finally {
 		const closeOutcomes = await Promise.all(sessions.reverse().map(async (session) => {

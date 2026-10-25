@@ -7,6 +7,7 @@ const SECRET_PROMPT = "PRIVATE_MODEL_PROMPT_DO_NOT_PRINT";
 const SECRET_PATH = "/private/synthetic/transcript/path";
 
 type EvidenceFormatter = (messages: readonly unknown[], selectedApiKey?: string, fixtureName?: string) => string;
+type ExtendedEvidenceFormatter = typeof import("./live.js")["formatWorkflowFailureEvidence"];
 type WorkflowOutputProbe = (
 	messages: readonly unknown[],
 	workflowToolUseId: string,
@@ -99,6 +100,111 @@ test("reports structured launch shape without launch identifiers or transcript p
 	assert.equal(summary.includes(runId), false);
 	assert.equal(summary.includes(SECRET_PATH), false);
 	assert.equal(summary.includes(SECRET_PROMPT), false);
+});
+
+test("projects bounded task and journal evidence with redaction", async () => {
+	const key = "offline-synthetic-task-error-api-key";
+	const workflowTaskId = "private-workflow-task-id";
+	const stoppedTaskId = "private-stopped-task-id";
+	const continuedTaskId = "private-continued-task-id";
+	const journalAgentId = "private-journal-agent-id";
+	const prompt = "PRIVATE_MODEL_PROMPT_DO_NOT_PRINT";
+	const summary = (await import("./live.js")) as unknown as {
+		formatWorkflowFailureEvidence?: ExtendedEvidenceFormatter;
+	};
+	assert.equal(typeof summary.formatWorkflowFailureEvidence, "function");
+
+	const evidence = summary.formatWorkflowFailureEvidence!([
+		workflowUse(),
+		{
+			type: "system",
+			subtype: "task_started",
+			task_id: stoppedTaskId,
+			task_type: "local_agent",
+			label: "phi-live-agent-stopped",
+			description: "fixture worker",
+			prompt,
+			parent_task_id: workflowTaskId,
+		},
+		{
+			type: "system",
+			subtype: "task_started",
+			task_id: continuedTaskId,
+			task_type: "/private/synthetic/task-type",
+			label: { name: "phi-live-agent-continued" },
+			description: "fixture sibling",
+			parent_task_id: workflowTaskId,
+		},
+		{ type: "system", subtype: "task_notification", task_id: stoppedTaskId, status: "failed", summary: "failed" },
+		{ type: "system", subtype: "task_notification", task_id: continuedTaskId, status: "stopped", summary: "stopped" },
+		{
+			type: "system",
+			subtype: "task_updated",
+			task_id: stoppedTaskId,
+			patch: {
+				status: "failed",
+				error: [
+					`Failed after ${prompt}; see /private/synthetic/transcript/path for task ${stoppedTaskId}`,
+					`journal agent ${journalAgentId}, and ${key}`,
+				].join(" "),
+			},
+		},
+		{ type: "system", subtype: "task_progress", task_id: continuedTaskId, description: "working" },
+		{
+			type: "system",
+			subtype: "background_tasks_changed",
+			tasks: [
+				{ task_id: stoppedTaskId, task_type: "local_agent" },
+				{ task_id: continuedTaskId, task_type: "/private/synthetic/task-type" },
+			],
+		},
+	], key, FIXTURE_NAME, {
+		workflowTaskId,
+		journal: {
+			records: [
+				{ type: "launched" },
+				{
+					type: "started",
+					id: "private-journal-event-id",
+					agentId: journalAgentId,
+					phase: "Parallel fixture probes",
+					label: "phi-live-agent-stopped",
+				},
+				{
+					type: "started",
+					taskId: "private-journal-task-id",
+					phase: "Parallel fixture probes",
+					label: "phi-live-agent-continued",
+				},
+				{ type: "failed", phase: "Private phase must not print" },
+			],
+		},
+	});
+
+	assert.match(evidence, /taskEvents=.*task_started:2/);
+	assert.match(evidence, /taskTypes=.*local_agent:1.*other:1/);
+	assert.match(evidence, /expectedLabels=.*stopped:1.*continued:0/);
+	assert.match(evidence, /workflowParentMatches=2/);
+	assert.match(evidence, /workflowTaskStarts=2;withoutId=0/);
+	assert.match(evidence, /taskTerminalStatuses=.*failed:1.*stopped:1/);
+	assert.match(evidence, /workflowTaskTerminalStatuses=.*failed:1.*stopped:1/);
+	assert.match(evidence, /nativeTaskFailureSummary=/);
+	assert.match(evidence, /workflowJournalRecords=.*started:2.*expectedPhaseStarted=2/);
+	assert.match(evidence, /workflowJournalLabels=\[stopped:1,continued:1\]/);
+	for (const secret of [
+		key,
+		workflowTaskId,
+		stoppedTaskId,
+		continuedTaskId,
+		journalAgentId,
+		prompt,
+		SECRET_PATH,
+		"Private phase must not print",
+	]) {
+		assert.equal(evidence.includes(secret), false, `failure evidence must not include ${secret}`);
+	}
+	assert.ok(evidence.length <= 1_900, "failure evidence must keep the existing total bound");
+	assert.doesNotMatch(evidence, /[\u0000-\u001f\u007f-\u009f]/);
 });
 
 test("ignores an unrelated tool result and its structured payload", async () => {
