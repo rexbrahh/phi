@@ -135,6 +135,7 @@ class PTYChild:
 		os.set_blocking(self.master, False)
 		self.stopped = False
 		self.node_exit_code: int | None = None
+		self.application_reaped = False
 		self.termination_attempts: list[dict[str, object]] = []
 		self.start_gate.write_text("start\n", encoding="utf-8")
 		deadline = time.monotonic() + TIMEOUT
@@ -150,7 +151,15 @@ class PTYChild:
 			output.write(f"{json.dumps({'event': event, **detail})}\n")
 
 	def _supervise(self) -> None:
+		node_pid = -1
+		cleanup_requested = False
+
+		def request_cleanup(_signum: int, _frame: object) -> None:
+			nonlocal cleanup_requested
+			cleanup_requested = True
+
 		try:
+			signal.signal(signal.SIGUSR1, request_cleanup)
 			os.close(self.master)
 			os.setsid()
 			fcntl.ioctl(self.slave, termios.TIOCSCTTY, 0)
@@ -161,6 +170,10 @@ class PTYChild:
 			stopped = False
 			terminal_restored_while_stopped = False
 			while True:
+				if cleanup_requested:
+					_terminate_and_reap(node_pid)
+					self._record_supervisor("application-reaped-after-cleanup-request", pid=node_pid)
+					os._exit(0)
 				status = os.waitid(os.P_PID, node_pid, os.WEXITED | os.WSTOPPED | os.WCONTINUED | os.WNOHANG)
 				if status is not None and status.si_pid:
 					if status.si_code == os.CLD_STOPPED:
@@ -190,7 +203,15 @@ class PTYChild:
 				time.sleep(0.01)
 			os._exit(0)
 		except BaseException as error:
-			self._record_supervisor("supervisor-error", message=str(error))
+			child_cleanup_error: str | None = None
+			if node_pid > 0:
+				try:
+					_terminate_and_reap(node_pid)
+				except BaseException as cleanup_error:
+					child_cleanup_error = f"{type(cleanup_error).__name__}: {cleanup_error}"
+				else:
+					self._record_supervisor("application-reaped-after-supervisor-error", pid=node_pid)
+			self._record_supervisor("supervisor-error", message=str(error), childCleanupError=child_cleanup_error)
 			os._exit(127)
 
 	def _exec_node(self) -> None:
@@ -290,6 +311,11 @@ class PTYChild:
 				self.stopped = False
 			elif event.get("event") == "process-exited":
 				self.node_exit_code = int(event["code"])
+			elif event.get("event") in {
+				"application-reaped-after-cleanup-request",
+				"application-reaped-after-supervisor-error",
+			}:
+				self.application_reaped = True
 
 	def pump(self, timeout: float = 0.02) -> None:
 		try:
@@ -446,6 +472,7 @@ class PTYChild:
 			"processSnapshotError": process_error,
 			"supervisorEvents": list(self.events),
 			"nodeExitCode": self.node_exit_code,
+			"applicationReaped": self.application_reaped,
 			"terminalMode": mode,
 			"terminalExactlyRestored": terminal_restored,
 			"outputByteCount": len(self.output),
@@ -511,6 +538,19 @@ class PTYChild:
 			self.finish_gate.write_text("finish\n", encoding="utf-8")
 		except OSError as error:
 			issues.append(f"could not release owned PTY supervisor {self.supervisor_pid}: {error}")
+		try:
+			self.pump(0)
+		except BaseException as error:
+			issues.append(f"supervisor event polling failed before release: {type(error).__name__}: {error}")
+		if self.node_exit_code is None and not self.application_reaped:
+			try:
+				os.kill(self.supervisor_pid, signal.SIGUSR1)
+			except ProcessLookupError:
+				issues.append(f"owned PTY supervisor {self.supervisor_pid} was absent before its application-reap request")
+			except OSError as error:
+				issues.append(f"application-reap request to owned PTY supervisor {self.supervisor_pid} failed: {error}")
+			else:
+				self.termination_attempts.append({"role": "supervisor", "pid": self.supervisor_pid, "signal": "SIGUSR1", "purpose": "request application reap", "sent": True})
 		deadline = time.monotonic() + 2.0
 		while time.monotonic() < deadline:
 			try:
@@ -524,12 +564,14 @@ class PTYChild:
 			except InterruptedError:
 				continue
 			except ChildProcessError:
+				if self.node_exit_code is None and not self.application_reaped:
+					issues.append(f"owned PTY supervisor {self.supervisor_pid} was reaped without an observed application exit or reap marker")
 				return issues
 			if pid == self.supervisor_pid:
 				if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
 					issues.append(f"owned PTY supervisor {self.supervisor_pid} exited with wait status {status}")
-				if self.node_exit_code is None:
-					issues.append(f"owned PTY supervisor {self.supervisor_pid} exited without an observed application exit marker")
+				if self.node_exit_code is None and not self.application_reaped:
+					issues.append(f"owned PTY supervisor {self.supervisor_pid} exited without an observed application exit or reap marker")
 				return issues
 			time.sleep(0.01)
 		try:
@@ -540,6 +582,8 @@ class PTYChild:
 			issues.append(f"emergency SIGKILL to owned PTY supervisor {self.supervisor_pid} failed: {error}")
 		else:
 			issues.append(f"emergency SIGKILL was sent to owned PTY supervisor {self.supervisor_pid}")
+		if self.node_exit_code is None and not self.application_reaped:
+			issues.append(f"application exit or reap remained unobserved before emergency supervisor termination; application PID={getattr(self, 'pid', None)}")
 		while True:
 			try:
 				pid, status = os.waitpid(self.supervisor_pid, 0)

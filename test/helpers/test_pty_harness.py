@@ -38,6 +38,30 @@ class SupervisorSetupTests(unittest.TestCase):
 		self.assertFalse(child.termination_attempts[-1]["exitObserved"])
 		self.assertEqual(child.termination_attempts[-1]["pid"], 4242)
 
+	def test_release_requests_supervisor_to_reap_owned_application_child(self) -> None:
+		with tempfile.TemporaryDirectory(prefix="pty-supervisor-reap-") as temporary:
+			root = Path(temporary)
+			application = root / "wait-for-cleanup.js"
+			application.write_text("process.on('SIGTERM', () => {});\nsetInterval(() => {}, 1000);\n", encoding="utf-8")
+			case_directory = root / "case"
+			case_directory.mkdir()
+			child = pty_harness.PTYChild("cleanup-request", case_directory, application=application)
+			try:
+				issues = child.release_supervisor()
+				self.assertEqual(issues, [])
+				self.assertTrue(child.application_reaped)
+				self.assertIsNone(child.node_exit_code)
+				self.assertTrue(any(
+					event.get("event") == "application-reaped-after-cleanup-request"
+					for event in child.events
+				))
+			finally:
+				for descriptor in (child.master, child.slave):
+					try:
+						os.close(descriptor)
+					except OSError:
+						pass
+
 	def test_setpgid_eacces_requires_expected_child_group(self) -> None:
 		child_pid = 4242
 		with mock.patch.object(
