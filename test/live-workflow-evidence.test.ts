@@ -7,6 +7,10 @@ const SECRET_PROMPT = "PRIVATE_MODEL_PROMPT_DO_NOT_PRINT";
 const SECRET_PATH = "/private/synthetic/transcript/path";
 
 type EvidenceFormatter = (messages: readonly unknown[], selectedApiKey?: string, fixtureName?: string) => string;
+type WorkflowOutputProbe = (
+	messages: readonly unknown[],
+	workflowToolUseId: string,
+) => Record<string, unknown> | undefined;
 
 async function formatEvidence(messages: readonly unknown[], selectedApiKey?: string): Promise<string> {
 	const harness = await import("./live.js") as unknown as { formatWorkflowFailureEvidence?: EvidenceFormatter };
@@ -116,6 +120,61 @@ test("ignores an unrelated tool result and its structured payload", async () => 
 	assert.equal(summary.includes(SECRET_PROMPT), false);
 	assert.equal(summary.includes("private-unrelated-status"), false);
 	assert.equal(summary.includes("private-unrelated-task"), false);
+});
+
+test("launch wait fails on a correlated tool error and preserves pending and successful results", async () => {
+	const harness = await import("./live.js") as unknown as { findWorkflowOutput?: WorkflowOutputProbe };
+	assert.equal(typeof harness.findWorkflowOutput, "function", "Workflow output probe must exist");
+	const findOutput = harness.findWorkflowOutput!;
+
+	assert.equal(findOutput([workflowUse()], WORKFLOW_ID), undefined, "a pending launch must keep waiting");
+	assert.equal(findOutput([
+		workflowUse(),
+		{
+			type: "user",
+			message: {
+				content: [{ type: "tool_result", tool_use_id: "unrelated-workflow-id", is_error: true, content: [] }],
+			},
+		},
+	], WORKFLOW_ID), undefined, "an unrelated error must not fail the launch wait");
+
+	const successfulOutput = {
+		status: "async_launched",
+		taskId: "fixture-workflow-task",
+		workflowName: FIXTURE_NAME,
+		runId: "fixture-workflow-run",
+		transcriptDir: SECRET_PATH,
+	};
+	const output = findOutput([
+		workflowUse(),
+		{
+			type: "user",
+			message: { content: [{ type: "tool_result", tool_use_id: WORKFLOW_ID, is_error: false, content: [] }] },
+			tool_use_result: successfulOutput,
+		},
+	], WORKFLOW_ID);
+	assert.deepEqual(output, successfulOutput);
+
+	assert.throws(() => findOutput([
+		workflowUse(),
+		{
+			type: "user",
+			message: {
+				content: [{
+					type: "tool_result",
+					tool_use_id: WORKFLOW_ID,
+					is_error: true,
+					content: [{ type: "text", text: SECRET_PROMPT }],
+				}],
+			},
+			tool_use_result: successfulOutput,
+		},
+	], WORKFLOW_ID), (error: unknown) => {
+		assert.ok(error instanceof Error);
+		assert.equal(error.message, "Native Workflow launch returned an error result.");
+		assert.equal(error.message.includes(SECRET_PROMPT), false);
+		return true;
+	});
 });
 
 test("reports only the latest result subtype, turn count, and model names", async () => {

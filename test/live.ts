@@ -520,7 +520,7 @@ async function main(): Promise<void> {
 		assert.ok(isNamedFixtureWorkflow(workflowCall.input, SKILL_NAME));
 
 		const workflowOutput = await waitFor(
-			() => findWorkflowOutput(events.messages),
+			() => findWorkflowOutput(events.messages, workflowCall.id),
 			events,
 			deadline,
 			"native Workflow launch result",
@@ -1075,7 +1075,14 @@ function findToolUse(
 	return findToolUses(messages, name).find((use) => predicate(use.input));
 }
 
-function findWorkflowOutput(messages: SDKMessage[]): WorkflowOutput | undefined {
+export function findWorkflowOutput(
+	messages: readonly unknown[],
+	workflowToolUseId: string,
+): WorkflowOutput | undefined {
+	const correlatedResult = findCorrelatedWorkflowResult(messages, workflowToolUseId);
+	if (correlatedResult?.block.is_error === true) {
+		throw new Error("Native Workflow launch returned an error result.");
+	}
 	for (const message of messages) {
 		const record = asRecord(message);
 		const output = asRecord(record?.tool_use_result);
