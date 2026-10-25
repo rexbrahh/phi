@@ -81,6 +81,11 @@ async function run(): Promise<void> {
 	const controller = scenario === "escape" || scenario === "dialog" || scenario === "repeat-interrupt-exit"
 		? new AppController(launch, dependencies)
 		: undefined;
+	const exitConfirmation = controller
+		? (controller as unknown as {
+			exitConfirmation: { visible: boolean };
+		}).exitConfirmation
+		: undefined;
 	const running = controller ? controller.run() : runApp(launch, dependencies);
 	await waitFor(() => Boolean(process.stdin.isRaw), "ProcessTerminal raw mode");
 	record("terminal-raw", { isRaw: process.stdin.isRaw, columns: terminal.columns, rows: terminal.rows });
@@ -95,6 +100,7 @@ async function run(): Promise<void> {
 	let observedKittyProtocol = false;
 	let observedDraft = controller?.views.editor.getExpandedText();
 	let observedDialogId: string | undefined;
+	let observedExitConfirmation = exitConfirmation?.visible;
 	let observedSize = `${terminal.columns}x${terminal.rows}`;
 	let madeIdleAfterInterrupt = false;
 	const watcher = setInterval(() => {
@@ -145,6 +151,10 @@ async function run(): Promise<void> {
 				observedDialogId = pending.requestId;
 				record("dialog-open", { requestId: pending.requestId, kind: pending.kind });
 			}
+		}
+		if (exitConfirmation && exitConfirmation.visible !== observedExitConfirmation) {
+			observedExitConfirmation = exitConfirmation.visible;
+			record("exit-confirmation", { visible: observedExitConfirmation });
 		}
 	}, 5);
 
