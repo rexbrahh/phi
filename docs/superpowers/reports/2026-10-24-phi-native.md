@@ -24,7 +24,7 @@ The outer 240-second watchdog did not fire. The fixture observed SDK query termi
 | --- | --- | --- |
 | Native API route and key source | Their assertions precede the reached Workflow wait. | Passed for the initial session. |
 | Fixture skill discovery | The initialized-command assertion precedes the reached wait. | Passed. Skill execution was not yet asserted. |
-| Foreground Bash and background control | The exact Bash call, successful background request, and task-start assertions precede the reached wait. | Passed for the synthetic command. |
+| Bash background control and named Workflow request | Exact-call, task/background, and named Workflow-input assertions precede the reached wait. | Passed for the synthetic command and exact named tool request. |
 | Workflow launch | The required launch result did not arrive before the deadline. | Failed. The cause remains unverified. |
 | Remaining native checks | Later result/model, edit/hook, parallel-child/phase, stop, continuation, resume, and checkpoint assertions were not reached. | Incomplete. |
 
@@ -36,6 +36,10 @@ All four source commits have signature headers. Each changes fewer than 400 adde
 
 The SDK documents its tool list at turn start, so pre-prompt tool availability was not established. The native failure log preserves the wait label, observed cost, and termination result. It does not preserve the original model output or full tool events. Those missing observations limit diagnosis.
 
-An offline investigation follows. It must distinguish a fixture/parser issue from an unavailable tool or model behavior. It must retain the required native assertions. Ghostty acceptance also remains pending because the user has not opened Phi yet.
+The offline investigation found no proven request or result-projection mismatch in the pinned SDK types. The exact named Workflow request was observed, but its result was not retained. No causal production fix is justified by this evidence.
+
+Follow-up source `1982fd5f52f8d42d91b95e403f69c1deb2ab86cf` adds one bounded failure-only Workflow summary. It correlates the result internally, reports safe shape/status/model metadata, and redacts any short tool-error excerpt. It excludes prompts and identifier/path values. Build, typecheck, and 15 focused offline tests passed. No second native attempt ran during this work.
+
+The next proposed run uses the same cheapest model with a $0.02 SDK budget to capture the missing result evidence. It remains unrun. Required native assertions remain intact. Ghostty acceptance also remains pending because the user has not opened Phi yet.
 
 Primary references: [Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing), [Haiku 5.5](https://platform.claude.com/docs/en/models/haiku-5-5/overview), [SDK dynamic workflows](https://platform.claude.com/cookbook/claude-agent-sdk-08-dynamic-workflows), and [runtime environment variables](https://code.claude.com/docs/en/env-vars).
