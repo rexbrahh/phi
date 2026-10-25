@@ -57,7 +57,7 @@ set tiffData to image's TIFFRepresentation()
 if tiffData is missing value then return ""
 set bitmap to current application's NSBitmapImageRep's imageRepWithData:tiffData
 if bitmap is missing value then return ""
-set pngData to bitmap's representationUsingType:(current application's NSBitmapImageFileTypePNG) properties:(current application's NSDictionary's dictionary())
+set pngData to bitmap's representationUsingType:(current application's NSBitmapImageFileTypePNG) |properties|:(current application's NSDictionary's dictionary())
 if pngData is missing value then return ""
 return (pngData's base64EncodedStringWithOptions:0) as text`;
 

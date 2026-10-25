@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -257,6 +258,25 @@ test("clipboard image reading uses injected osascript and returns a typed image 
 	assert.match(requests[0]?.args[1] ?? "", /NSPasteboard/);
 	assert.equal(requests[0]?.stdin, undefined);
 	assert.equal(requests[0]?.maxOutputBytes, 6_666_670);
+});
+
+test("clipboard image AppleScript compiles without reading the clipboard", { skip: process.platform !== "darwin" }, async () => {
+	let script: string | undefined;
+	const clipboard = createClipboardActions(async (request) => {
+		script = request.args[1];
+		return Buffer.from("\n");
+	});
+	await clipboard.readClipboardImage();
+	const capturedScript = script;
+	if (capturedScript === undefined) throw new Error("Clipboard command did not provide an AppleScript.");
+
+	await withTemporaryDirectory(async (directory) => {
+		const scriptPath = join(directory, "clipboard-image.applescript");
+		const compiledPath = join(directory, "clipboard-image.scpt");
+		await writeFile(scriptPath, capturedScript);
+		const result = spawnSync("/usr/bin/osacompile", ["-o", compiledPath, scriptPath], { encoding: "utf8" });
+		assert.equal(result.status, 0, result.stderr || result.error?.message || "osacompile failed");
+	});
 });
 
 test("clipboard image reading forwards its cancellation signal", async () => {
