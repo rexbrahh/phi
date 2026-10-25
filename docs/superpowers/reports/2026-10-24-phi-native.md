@@ -62,4 +62,30 @@ Source `24ca1944649f98985caf215a5be3e0aa75f0823b` preserves all allow/deny rules
 
 Required native assertions and Ghostty acceptance remain open. The next diagnostic run requires further authorization.
 
+## Third authorized attempt
+
+The user authorized two further tests with SDK budgets totaling $0.05: a $0.02 denial probe, then one $0.03 verification only after a proven offline fix.
+
+The denial probe used source `f7c444ad83ef14532280b37923fafb58dfe301d3` from 00:33:57 to 00:36:57 UTC on 2026-10-25. It exited with status 1 and confirmed SDK query termination. The outer watchdog did not fire.
+
+The assistant request still contained only the expected `name`. The permission callback now reported:
+
+> Workflow keys=[name,script] reason=workflow-execution-override
+
+The fixture treated the added `script` field as an execution override. Its actual value was not logged. The next offline task must verify the SDK's deterministic script normalization before changing validation. Arbitrary inline code and path/resume overrides must remain denied.
+
+Reported main-session model usage contained only `claude-haiku-5-5`. The latest observed SDK cost was **$0.0049**. The three reported estimates sum to **$0.0151**, not a billing statement or remaining balance.
+
+The $0.02 probe allocation is consumed. The user-approved $0.03 verification remains unused and conditional on a proven offline correction. No other paid attempt is authorized.
+
+## Bounded offline correction
+
+Source commits `22d1a23` and `0ceb640` replace the field-presence rejection with a value check. The permission callback requires the exact fixture name. It permits an absent script, an inert empty string, or a byte-for-byte match to the immutable fixture script captured before Query creation. Different scripts, unknown keys, path overrides, and resume overrides remain denied. The raw model-request assertion still requires only the named fixture.
+
+This correction does not claim that the observed SDK value was empty. Its runtime value was not retained. The offline contract permits only representations with the intended fixed fixture effects, independent of private serialization details.
+
+Correlated Workflow tool errors now fail the launch wait promptly with static text. Pending and successful asynchronous results retain their prior handling. This removes the full deadline wait after a completed tool failure.
+
+Build, typecheck, and 18 focused checks passed. Tests cover accepted fixed-script forms, rejected overrides, callback behavior, pending/successful launches, and prompt failure on a correlated error. Both code commits are signed and below 400 changed lines. Native compatibility remains for the reserved $0.03 verification.
+
 Primary references: [Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing), [Haiku 5.5](https://platform.claude.com/docs/en/models/haiku-5-5/overview), [SDK dynamic workflows](https://platform.claude.com/cookbook/claude-agent-sdk-08-dynamic-workflows), and [runtime environment variables](https://code.claude.com/docs/en/env-vars).
