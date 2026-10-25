@@ -90,7 +90,7 @@ class WidthSafeEditor implements Component {
 	constructor(private readonly editor: Editor) {}
 
 	render(width: number): string[] {
-		return fitLines(this.editor.render(Math.max(3, width)), width);
+		return fitLines(this.editor.render(Math.max(3, width)), width).lines;
 	}
 
 	invalidate(): void {
@@ -99,14 +99,36 @@ class WidthSafeEditor implements Component {
 }
 
 class WidthSafeVStack extends VStack {
+	private fittedLines: FittedLinesCache | undefined;
+
 	override render(width: number): string[] {
-		return fitLines(super.render(width), width);
+		const result = fitLines(super.render(width), width, this.fittedLines);
+		this.fittedLines = result.cache;
+		return result.lines;
 	}
 }
 
-function fitLines(lines: string[], width: number): string[] {
+interface FittedLinesCache {
+	width: number;
+	source: string[];
+	lines: string[];
+}
+
+function fitLines(lines: string[], width: number, previous?: FittedLinesCache): { lines: string[]; cache: FittedLinesCache } {
 	const availableWidth = Math.max(1, width);
-	return lines.map((line) => visibleWidth(line) <= availableWidth ? line : truncateToWidth(line, availableWidth));
+	let fittedLines: string[] | undefined;
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = lines[index] ?? "";
+		const fitted = previous?.width === availableWidth && previous.source[index] === line
+			? previous.lines[index] ?? line
+			: visibleWidth(line) <= availableWidth ? line : truncateToWidth(line, availableWidth);
+		if (fitted !== line) {
+			fittedLines ??= lines.slice();
+			fittedLines[index] = fitted;
+		}
+	}
+	const output = fittedLines ?? lines;
+	return { lines: output, cache: { width: availableWidth, source: lines, lines: output } };
 }
 
 function statusLabel(state: PhiState): string {

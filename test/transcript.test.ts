@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { applySdkMessage, createState, type ToolReceipt } from "../src/state.js";
 import { TranscriptView } from "../src/ui/transcript.js";
 import { assistantMessage, toolResultMessage, toolUseBlock } from "./helpers/sdk-event-core.js";
@@ -25,6 +26,9 @@ test("tool result preview cache keeps one width per receipt, refreshes output, a
 	assert.ok(receipt);
 	assert.ok(wideLines.length <= 16, `wide tool preview rendered ${wideLines.length} lines`);
 	assert.ok(wideLines.some((line) => line.includes("…")), "the wide clipped preview must be marked");
+	const widePreviewLines = wideLines.filter((line) => line.includes("R".repeat(20)));
+	assert.deepEqual(widePreviewLines.map((line) => (line.match(/R+/)?.[0] ?? "").length), [78, 78, 78]);
+	assert.ok(widePreviewLines.every((line) => visibleWidth(line) <= 80));
 	assert.equal(receipt.resultEnvelopeId, result.uuid);
 	assert.equal(receipt.resultPreview?.length, 8_192);
 

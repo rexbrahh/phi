@@ -9,6 +9,12 @@ interface CachedBlock {
 	component: Component;
 }
 
+interface FittedLinesCache {
+	width: number;
+	source: string[];
+	lines: string[];
+}
+
 interface CachedPreview {
 	width: number;
 	source: string;
@@ -27,6 +33,7 @@ const MAX_TOOL_RESULT_DISPLAY_LINES = 4;
 export class TranscriptView implements Component {
 	private readonly renderedBlocks = new Map<string, CachedBlock>();
 	private readonly toolResultPreviews = new WeakMap<ToolReceipt, CachedPreview>();
+	private fittedLines: FittedLinesCache | undefined;
 
 	constructor(private readonly state: PhiState) {}
 
@@ -59,8 +66,10 @@ export class TranscriptView implements Component {
 			if (!currentKeys.has(key)) this.renderedBlocks.delete(key);
 		}
 
-		if (lines.length === 0) return fitLines(new Text("Waiting for a message. Type a prompt below.").render(width), width);
-		return fitLines(lines, width);
+		if (lines.length === 0) lines.push(...new Text("Waiting for a message. Type a prompt below.").render(width));
+		const result = fitLines(lines, width, this.fittedLines);
+		this.fittedLines = result.cache;
+		return result.lines;
 	}
 
 	invalidate(): void {
@@ -141,10 +150,7 @@ export class TranscriptView implements Component {
 		const cached = this.toolResultPreviews.get(receipt);
 		if (cached?.width === width && cached.source === source) return cached.text;
 
-		const rendered = new Text(source, 0, 0).render(Math.max(1, width - 2));
-		const text = rendered.length <= MAX_TOOL_RESULT_DISPLAY_LINES
-			? source
-			: `${rendered.slice(0, MAX_TOOL_RESULT_DISPLAY_LINES - 1).join("\n")}\n…`;
+		const text = renderToolResultPreview(source, Math.max(1, width - 2));
 		this.toolResultPreviews.set(receipt, { width, source, text });
 		return text;
 	}
@@ -167,9 +173,50 @@ export class TranscriptView implements Component {
 	}
 }
 
-function fitLines(lines: string[], width: number): string[] {
+function fitLines(lines: string[], width: number, previous?: FittedLinesCache): { lines: string[]; cache: FittedLinesCache } {
 	const availableWidth = Math.max(1, width);
-	return lines.map((line) => visibleWidth(line) <= availableWidth ? line : truncateToWidth(line, availableWidth));
+	let fittedLines: string[] | undefined;
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = lines[index] ?? "";
+		const fitted = previous?.width === availableWidth && previous.source[index] === line
+			? previous.lines[index] ?? line
+			: visibleWidth(line) <= availableWidth ? line : truncateToWidth(line, availableWidth);
+		if (fitted !== line) {
+			fittedLines ??= lines.slice();
+			fittedLines[index] = fitted;
+		}
+	}
+	const output = fittedLines ?? lines;
+	return { lines: output, cache: { width: availableWidth, source: lines, lines: output } };
+}
+
+function renderToolResultPreview(source: string, width: number): string {
+	if (source.trim() === "") return source;
+
+	const rendered: string[] = [];
+	const sourceLines = source.split("\n");
+	for (let index = 0; index < sourceLines.length; index += 1) {
+		const sourceLine = sourceLines[index] ?? "";
+		const remainingRows = MAX_TOOL_RESULT_DISPLAY_LINES + 1 - rendered.length;
+		if (remainingRows <= 0) return clippedToolResultPreview(rendered);
+
+		const boundedLine = truncateToWidth(sourceLine, (width + 2) * remainingRows, "");
+		const normalizedLine = sourceLine.replace(/\t/g, "   ");
+		const wrappedLines = normalizedLine.trim() === ""
+			? [normalizedLine + " ".repeat(Math.max(0, width - visibleWidth(normalizedLine)))]
+			: new Text(boundedLine, 0, 0).render(width);
+		rendered.push(...wrappedLines.slice(0, remainingRows));
+
+		if (boundedLine !== sourceLine || wrappedLines.length > remainingRows || rendered.length > MAX_TOOL_RESULT_DISPLAY_LINES) {
+			return clippedToolResultPreview(rendered);
+		}
+	}
+
+	return source;
+}
+
+function clippedToolResultPreview(lines: string[]): string {
+	return `${lines.slice(0, MAX_TOOL_RESULT_DISPLAY_LINES - 1).join("\n")}\n…`;
 }
 
 function formatToolReceipt(content: unknown, receipt: ToolReceipt | undefined, preview: string | undefined): string {
