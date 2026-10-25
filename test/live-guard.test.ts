@@ -85,6 +85,30 @@ const runner = join(dirname(fileURLToPath(import.meta.url)), "live.js");
 const workflowScriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../test/live-workflow.js");
 const workflowScript = readFileSync(workflowScriptPath, "utf8");
 
+test("native control hooks append without replacing existing SDK hook callbacks", async () => {
+	type HookMatcher = { matcher?: string; hooks: unknown[] };
+	type HookSet = Record<string, HookMatcher[]>;
+	const live = await import("./live.js") as unknown as {
+		mergeHookMatchers?: (existing: HookSet | undefined, additions: HookSet) => HookSet;
+	};
+	assert.equal(typeof live.mergeHookMatchers, "function", "SDK hook matcher merge helper must exist");
+	const fixtureHook = async () => ({});
+	const controlHook = async () => ({});
+	const existing: HookSet = {
+		PostToolUse: [{ matcher: "Edit", hooks: [fixtureHook] }],
+		PreToolUse: [{ matcher: "Bash", hooks: [fixtureHook] }],
+	};
+	const merged = live.mergeHookMatchers!(existing, {
+		PreToolUse: [{ matcher: "Monitor", hooks: [controlHook] }],
+		SubagentStart: [{ hooks: [controlHook] }],
+	});
+
+	assert.equal(merged.PostToolUse?.[0]?.hooks[0], fixtureHook);
+	assert.equal(merged.PreToolUse?.[0]?.hooks[0], fixtureHook);
+	assert.equal(merged.PreToolUse?.[1]?.hooks[0], controlHook);
+	assert.equal(merged.SubagentStart?.[0]?.hooks[0], controlHook);
+});
+
 async function withCleanupFixture(run: (root: string) => Promise<void>): Promise<void> {
 	const parent = mkdtempSync(join(tmpdir(), "phi-live-cleanup-test-"));
 	const root = join(parent, "owned-fixture");

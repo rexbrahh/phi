@@ -5,7 +5,16 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { Options, SDKMessage, SDKResultMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import type {
+	HookCallback,
+	HookEvent,
+	HookJSONOutput,
+	Options,
+	PreToolUseHookInput,
+	SDKMessage,
+	SDKResultMessage,
+	SDKUserMessage,
+} from "@anthropic-ai/claude-agent-sdk";
 import type { MonitorInput } from "@anthropic-ai/claude-agent-sdk/sdk-tools.js";
 import type { WorkflowJournalMetadata, WorkflowOutput, WorkflowReference } from "../src/workflows.js";
 import { formatErrorText } from "../src/ui/error-text.js";
@@ -64,9 +73,77 @@ const WORKFLOW_TASK_EVENT_TYPES = [
 	"background_tasks_changed",
 ] as const;
 const SAFE_WORKFLOW_TASK_TYPES = new Set(["local_agent", "local_bash", "local_workflow", "mcp_task"]);
+const SAFE_BACKGROUND_TASK_CLASSES = new Set([
+	...SAFE_WORKFLOW_TASK_TYPES,
+	"shell",
+	"subagent",
+	"monitor",
+	"workflow",
+	"other",
+]);
 const WORKFLOW_TERMINAL_STATUSES = ["completed", "failed", "stopped"] as const;
 
 let failureDiagnosticEmitted = false;
+
+function createNativeControlTrace(): NativeControlTrace {
+	return {
+		lifecycle: [],
+		monitorRequests: [],
+		backgroundControls: [],
+		stopAttempts: [],
+	};
+}
+
+export function mergeHookMatchers(
+	existing: Options["hooks"] | undefined,
+	additions: NonNullable<Options["hooks"]>,
+): NonNullable<Options["hooks"]> {
+	const merged: NonNullable<Options["hooks"]> = { ...(existing ?? {}) };
+	for (const event of Object.keys(additions) as HookEvent[]) {
+		const addedMatchers = additions[event];
+		if (addedMatchers === undefined) continue;
+		merged[event] = [...(merged[event] ?? []), ...addedMatchers];
+	}
+	return merged;
+}
+
+export function formatNativeControlSummary(trace: NativeControlTrace): string {
+	const startedAgentIds = new Set(trace.lifecycle
+		.filter((record) => record.event === "SubagentStart")
+		.map((record) => record.agentId));
+	const observedClasses = new Set(trace.backgroundControls.flatMap((record) =>
+		record.subsequentTaskClasses.flat(),
+	).filter((taskClass) => SAFE_BACKGROUND_TASK_CLASSES.has(taskClass)));
+	const taskClasses = [...observedClasses].sort().join(",") || "none";
+	const backgroundResult = trace.backgroundControls.length > 0
+		? String(trace.backgroundControls.at(-1)?.returned)
+		: "unobserved";
+	const firstStop = trace.stopAttempts[0];
+	const secondStop = trace.stopAttempts[1];
+	const stopConfirmed = (attempt: NativeStopAttemptRecord | undefined) =>
+		attempt?.stoppedNotification === true && attempt.monitorCancelled === true;
+	const countRequests = (settlement: NativeMonitorRequestRecord["settlement"]) =>
+		trace.monitorRequests.filter((record) => record.settlement === settlement).length;
+	return [
+		`workflowPhaseStarts=${trace.journalPhaseStarts ?? "unobserved"}`,
+		`nativeAgentStarts=${startedAgentIds.size}`,
+		`journalIdentityMatches=${trace.journalMatchedAgentStarts ?? "unobserved"}`,
+		`monitorToolRequests=${trace.monitorRequests.filter((record) => record.scenario !== "invalid").length}`,
+		`pendingMonitorRequestsAtControl=${trace.pendingMonitorRequestCount ?? "unobserved"}`,
+		`monitorRequestsSignalCancelled=${countRequests("signal-aborted")}`,
+		`backgroundTasksReturned=${backgroundResult}`,
+		`backgroundTargetClass=${trace.backgroundControls.at(-1)?.targetClass ?? "unobserved"}`,
+		`backgroundTaskClasses=[${taskClasses}]`,
+		`firstStopConfirmed=${String(stopConfirmed(firstStop))}`,
+		`firstStopTargetClass=${firstStop?.candidateKind ?? "unobserved"}`,
+		`siblingPendingAfterFirstStop=${String(trace.siblingPendingAfterFirstStop ?? false)}`,
+		`secondStopConfirmed=${String(stopConfirmed(secondStop))}`,
+		`subagentStopHooks=${trace.lifecycle.filter((record) => record.event === "SubagentStop").length}`,
+		`continuedInput=${String(trace.continuedInput ?? false)}`,
+		`checkpointPreview=${String(trace.checkpointPreview ?? false)}`,
+		`resumed=${String(trace.resumed ?? false)}`,
+	].join("; ");
+}
 
 export interface LiveQueryLifecycle {
 	done: Promise<void>;
@@ -109,6 +186,60 @@ export interface WorkflowFailureEvidenceContext {
 	workflowTaskId?: string;
 	journal?: WorkflowJournalMetadata;
 	journalWarningCount?: number;
+}
+
+export interface NativeAgentLifecycleRecord {
+	event: "SubagentStart" | "SubagentStop";
+	agentId: string;
+	agentType: string;
+	callbackToolUseId?: string;
+}
+
+export interface NativeMonitorRequestRecord {
+	agentId?: string;
+	agentType?: string;
+	toolUseId?: string;
+	callbackToolUseId?: string;
+	scenario: "stopped" | "continued" | "invalid";
+	settlement: "pending" | "signal-aborted" | "cleanup-denied" | "denied-invalid";
+}
+
+export interface NativeBackgroundControlRecord {
+	targetClass: "all-foreground" | "tool-use";
+	targetToolUseId?: string;
+	returned: boolean;
+	subsequentTaskClasses: string[][];
+}
+
+export interface NativeStopAttemptRecord {
+	agentId: string;
+	targetId: string;
+	candidateKind: "native-task" | "agent-id-diagnostic";
+	callResolved?: boolean;
+	stoppedNotification?: boolean;
+	monitorCancelled?: boolean;
+	siblingPending?: boolean;
+	subagentStopObserved?: boolean;
+}
+
+export interface NativeControlTrace {
+	lifecycle: NativeAgentLifecycleRecord[];
+	monitorRequests: NativeMonitorRequestRecord[];
+	backgroundControls: NativeBackgroundControlRecord[];
+	stopAttempts: NativeStopAttemptRecord[];
+	journalPhaseStarts?: number;
+	journalMatchedAgentStarts?: number;
+	pendingMonitorRequestCount?: number;
+	siblingPendingAfterFirstStop?: boolean;
+	continuedInput?: boolean;
+	checkpointPreview?: boolean;
+	resumed?: boolean;
+}
+
+interface PendingMonitorRequest {
+	record: NativeMonitorRequestRecord;
+	deny(settlement: "signal-aborted" | "cleanup-denied"): void;
+	settled: Promise<void>;
 }
 
 export class LiveRunRefusal extends Error {
@@ -1181,6 +1312,126 @@ async function main(): Promise<void> {
 			});
 		}
 	}
+}
+
+export class PendingMonitorGate {
+	private readonly pending = new Map<string, PendingMonitorRequest>();
+	private closed = false;
+
+	constructor(private readonly trace: NativeControlTrace) {}
+
+	hold(
+		input: PreToolUseHookInput,
+		callbackToolUseId: string | undefined,
+		signal: AbortSignal,
+	): Promise<HookJSONOutput> {
+		const toolInput = asRecord(input.tool_input);
+		const scenario = fixtureMonitorScenario(toolInput);
+		const agentId = asString(input.agent_id);
+		const agentType = asString(input.agent_type);
+		const toolUseId = asString(input.tool_use_id);
+		const normalizedCallbackToolUseId = asString(callbackToolUseId);
+		const valid = scenario !== undefined && agentId !== undefined && agentType !== undefined &&
+			toolUseId !== undefined &&
+			(normalizedCallbackToolUseId === undefined || normalizedCallbackToolUseId === toolUseId) &&
+			!this.trace.monitorRequests.some((record) => record.agentId === agentId);
+		const record: NativeMonitorRequestRecord = {
+			...(agentId === undefined ? {} : { agentId }),
+			...(agentType === undefined ? {} : { agentType }),
+			...(toolUseId === undefined ? {} : { toolUseId }),
+			...(normalizedCallbackToolUseId === undefined ? {} : { callbackToolUseId: normalizedCallbackToolUseId }),
+			scenario: scenario ?? "invalid",
+			settlement: valid ? "pending" : "denied-invalid",
+		};
+		this.trace.monitorRequests.push(record);
+		if (!valid || toolUseId === undefined) return Promise.resolve(denyMonitorHook("fixture-monitor-identity-invalid"));
+		if (this.closed) {
+			record.settlement = "cleanup-denied";
+			return Promise.resolve(denyMonitorHook("fixture-monitor-gate-closed"));
+		}
+
+		return new Promise<HookJSONOutput>((resolve) => {
+			let settled = false;
+			let resolveSettled!: () => void;
+			const settledPromise = new Promise<void>((settle) => { resolveSettled = settle; });
+			const settle = (settlement: "signal-aborted" | "cleanup-denied") => {
+				if (settled) return;
+				settled = true;
+				signal.removeEventListener("abort", onAbort);
+				record.settlement = settlement;
+				this.pending.delete(toolUseId);
+				resolve(denyMonitorHook(settlement === "signal-aborted"
+					? "fixture-monitor-agent-stopped"
+					: "fixture-monitor-gate-closed"));
+				resolveSettled();
+			};
+			const onAbort = () => settle("signal-aborted");
+			this.pending.set(toolUseId, { record, deny: settle, settled: settledPromise });
+			signal.addEventListener("abort", onAbort, { once: true });
+			if (signal.aborted) onAbort();
+			else if (this.closed) settle("cleanup-denied");
+		});
+	}
+
+	isPending(toolUseId: string): boolean {
+		return this.pending.has(toolUseId);
+	}
+
+	async denyPending(): Promise<void> {
+		this.closed = true;
+		const pending = [...this.pending.values()];
+		for (const request of pending) request.deny("cleanup-denied");
+		await Promise.all(pending.map((request) => request.settled));
+	}
+}
+
+function fixtureMonitorScenario(input: Record<string, unknown> | undefined): "stopped" | "continued" | undefined {
+	if (input === undefined || !isAllowedFixtureMonitor(input)) return undefined;
+	for (const [scenario, expected] of Object.entries(FIXED_WORKFLOW_MONITOR_INPUTS) as Array<
+		["stopped" | "continued", FixtureMonitorInput]
+	>) {
+		if (input.command === expected.command && input.description === expected.description && input.timeout_ms === expected.timeout_ms) {
+			return scenario;
+		}
+	}
+	return undefined;
+}
+
+function denyMonitorHook(reason: string): HookJSONOutput {
+	return {
+		hookSpecificOutput: {
+			hookEventName: "PreToolUse",
+			permissionDecision: "deny",
+			permissionDecisionReason: reason,
+		},
+	};
+}
+
+function createNativeControlHooks(trace: NativeControlTrace, monitorGate: PendingMonitorGate): NonNullable<Options["hooks"]> {
+	const lifecycleHook: HookCallback = async (input, callbackToolUseId) => {
+		if (input.hook_event_name === "SubagentStart" || input.hook_event_name === "SubagentStop") {
+			trace.lifecycle.push({
+				event: input.hook_event_name,
+				agentId: input.agent_id,
+				agentType: input.agent_type,
+				...(callbackToolUseId === undefined ? {} : { callbackToolUseId }),
+			});
+		}
+		return {};
+	};
+	const monitorHook: HookCallback = async (input, callbackToolUseId, options) => {
+		if (input.hook_event_name !== "PreToolUse" || input.tool_name !== "Monitor") return {};
+		return monitorGate.hold(input, callbackToolUseId, options.signal);
+	};
+	return {
+		SubagentStart: [{ hooks: [lifecycleHook] }],
+		SubagentStop: [{ hooks: [lifecycleHook] }],
+		PreToolUse: [{
+			matcher: "Monitor",
+			timeout: Math.ceil(MAX_TOTAL_TIME_MS / 1_000),
+			hooks: [monitorHook],
+		}],
+	};
 }
 
 export function fixtureCallbacks(
