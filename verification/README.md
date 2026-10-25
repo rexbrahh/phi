@@ -7,6 +7,7 @@ transitions to the TypeScript guards that it represents.
 |---|---|---|
 | Lean 4 | Per-allocation settlement, closed queues, and stale settled-allocation callbacks | [Queue proofs](lean/README.md) |
 | TLA+ with TLC | Bounded session ownership, native close calls, query ownership of requests, and foreground interruption | [Lifecycle model and negative controls](tla/README.md) |
+| TLA+ with TLC | Startup reply retention across an elapsed gap and a control-key boundary | [Reply model and expiry counterexample](tla/startup-replies/README.md) |
 
 The Lean theorems cover every reachable state of their extracted model. TLC
 checks the finite bounds in its configuration. Neither result proves that the
