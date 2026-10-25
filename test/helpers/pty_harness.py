@@ -22,6 +22,8 @@ AUTH_APP = ROOT / "dist" / "test" / "pty-auth.js"
 PATH_PREFIX = "/opt/homebrew/bin"
 DA_QUERY = b"\x1b[c"
 DA_REPLY = b"\x1b[?1;2c"
+KITTY_PROTOCOL_QUERY = b"\x1b[?u"
+KITTY_PROTOCOL_REPLY = b"\x1b[?7u"
 TIMEOUT = 5.0
 SETUP_TERMINATION_GRACE = 0.25
 
@@ -121,6 +123,7 @@ class PTYChild:
 		self.marker_line = 0
 		self.supervisor_event = 0
 		self.responded_queries = 0
+		self.responded_kitty_queries = 0
 		self.stop_signal: int | None = None
 		self.continued_observed = False
 		self.continued_source: str | None = None
@@ -221,7 +224,31 @@ class PTYChild:
 		fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
 
 	def send(self, data: bytes) -> None:
-		os.write(self.master, data)
+		deadline = time.monotonic() + TIMEOUT
+		offset = 0
+		while offset < len(data):
+			try:
+				written = os.write(self.master, data[offset : offset + 4096])
+			except InterruptedError:
+				continue
+			except BlockingIOError:
+				remaining = deadline - time.monotonic()
+				if remaining <= 0:
+					raise TimeoutError(f"PTY input timed out after {offset}/{len(data)} bytes")
+				try:
+					readable, writable, _ = select.select([self.master], [self.master], [], remaining)
+				except InterruptedError:
+					continue
+				if readable:
+					self.pump(0)
+				if not writable and not readable:
+					raise TimeoutError(f"PTY input timed out after {offset}/{len(data)} bytes")
+				continue
+			if written <= 0:
+				raise TimeoutError(f"PTY input stopped after {offset}/{len(data)} bytes")
+			offset += written
+			if len(data) > 4096 and offset < len(data):
+				self.pump(0)
 
 	def _read_events(self) -> None:
 		if not self.markers_path.exists():
@@ -237,6 +264,11 @@ class PTYChild:
 			self.marker_line += 1
 
 	def _answer_device_attribute_queries(self) -> None:
+		if self.scenario == "kitty":
+			kitty_query_count = self.output.count(KITTY_PROTOCOL_QUERY)
+			while self.responded_kitty_queries < kitty_query_count:
+				self.responded_kitty_queries += 1
+				self.send(KITTY_PROTOCOL_REPLY)
 		query_count = self.output.count(DA_QUERY)
 		while self.responded_queries < query_count:
 			os.write(self.master, DA_REPLY)

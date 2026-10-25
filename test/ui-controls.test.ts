@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { AppController } from "../src/ui/app.js";
 import { FakeQueryHarness, initializedResponse } from "./helpers/fake-query.js";
 import { FakeTerminal } from "./helpers/terminal.js";
@@ -162,6 +162,95 @@ test("interrupt, background, and selected-task stop use distinct native controls
 		assert.equal(fake.interruptCalls, 1);
 		assert.equal(fake.backgroundTasksCalls, 1);
 		assert.equal(fake.parameters?.options?.perTaskStopAffordance, true);
+	});
+});
+
+test("ASCII, Kitty, and CSI Ctrl+C cancel visible dialogs without closing Phi or changing the composer", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	await withController(fake, terminal, async (controller) => {
+		const composerDraft = "keep this composer draft";
+		controller.setDraft(composerDraft);
+		const onElicitation = fake.parameters?.options?.onElicitation;
+		const canUseTool = fake.parameters?.options?.canUseTool;
+		assert.ok(onElicitation);
+		assert.ok(canUseTool);
+
+		let answerCalls = 0;
+		const answerInteraction = controller.interactions.answer.bind(controller.interactions);
+		controller.interactions.answer = (requestId, answer) => {
+			answerCalls += 1;
+			return answerInteraction(requestId, answer);
+		};
+
+		const encodings = [
+			{ name: "ascii", data: "\u0003" },
+			{ name: "kitty", data: "\u001b[99;5u" },
+			{ name: "csi", data: "\u001b[27;5;99~" },
+		] as const;
+
+		for (const kind of ["url", "form"] as const) {
+			for (const encoding of encodings) {
+				const requestId = `${kind}-${encoding.name}`;
+				const response: ReturnType<NonNullable<Options["onElicitation"]>> = onElicitation(kind === "url" ? {
+					mode: "url",
+					serverName: "synthetic-server",
+					message: "Open this synthetic link?",
+					url: `https://example.invalid/${requestId}`,
+				} : {
+					mode: "form",
+					serverName: "synthetic-server",
+					message: "Complete this synthetic form.",
+					requestedSchema: {
+						type: "object",
+						properties: { answer: { type: "string" } },
+					},
+				}, { requestId, signal: new AbortController().signal });
+				await waitFor(() => controller.views.dialogs.requestId === requestId);
+				if (kind === "form") terminal.input("synthetic form draft");
+
+				const answersBefore = answerCalls;
+				terminal.input(encoding.data);
+				assert.notEqual(controller.views.dialogs.requestId, requestId, `${requestId} stayed open`);
+				assert.equal(answerCalls, answersBefore + 1, `${requestId} must settle once`);
+				assert.deepEqual(await response, { action: "cancel" });
+				assert.equal(controller.views.editor.getText(), composerDraft);
+				assert.equal(fake.closeCalls, 0);
+				assert.equal(fake.interruptCalls, 0);
+				assert.equal(terminal.output.includes("Exit Phi?"), false);
+			}
+		}
+
+		for (const kind of ["permission", "question"] as const) {
+			for (const encoding of encodings) {
+				const requestId = `${kind}-${encoding.name}`;
+				const toolUseID = `synthetic-${requestId}`;
+				const options = {
+					requestId,
+					toolUseID,
+					signal: new AbortController().signal,
+				} as Parameters<NonNullable<typeof canUseTool>>[2];
+				const response: ReturnType<NonNullable<Options["canUseTool"]>> = kind === "permission"
+					? canUseTool("Read", { file_path: "/synthetic/project/file.ts" }, options)
+					: canUseTool("AskUserQuestion", {
+						questions: [{ question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] }],
+					}, options);
+				await waitFor(() => controller.views.dialogs.requestId === requestId);
+
+				const answersBefore = answerCalls;
+				terminal.input(encoding.data);
+				assert.notEqual(controller.views.dialogs.requestId, requestId, `${requestId} stayed open`);
+				assert.equal(answerCalls, answersBefore + 1, `${requestId} must settle once`);
+				const result = await response;
+				assert.equal(result?.behavior, "deny");
+				assert.equal(result?.toolUseID, toolUseID);
+				assert.equal(result?.message, kind === "permission" ? "Permission request cancelled" : "Question request cancelled");
+				assert.equal(controller.views.editor.getText(), composerDraft);
+				assert.equal(fake.closeCalls, 0);
+				assert.equal(fake.interruptCalls, 0);
+				assert.equal(terminal.output.includes("Exit Phi?"), false);
+			}
+		}
 	});
 });
 

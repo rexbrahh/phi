@@ -1,6 +1,8 @@
 import {
 	Input,
+	Key,
 	Text,
+	matchesKey,
 	truncateToWidth,
 	visibleWidth,
 	type Component,
@@ -63,7 +65,7 @@ export class DialogView implements Component, Focusable {
 	handleKey(data: string): boolean {
 		const request = this.request;
 		if (!request) return false;
-		if (data === "\u0003") {
+		if (matchesKey(data, Key.ctrl("c"))) {
 			if (request.kind === "permission") this.answer({ kind: "permission", action: "cancel" });
 			else if (request.kind === "question") this.answer({ kind: "question", action: "cancel" });
 			else this.answer({ kind: "elicitation", response: { action: "cancel" } });
@@ -73,10 +75,6 @@ export class DialogView implements Component, Focusable {
 			if (request.kind === "elicitation" && request.mode === "form") {
 				if (data === "\u0004") {
 					this.answer({ kind: "elicitation", response: { action: "decline" } });
-					return true;
-				}
-				if (data === "\u0003") {
-					this.answer({ kind: "elicitation", response: { action: "cancel" } });
 					return true;
 				}
 			}
