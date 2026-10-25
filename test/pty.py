@@ -284,8 +284,10 @@ def run_suspend(child: PTYChild, issues: list[str]) -> None:
 	suspended = termios.tcgetattr(child.slave)
 	child.mode_history["suspended"] = mode_snapshot(suspended)
 	check(issues, child.mode_error(expect_restored=True) is None, "terminal was not restored while the process was suspended")
-	os.kill(child.pid, signal.SIGCONT)
+	child.signal_application(signal.SIGCONT)
 	child.wait_continued()
+	forwarded = next((event for event in child.events if event.get("event") == "application-signal-forwarded" and event.get("signal") == signal.SIGCONT), None)
+	check(issues, forwarded is not None and forwarded.get("sent") is True, "owned supervisor did not forward SIGCONT to its application child")
 	check(issues, child.continued_observed, "supervisor did not observe the child continue after SIGCONT")
 	check(
 		issues,
@@ -350,8 +352,10 @@ def run_auth_cancel(child: PTYChild, issues: list[str]) -> None:
 
 
 def run_sigterm(child: PTYChild, issues: list[str]) -> None:
-	os.kill(child.pid, signal.SIGTERM)
+	child.signal_application(signal.SIGTERM)
 	exit_event = child.wait_event("exit")
+	forwarded = next((event for event in child.events if event.get("event") == "application-signal-forwarded" and event.get("signal") == signal.SIGTERM), None)
+	check(issues, forwarded is not None and forwarded.get("sent") is True, "owned supervisor did not forward SIGTERM to its application child")
 	check(issues, exit_event.get("code") == 143, f"SIGTERM returned {exit_event.get('code')}, expected 143")
 	check(issues, exit_event.get("queryCloseCalls") == 1, "SIGTERM did not close the session query exactly once")
 	check(issues, child.wait_exit() == 143, "SIGTERM process exit code was not 143")
