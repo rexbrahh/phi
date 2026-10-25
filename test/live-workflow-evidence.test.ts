@@ -189,6 +189,7 @@ test("projects bounded task and journal evidence with redaction", async () => {
 	assert.match(evidence, /taskTerminalStatuses=.*failed:1.*stopped:1/);
 	assert.match(evidence, /workflowTaskTerminalStatuses=.*failed:1.*stopped:1/);
 	assert.match(evidence, /nativeTaskFailureSummary=/);
+	assert.match(evidence, /nativeTaskFailureSummary=Failed after \[redacted\].*\[redacted API key\]; workflowJournalRecords=/);
 	assert.match(evidence, /workflowJournalRecords=.*started:2.*expectedPhaseStarted=2/);
 	assert.match(evidence, /workflowJournalLabels=\[stopped:1,continued:1\]/);
 	for (const secret of [
