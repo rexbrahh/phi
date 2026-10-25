@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
@@ -23,6 +24,21 @@ function setEnvironment(values: Record<string, string>): () => void {
 
 function quoteShell(value: string): string {
 	return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function git(cwd: string, ...args: string[]): string {
+	return execFileSync("git", ["-C", cwd, ...args], {
+		encoding: "utf8",
+		env: {
+			...process.env,
+			GIT_CONFIG_GLOBAL: "/dev/null",
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_AUTHOR_NAME: "Workspace Test",
+			GIT_AUTHOR_EMAIL: "workspace-test@example.invalid",
+			GIT_COMMITTER_NAME: "Workspace Test",
+			GIT_COMMITTER_EMAIL: "workspace-test@example.invalid",
+		},
+	});
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -189,6 +205,134 @@ test("runUserShell reports nonzero exit status and spawn failure as receipts", a
 	} finally {
 		restoreEnvironment();
 		await rm(temporary, { recursive: true, force: true });
+	}
+});
+
+test("runUserShell isolates a merge conflict and abort from staged work in the primary worktree", async () => {
+	const temporary = await mkdtemp(join(tmpdir(), "phi shell linked worktree "));
+	const repository = join(temporary, "primary repository");
+	const linkedWorktree = join(temporary, "conflict worktree");
+	const stateHome = join(temporary, "state");
+	const restoreEnvironment = setEnvironment({
+		XDG_STATE_HOME: stateHome,
+		SHELL: "/bin/sh",
+		GIT_CONFIG_GLOBAL: "/dev/null",
+		GIT_CONFIG_NOSYSTEM: "1",
+		GIT_AUTHOR_NAME: "Workspace Test",
+		GIT_AUTHOR_EMAIL: "workspace-test@example.invalid",
+		GIT_COMMITTER_NAME: "Workspace Test",
+		GIT_COMMITTER_EMAIL: "workspace-test@example.invalid",
+	});
+	let linkedWorktreeAdded = false;
+
+	try {
+		await mkdir(repository);
+		git(repository, "init", "--quiet", "-b", "conflict-main");
+		git(repository, "config", "user.name", "Workspace Test");
+		git(repository, "config", "user.email", "workspace-test@example.invalid");
+		git(repository, "config", "commit.gpgsign", "false");
+		await writeFile(join(repository, "conflict.txt"), "base conflict content\n");
+		await writeFile(join(repository, "primary.txt"), "base primary content\n");
+		git(repository, "add", "--", "conflict.txt", "primary.txt");
+		git(repository, "commit", "--quiet", "-m", "test base");
+		const baseRevision = git(repository, "rev-parse", "HEAD").trim();
+
+		await writeFile(join(repository, "conflict.txt"), "main conflict content\n");
+		git(repository, "add", "--", "conflict.txt");
+		git(repository, "commit", "--quiet", "-m", "main conflict change");
+		const mainRevision = git(repository, "rev-parse", "HEAD").trim();
+
+		git(repository, "switch", "--quiet", "--create", "conflict-topic", baseRevision);
+		await writeFile(join(repository, "conflict.txt"), "topic conflict content\n");
+		git(repository, "add", "--", "conflict.txt");
+		git(repository, "commit", "--quiet", "-m", "topic conflict change");
+		const topicRevision = git(repository, "rev-parse", "HEAD").trim();
+		git(repository, "switch", "--quiet", "conflict-main");
+		assert.equal(git(repository, "merge-base", "conflict-main", "conflict-topic").trim(), baseRevision);
+
+		const primaryFile = join(repository, "primary.txt");
+		await writeFile(primaryFile, "staged primary content\n");
+		git(repository, "add", "--", "primary.txt");
+		const primaryState = async () => ({
+			status: git(repository, "status", "--porcelain=v1", "--untracked-files=no"),
+			indexBlob: git(repository, "rev-parse", ":primary.txt").trim(),
+			indexContent: git(repository, "show", ":primary.txt"),
+			worktreeContent: await readFile(primaryFile, "utf8"),
+		});
+		const stagedPrimaryState = await primaryState();
+		assert.deepEqual(stagedPrimaryState, {
+			status: "M  primary.txt\n",
+			indexBlob: stagedPrimaryState.indexBlob,
+			indexContent: "staged primary content\n",
+			worktreeContent: "staged primary content\n",
+		});
+		assert.notEqual(stagedPrimaryState.indexBlob, git(repository, "rev-parse", "HEAD:primary.txt").trim());
+
+		git(repository, "worktree", "add", "--quiet", "--detach", linkedWorktree, mainRevision);
+		linkedWorktreeAdded = true;
+		assert.equal(git(linkedWorktree, "status", "--porcelain=v1", "--untracked-files=no"), "");
+		assert.deepEqual(await primaryState(), stagedPrimaryState, "adding the clean linked worktree must preserve staged primary state");
+
+		const mergeCommand = "git merge --no-edit conflict-topic";
+		const mergeReceipt = await runUserShell(
+			mergeCommand,
+			linkedWorktree,
+			"linked-worktree-conflict",
+			new AbortController().signal,
+			() => {},
+			temporary,
+		).done;
+		assert.equal(mergeReceipt.command, mergeCommand);
+		assert.equal(mergeReceipt.cwd, linkedWorktree);
+		assert.equal(mergeReceipt.exitCode, 1, "native Git merge must report its conflict with a nonzero exit");
+		assert.equal(mergeReceipt.signal, null);
+		assert.equal(mergeReceipt.aborted, false);
+		assert.equal(mergeReceipt.infrastructureError, undefined);
+		assert.ok(mergeReceipt.outputFiles.stdout);
+		assert.ok(mergeReceipt.outputFiles.stderr);
+		const mergeOutput = `${await readFile(mergeReceipt.outputFiles.stdout!, "utf8")}${await readFile(mergeReceipt.outputFiles.stderr!, "utf8")}`;
+		assert.match(mergeOutput, /CONFLICT \(content\): Merge conflict in conflict\.txt/);
+
+		assert.equal(git(linkedWorktree, "status", "--porcelain=v1", "--untracked-files=no"), "UU conflict.txt\n");
+		assert.equal(
+			await readFile(join(linkedWorktree, "conflict.txt"), "utf8"),
+			"<<<<<<< HEAD\nmain conflict content\n=======\ntopic conflict content\n>>>>>>> conflict-topic\n",
+		);
+		const unmergedEntries = git(linkedWorktree, "ls-files", "--unmerged", "--", "conflict.txt").trim().split("\n");
+		assert.deepEqual(unmergedEntries.map((entry) => entry.split(/\s+/)[2]), ["1", "2", "3"]);
+		assert.ok(unmergedEntries.every((entry) => entry.endsWith("\tconflict.txt")));
+		const linkedGitDirectory = git(linkedWorktree, "rev-parse", "--absolute-git-dir").trim();
+		const mergeHeadPath = join(linkedGitDirectory, "MERGE_HEAD");
+		assert.equal(await readFile(mergeHeadPath, "utf8"), `${topicRevision}\n`);
+		assert.deepEqual(await primaryState(), stagedPrimaryState, "the conflict must not change staged primary state");
+
+		const abortCommand = "git merge --abort";
+		const abortReceipt = await runUserShell(
+			abortCommand,
+			linkedWorktree,
+			"linked-worktree-abort",
+			new AbortController().signal,
+			() => {},
+			temporary,
+		).done;
+		assert.equal(abortReceipt.command, abortCommand);
+		assert.equal(abortReceipt.cwd, linkedWorktree);
+		assert.equal(abortReceipt.exitCode, 0);
+		assert.equal(abortReceipt.signal, null);
+		assert.equal(abortReceipt.aborted, false);
+		assert.equal(abortReceipt.infrastructureError, undefined);
+		assert.equal(git(linkedWorktree, "status", "--porcelain=v1", "--untracked-files=no"), "");
+		assert.equal(git(linkedWorktree, "ls-files", "--unmerged"), "");
+		assert.equal(await readFile(join(linkedWorktree, "conflict.txt"), "utf8"), "main conflict content\n");
+		await assert.rejects(readFile(mergeHeadPath, "utf8"), { code: "ENOENT" });
+		assert.deepEqual(await primaryState(), stagedPrimaryState, "aborting the linked conflict must preserve staged primary state");
+	} finally {
+		try {
+			if (linkedWorktreeAdded) git(repository, "worktree", "remove", "--force", linkedWorktree);
+		} finally {
+			restoreEnvironment();
+			await rm(temporary, { recursive: true, force: true });
+		}
 	}
 });
 
