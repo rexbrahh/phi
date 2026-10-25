@@ -279,7 +279,7 @@ async function main(): Promise<void> {
 		assert.equal(resumedInit.account.apiProvider, "firstParty");
 		assert.equal(resumedInit.account.apiKeySource, "ANTHROPIC_API_KEY");
 		const resumeId = randomUUID();
-		resumedSession.send(userMessage(`Return only this marker from the earlier conversation: ${marker}`, resumeId));
+		resumedSession.send(userMessage("Return only the marker I asked you to remember in the earlier conversation. Use no tools.", resumeId));
 		const resumedResult = await waitFor(() => resultFor(resumed.messages, resumeId), resumed, deadline,
 			"resumed session result", resumedSession);
 		assert.equal(resumedResult.session_id, sessionId);
@@ -295,7 +295,6 @@ async function main(): Promise<void> {
 		assert.ok(combined !== undefined, "both query cost estimates are required for the combined ledger");
 		assert.ok(combined <= totalBudget, "combined initial and resumed costs must stay within the total cap");
 		controls.sessionResumed = true;
-		console.log(`Native SDK controls fixture completed; ${summary(controls, totalBudget, costs)}`);
 	} catch (error) {
 		failed = true;
 		failure = error;
@@ -354,6 +353,7 @@ async function main(): Promise<void> {
 			process.exitCode = process.exitCode || 1;
 		}
 	}
+	if (!failed) console.log(`Native SDK controls fixture completed; ${summary(controls, totalBudget, costs)}`);
 }
 
 if (isMainModule()) {
