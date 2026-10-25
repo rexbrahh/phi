@@ -53,7 +53,7 @@ type PermissionEvidence = {
 
 type FixtureCallbackHarness = {
 	fixtureCallbacks(
-		fixture: { repository: string; toolEditTarget: string },
+		fixture: { repository: string; toolEditTarget: string; workflowScript: string },
 		permissionEvidence: PermissionEvidence,
 		selectedApiKey?: string,
 	): {
@@ -62,6 +62,8 @@ type FixtureCallbackHarness = {
 };
 
 const runner = join(dirname(fileURLToPath(import.meta.url)), "live.js");
+const workflowScriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../test/live-workflow.js");
+const workflowScript = readFileSync(workflowScriptPath, "utf8");
 
 test("live budget parser accepts the planned positive cap and rejects malformed arguments", () => {
 	assert.equal(parseLiveBudget(["--max-budget-usd", "0.10"]), 0.10);
@@ -208,12 +210,13 @@ test("tool assertions constrain Edit, Workflow, active tasks, and fixture skill 
 	assert.equal(harness.hasSkillMarker([], "phi-live-skill-ok"), false);
 });
 
-test("native SDK Workflow callback allows the fixture and rejects execution overrides", async () => {
+test("native SDK Workflow callback allows only the fixed fixture script forms", async () => {
 	const harness = await import("./live.js") as unknown as FixtureCallbackHarness;
 	const permissionEvidence: PermissionEvidence = { deniedActionCount: 0, denials: [] };
 	const callback = harness.fixtureCallbacks({
 		repository: "/tmp/phi-live-fixture",
 		toolEditTarget: "/tmp/phi-live-fixture/target.txt",
+		workflowScript,
 	}, permissionEvidence).canUseTool;
 	const options = {
 		signal: new AbortController().signal,
@@ -221,28 +224,35 @@ test("native SDK Workflow callback allows the fixture and rejects execution over
 		requestId: "fixture-workflow-request",
 	};
 	const input = { name: "phi-live-acceptance" };
+	const immutableScriptInput = { ...input, script: workflowScript };
+	const previousFieldPresenceGuardWouldReject = ["script", "scriptPath", "resumeFromRunId"]
+		.some((key) => Object.hasOwn(immutableScriptInput, key));
+	assert.equal(previousFieldPresenceGuardWouldReject, true);
 
-	const allowed = await callback("Workflow", input, options);
-	if (allowed?.behavior !== "allow") assert.fail("the named fixture Workflow callback must be allowed");
-	assert.equal(allowed.behavior, "allow");
-	assert.deepEqual(allowed.updatedInput, input);
+	for (const acceptedInput of [input, { ...input, script: "" }, immutableScriptInput]) {
+		const allowed = await callback("Workflow", acceptedInput, options);
+		if (allowed?.behavior !== "allow") assert.fail("a fixed fixture Workflow form must be allowed");
+		assert.equal(allowed.behavior, "allow");
+		assert.deepEqual(allowed.updatedInput, acceptedInput);
+	}
 	assert.deepEqual(permissionEvidence, { deniedActionCount: 0, denials: [] });
 
-	for (const override of [
-		{ script: "export const meta = {};" },
-		{ scriptPath: "/tmp/other-workflow.js" },
-		{ resumeFromRunId: "another-run" },
+	for (const { input: deniedInput, reason } of [
+		{ input: { ...input, script: `${workflowScript}\n` }, reason: "workflow-input-not-allowlisted" },
+		{ input: { name: "another-workflow" }, reason: "workflow-name-not-fixture" },
+		{ input: { ...input, args: {} }, reason: "workflow-input-not-allowlisted" },
+		{ input: { ...input, scriptPath: "/tmp/other-workflow.js" }, reason: "workflow-execution-override" },
+		{ input: { ...input, resumeFromRunId: "another-run" }, reason: "workflow-execution-override" },
+		{ input: { ...input, script: null }, reason: "workflow-input-not-allowlisted" },
+		{ input: { ...input, script: undefined }, reason: "workflow-input-not-allowlisted" },
 	]) {
-		const denied = await callback("Workflow", { ...input, ...override }, options);
-		if (denied?.behavior !== "deny") assert.fail("Workflow execution overrides must be denied");
+		permissionEvidence.denials.length = 0;
+		const denied = await callback("Workflow", deniedInput, options);
+		if (denied?.behavior !== "deny") assert.fail("an unlisted Workflow form must be denied");
 		assert.equal(denied.behavior, "deny");
+		assert.deepEqual(permissionEvidence.denials.map(({ reason: actualReason }) => actualReason), [reason]);
 	}
-	assert.equal(permissionEvidence.deniedActionCount, 3);
-	assert.deepEqual(permissionEvidence.denials.map(({ reason }) => reason), [
-		"workflow-execution-override",
-		"workflow-execution-override",
-		"workflow-execution-override",
-	]);
+	assert.equal(permissionEvidence.deniedActionCount, 7);
 });
 
 test("failure diagnostics summarize only bounded denied tool names, input keys, and reasons", async () => {
@@ -253,6 +263,7 @@ test("failure diagnostics summarize only bounded denied tool names, input keys, 
 	const callback = harness.fixtureCallbacks({
 		repository: "/tmp/phi-live-fixture",
 		toolEditTarget: "/tmp/phi-live-fixture/target.txt",
+		workflowScript,
 	}, permissionEvidence, syntheticKey).canUseTool;
 
 	const callbackOptions = {

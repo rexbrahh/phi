@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID, type UUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -149,6 +149,7 @@ interface HarnessFixture {
 	settingsHookLog: string;
 	toolEditTarget: string;
 	workflowPath: string;
+	workflowScript: string;
 }
 
 interface ToolUse {
@@ -805,7 +806,7 @@ async function main(): Promise<void> {
 }
 
 export function fixtureCallbacks(
-	fixture: Pick<HarnessFixture, "repository" | "toolEditTarget">,
+	fixture: Pick<HarnessFixture, "repository" | "toolEditTarget" | "workflowScript">,
 	permissionEvidence: LivePermissionEvidence,
 	selectedApiKey = process.env.ANTHROPIC_API_KEY,
 ): Pick<Options, "canUseTool" | "onElicitation" | "hooks"> {
@@ -831,7 +832,7 @@ export function fixtureCallbacks(
 function fixturePermissionRejectionReason(
 	toolName: string,
 	input: Record<string, unknown>,
-	fixture: Pick<HarnessFixture, "repository" | "toolEditTarget">,
+	fixture: Pick<HarnessFixture, "repository" | "toolEditTarget" | "workflowScript">,
 ): string | undefined {
 	if (toolName === "Read") {
 		return isFixturePath(fixture.repository, input.file_path) ? undefined : "read-path-outside-fixture";
@@ -844,10 +845,12 @@ function fixturePermissionRejectionReason(
 	}
 	if (toolName === "Workflow") {
 		if (input.name !== SKILL_NAME) return "workflow-name-not-fixture";
-		if (["script", "scriptPath", "resumeFromRunId"].some((key) => Object.hasOwn(input, key))) {
+		if (["scriptPath", "resumeFromRunId"].some((key) => Object.hasOwn(input, key))) {
 			return "workflow-execution-override";
 		}
-		return isNamedFixtureWorkflow(input, SKILL_NAME) ? undefined : "workflow-input-not-allowlisted";
+		return isAllowedFixtureWorkflow(input, SKILL_NAME, fixture.workflowScript)
+			? undefined
+			: "workflow-input-not-allowlisted";
 	}
 	if (toolName === "Bash") {
 		return input.command === MAIN_SLEEP_COMMAND || input.command === AGENT_SLEEP_COMMAND
@@ -874,6 +877,18 @@ export function isNamedFixtureWorkflow(input: Record<string, unknown>, workflowN
 	return input.name === workflowName && keys.length === 1 && keys[0] === "name";
 }
 
+export function isAllowedFixtureWorkflow(
+	input: Record<string, unknown>,
+	workflowName: string,
+	fixtureScript: string,
+): boolean {
+	const keys = Reflect.ownKeys(input);
+	if (!Object.hasOwn(input, "name") || input.name !== workflowName) return false;
+	if (keys.some((key) => key !== "name" && key !== "script")) return false;
+	if (!Object.hasOwn(input, "script")) return keys.length === 1;
+	return typeof input.script === "string" && (input.script === "" || input.script === fixtureScript);
+}
+
 async function createFixture(): Promise<HarnessFixture> {
 	const root = await mkdtemp(join(tmpdir(), "phi-live-acceptance-"));
 	const repository = join(root, "synthetic-repository");
@@ -891,6 +906,7 @@ async function createFixture(): Promise<HarnessFixture> {
 	const fixtureWorkflowSource = resolve(dirname(fileURLToPath(import.meta.url)), "../../test/live-workflow.js");
 
 	try {
+		const workflowScript = await readFile(fixtureWorkflowSource, "utf8");
 		await Promise.all([
 			mkdir(repository, { recursive: true, mode: 0o700 }),
 			mkdir(configRoot, { recursive: true, mode: 0o700 }),
@@ -928,7 +944,7 @@ async function createFixture(): Promise<HarnessFixture> {
 			"}",
 			"appendFileSync(process.argv[2], 'native-settings-and-hook-ok\\n');",
 		].join("\n"));
-		await copyFile(fixtureWorkflowSource, workflowPath);
+		await writeFile(workflowPath, workflowScript);
 		const projectSettings = {
 			env: { PHI_LIVE_PROJECT_SETTING: "project-fixture" },
 			permissions: {
@@ -952,7 +968,18 @@ async function createFixture(): Promise<HarnessFixture> {
 			timeout: 5_000,
 		});
 		if (gitInit.status !== 0) throw new Error("Could not initialize the disposable local Git repository");
-		return { root, repository, configRoot, homeRoot, tempRoot, pluginCacheRoot, settingsHookLog, toolEditTarget, workflowPath };
+		return {
+			root,
+			repository,
+			configRoot,
+			homeRoot,
+			tempRoot,
+			pluginCacheRoot,
+			settingsHookLog,
+			toolEditTarget,
+			workflowPath,
+			workflowScript,
+		};
 	} catch (error) {
 		await rm(root, { recursive: true, force: true });
 		throw error;
