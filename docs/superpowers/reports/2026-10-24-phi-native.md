@@ -4,30 +4,39 @@ Date: 2026-10-25. Tested SDK: `0.3.310`. Tested CLI: `2.1.310`.
 
 ## Current result
 
-Native SDK acceptance remains incomplete. Attempts 6 and 7 failed the Workflow child-control gate. The evidence applies to the tested versions and Workflow path. It does not establish that every SDK version lacks an individual child-stop handle.
+Native SDK acceptance remains incomplete. The user requires an independent TUI control for each native Workflow child. Phi does not implement this control because the inspected SDK host has no route to the native child-stop callback.
 
-| Attempt | Source | Observed result |
+This finding applies to SDK `0.3.310` and CLI `2.1.310` checked on 2026-10-25. The [official package registry](https://registry.npmjs.org/%40anthropic-ai%2Fclaude-agent-sdk) and [SDK release](https://github.com/anthropics/claude-agent-sdk-typescript/releases/tag/v0.3.310) identify the checked SDK version. This report does not claim that every SDK version lacks this operation.
+
+## Workflow-child control contract
+
+The native CLI's Workflow `x` action calls its local `onSkipAgent` callback with `(workflowTaskId, agentId)`. The runtime uses that pair to find and abort one child controller with reason `user-skip`. The child reports a skipped result, and its `agent()` call returns `null`. `parallel()` waits for its sibling slots. This is the native child lifecycle that Phi must control and report.
+
+The public SDK's `Query.stopTask(taskId)` uses a registered ID from `task_notification`. It sends `stop_task` for that ID. It does not call the Workflow callback. The [published SDK declarations](https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.310/sdk.d.ts#L3292-L3295) document the task identity and stopped notification. The [official Workflow guide](https://code.claude.com/docs/en/workflows#watch-the-run) documents the CLI's selected-agent `x` action. The inspected SDK and bridge expose no host route from Phi to the native `(workflowTaskId, agentId)` callback.
+
+| Issue | Required correction | Direct evidence |
 |---|---|---|
-| 6 | `006f7db56e95d154566e4c52dab861c82bf958a0` | Monitor had 0 allowed-action denials. The parent query recorded no `local_agent` task. Both agents returned a Monitor acknowledgement after about two seconds. |
-| 7 | `aa9eea470ab0edb519f73a8b5ddbb9886bd82f2a` | Two `SubagentStart` hooks matched the journal. Two Monitor `PreToolUse` requests waited. `backgroundTasks()` returned true, but no `local_agent` task appeared. |
+| Phi cannot invoke the native selected-child callback. | Keep this acceptance gate open until Phi can invoke the callback for the selected Workflow child through a supported host entry point. | The pinned CLI runtime trace uses `(workflowTaskId, agentId)` to abort one child controller. The inspected SDK and bridge expose no route to that callback. |
+| `Query.stopTask()` has a different task identity and behavior. | Do not pass a Workflow `agentId` to `stopTask()`. Do not count a registered SDK task stop as a Workflow-child stop. | The SDK declaration ties `stopTask(taskId)` to a `task_notification` ID and a stopped notification. It does not accept the Workflow callback's identity pair. |
+| A child stop must preserve native Workflow behavior. | Verify the selected child reports `skipped`, a sibling remains active and completes, the Workflow continues after `parallel()`, and main input continues. | The pinned CLI runtime marks the user-stopped child as skipped, resolves its `agent()` call to `null`, and awaits sibling slots. No live child-stop result is claimed here. |
 
-Attempt 7 passed its two-Workflow-agent setup checks. The diagnostic `stopTask(agent_id)` call resolved, but no matching `stopped` notification arrived. Cleanup aborted both Monitor waits. No `SubagentStop` event arrived, and the sibling was not pending. The fixture did not reach continued input, session resume, or checkpoint checks.
+A local Bash stop does not meet the TUI Workflow-child requirement. Do not invent a task-notification ID for a Workflow child. The control-2 result explicitly records `workflowChildStopClaimed=false`.
 
-| Observed issue | Proposed fix | Direct evidence |
+## Native controls evidence
+
+| Run | Source and cap | Result |
 |---|---|---|
-| The Workflow child ID was not a registered SDK task ID. The resolved stop call did not prove that one child stopped while its sibling continued. | None. Keep this acceptance gate open. Do not treat `agent_id`, a resolved call, or `backgroundTasks()` as proof of an individual stop. | The pinned `stopTask(taskId)` contract uses a task ID from `task_notification`. The parent query recorded `local_bash` and `local_workflow` tasks, but no `local_agent` task. It recorded no matching stopped notification or `SubagentStop` event. |
+| Controls 1 | `3561fc3`; $0.05 cap; $0.003488 SDK estimate | Its recorded gates passed. The resume prompt revealed the marker, and the success receipt preceded cleanup. Do not use this run as genuine-recall or final-cleanup proof. |
+| Controls 2 | `8b4fa7a4e7affdd1b52a7ea313bb12ccb17215f8`; $0.02 cap; $0.003502 SDK estimate | Passed route, edit, task registration, registered-task stop notification, signal-driven server termination, continued input, checkpoint dry-run, genuine resumed-marker recall, and query termination. No tool actions were denied. `workflowChildStopClaimed=false`. |
 
-The pinned SDK types and runtime use `task_id` for `stop_task`. Workflow hook IDs, journal agent IDs, and SDK task IDs are separate values. No later SDK or CLI version was tested.
+Controls 2 passed its recorded scope. It did not pass the mandatory Workflow-child stop. Earlier attempts 6 and 7 also failed that child-control gate. Attempt 7's `stopTask(agent_id)` call produced no matching stopped notification and did not prove sibling isolation.
 
 ## Required gates
 
-V1 still requires these native checks:
-
-- Verify the API route and key source. Check settings, skills, and hooks.
+- Verify the API route and accepted credential source. Check settings, skills, and hooks.
 - Make one tool edit. Run two parallel Workflow agents and check phase metadata.
-- Check backgrounding and individual task stop while the sibling remains pending.
-- Check continued input, session resume, and checkpoint limits.
+- Check backgrounding and registered SDK task stop with a real registered task ID.
+- Independently stop each Workflow child from Phi's TUI. Confirm its native skipped result, a still-active sibling, sibling completion, and Workflow continuation.
+- Check continued main input, session resume, checkpoint limits, and query termination.
 
-A separate native-controls fixture is in preparation. Its live controls remain unverified. No repeat paid run of the same Workflow child-stop probe is planned.
-
-Attempt 7 reported an SDK estimate of **$0.0046**. This is not a billing total. See the [v1 acceptance report](2026-10-24-phi-v1.md) for the combined estimate and authorization status.
+The native Bash stop does not satisfy the fourth gate. No more paid Workflow-stop guess probes are planned. The latest budget ledger reports no active runs. Its SDK estimates are not a billing total. See the [v1 report](2026-10-24-phi-v1.md) for the full budget record.
