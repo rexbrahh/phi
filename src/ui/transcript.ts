@@ -7,6 +7,11 @@ import { markdownTheme } from "./theme.js";
 interface CachedBlock {
 	fingerprint: string;
 	component: Component;
+	renderedLines?: {
+		width: number;
+		fingerprint: string;
+		lines: string[];
+	};
 }
 
 interface FittedLinesCache {
@@ -73,7 +78,10 @@ export class TranscriptView implements Component {
 	}
 
 	invalidate(): void {
-		for (const cached of this.renderedBlocks.values()) cached.component.invalidate();
+		for (const cached of this.renderedBlocks.values()) {
+			cached.component.invalidate();
+			cached.renderedLines = undefined;
+		}
 	}
 
 	private appendBlock(
@@ -83,23 +91,35 @@ export class TranscriptView implements Component {
 		currentKeys: Set<string>,
 	): void {
 		currentKeys.add(display.key);
-		lines.push(...new Text(`${display.role}:`).render(width));
 		const component = this.componentFor(display);
-		lines.push(...component.render(width));
-		lines.push("");
+		const fingerprint = `${display.role}\0${component.fingerprint}`;
+		const rendered = component.renderedLines;
+		if (rendered?.width === width && rendered.fingerprint === fingerprint) {
+			lines.push(...rendered.lines);
+			return;
+		}
+
+		const renderedLines = [
+			...new Text(`${display.role}:`).render(width),
+			...component.component.render(width),
+			"",
+		];
+		component.renderedLines = { width, fingerprint, lines: renderedLines };
+		lines.push(...renderedLines);
 	}
 
-	private componentFor(display: DisplayBlock): Component {
+	private componentFor(display: DisplayBlock): CachedBlock {
 		const safeText = sanitizeTerminalText(display.text);
 		const fingerprint = `${display.markdown ? "markdown" : "text"}\0${safeText}`;
 		const cached = this.renderedBlocks.get(display.key);
-		if (cached?.fingerprint === fingerprint) return cached.component;
+		if (cached?.fingerprint === fingerprint) return cached;
 
 		const component = display.markdown
 			? new Markdown(safeText, 0, 0, markdownTheme)
 			: new Text(safeText);
-		this.renderedBlocks.set(display.key, { fingerprint, component });
-		return component;
+		const next = { fingerprint, component };
+		this.renderedBlocks.set(display.key, next);
+		return next;
 	}
 
 	private displayConversationBlock(block: ConversationBlock, width: number): DisplayBlock | undefined {
