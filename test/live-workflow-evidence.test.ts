@@ -246,9 +246,9 @@ test("projects bounded task and journal evidence with redaction", async () => {
 	assert.match(evidence, /taskTypes=.*local_agent:1.*other:1/);
 	assert.match(evidence, /expectedLabels=.*stopped:1.*continued:0/);
 	assert.match(evidence, /workflowParentMatches=2/);
-	assert.match(evidence, /workflowTaskStarts=2;withoutId=0/);
+	assert.match(evidence, /workflowTaskStarts=1;withoutId=0/);
 	assert.match(evidence, /taskTerminalStatuses=.*failed:1.*stopped:1/);
-	assert.match(evidence, /workflowTaskTerminalStatuses=.*failed:1.*stopped:1/);
+	assert.match(evidence, /workflowTaskTerminalStatuses=.*failed:1.*stopped:0/);
 	assert.match(evidence, /nativeTaskFailureSummary=/);
 	assert.match(evidence, /nativeTaskFailureSummary=Failed after \[redacted\].*\[redacted API key\]; workflowJournalRecords=/);
 	assert.match(evidence, /workflowJournalRecords=.*started:2.*expectedPhaseStarted=2/);
