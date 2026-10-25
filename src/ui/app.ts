@@ -872,6 +872,7 @@ export class AppController {
 	private startTerminal(): void {
 		this.removeInputListener?.();
 		this.terminalStarted = true;
+		this.keyboard.beginStartupTerminalReplyCapture();
 		this.views.tui.start();
 		this.removeInputListener = this.views.tui.addInputListener((data) => this.keyboard.onInput(data));
 		this.render();
@@ -957,6 +958,7 @@ export class AppController {
 	private async cleanup(): Promise<string[]> {
 		if (this.closing) return [];
 		this.closing = true;
+		this.keyboard.endStartupTerminalReplyCapture();
 		this.processGeneration += 1;
 		this.removeInputListener?.();
 		this.removeInputListener = undefined;

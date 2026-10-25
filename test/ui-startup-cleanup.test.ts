@@ -116,6 +116,49 @@ test("delayed SDK readiness preserves an early pasted draft through streamed eve
 	});
 });
 
+test("a fragmented startup Kitty reply does not become composer text", async () => {
+	await withLaunch(async (launch) => {
+		const terminal = new FakeTerminal();
+		const fake = new FakeQueryHarness();
+		const controller = makeController(launch, fake, terminal);
+		const running = controller.run();
+		void running.catch(() => undefined);
+		const forwarded: string[] = [];
+		let removeObserver = () => {};
+
+		try {
+			await waitFor(() => fake.parameters !== undefined);
+			assert.equal(controller.views.editor.getExpandedText(), "");
+			removeObserver = controller.views.tui.addInputListener((data) => { forwarded.push(data); });
+
+			terminal.input("\u001b[");
+			terminal.input("?");
+			terminal.input("7");
+			terminal.input("u");
+			assert.equal(controller.views.editor.getExpandedText(), "");
+
+			terminal.input("\u001b[6;40;18t");
+			terminal.input("\u001b[");
+			terminal.input("?");
+			terminal.input("2");
+			terminal.input("5");
+			terminal.input("h");
+			assert.deepEqual(forwarded, ["\u001b[6;40;18t", "\u001b[?25h"]);
+
+			terminal.input("A");
+			assert.equal(controller.views.editor.getExpandedText(), "A");
+			assert.deepEqual(forwarded, ["\u001b[6;40;18t", "\u001b[?25h", "A"]);
+			await controller.close(0);
+			assert.equal(await running, 0);
+			assert.deepEqual([fake.closeCalls, terminal.stopCalls], [1, 1]);
+		} finally {
+			removeObserver();
+			await controller.close(1).catch(() => undefined);
+			await running.catch(() => undefined);
+		}
+	});
+});
+
 test("initialization failure after input keeps the draft and restores the terminal", async () => {
 	await withLaunch(async (launch) => {
 		const terminal = new FakeTerminal();
@@ -253,6 +296,74 @@ test("SDK output arriving after close is ignored before terminal cleanup complet
 			assert.equal(terminal.stopCalls, 1);
 		} finally {
 			fake.finishOutput();
+			await controller.close(1).catch(() => undefined);
+			await running.catch(() => undefined);
+		}
+	});
+});
+
+test("late tail after startup reply timeout never enters composer", async () => {
+	await withLaunch(async (launch) => {
+		const terminal = new FakeTerminal();
+		const fake = new FakeQueryHarness();
+		const controller = makeController(launch, fake, terminal);
+		const running = controller.run();
+		void running.catch(() => undefined);
+
+		try {
+			await waitFor(() => fake.parameters !== undefined);
+			terminal.input("\u001b[?");
+			await new Promise<void>((resolve) => setTimeout(resolve, 275));
+			const afterTimeout = controller.views.editor.getExpandedText();
+			terminal.input("7u");
+			const afterReplyTail = controller.views.editor.getExpandedText();
+			assert.deepEqual({ afterTimeout, afterReplyTail }, { afterTimeout: "", afterReplyTail: "" });
+		} finally {
+			await controller.close(1).catch(() => undefined);
+			await running.catch(() => undefined);
+		}
+	});
+});
+
+test("fragmented ordinary left-arrow remains a keyboard action during startup capture", async () => {
+	await withLaunch(async (launch) => {
+		const terminal = new FakeTerminal();
+		const fake = new FakeQueryHarness();
+		const controller = makeController(launch, fake, terminal);
+		const running = controller.run();
+		void running.catch(() => undefined);
+
+		try {
+			await waitFor(() => fake.parameters !== undefined);
+			controller.setDraft("abc");
+			terminal.input("\u001b[");
+			await new Promise<void>((resolve) => setTimeout(resolve, 100));
+			terminal.input("D");
+			terminal.input("x");
+			assert.equal(controller.views.editor.getExpandedText(), "abxc");
+		} finally {
+			await controller.close(1).catch(() => undefined);
+			await running.catch(() => undefined);
+		}
+	});
+});
+
+test("Ctrl+C remains a keyboard action after a pending startup prefix", async () => {
+	await withLaunch(async (launch) => {
+		const terminal = new FakeTerminal();
+		const fake = new FakeQueryHarness();
+		const controller = makeController(launch, fake, terminal);
+		const running = controller.run();
+		void running.catch(() => undefined);
+
+		try {
+			await waitFor(() => fake.parameters !== undefined);
+			terminal.input("\u001b[?");
+			terminal.input("\u0003");
+			await waitFor(() => fake.closeCalls === 1);
+			assert.equal(await running, 0);
+			assert.equal(terminal.stopCalls, 1);
+		} finally {
 			await controller.close(1).catch(() => undefined);
 			await running.catch(() => undefined);
 		}

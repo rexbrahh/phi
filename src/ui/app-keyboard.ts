@@ -5,6 +5,20 @@ import type { AppShellController } from "./app-shell.js";
 import type { AppViews } from "./app.js";
 import type { InspectorPanel } from "./inspectors.js";
 
+function isStartupTerminalReplyPrefix(data: string): boolean {
+	return data === "\u001b["
+		|| /^\u001b\[\?[\d;]*$/u.test(data)
+		|| /^\u001b\[6(?:;\d*)?(?:;\d*)?$/u.test(data);
+}
+
+function isKittyFlagsOrDeviceAttributesReply(data: string): boolean {
+	return /^\u001b\[\?\d+u$/u.test(data) || /^\u001b\[\?[\d;]*c$/u.test(data);
+}
+
+function isCellSizeReply(data: string): boolean {
+	return /^\u001b\[6;\d+;\d+t$/u.test(data);
+}
+
 export interface AppKeyboardActions {
 	dialogVisible(): boolean;
 	handleDialogInput(data: string): void;
@@ -33,6 +47,8 @@ export class AppKeyboardController {
 	private readonly inlinePastes: string[] = [];
 	private currentPaste = "";
 	private capturingPaste = false;
+	private startupTerminalReplyCapture = false;
+	private startupTerminalReply = "";
 
 	constructor(
 		private readonly views: AppViews,
@@ -42,7 +58,19 @@ export class AppKeyboardController {
 		private readonly actions: AppKeyboardActions,
 	) {}
 
-	onInput(data: string): { consume?: boolean } | undefined {
+	beginStartupTerminalReplyCapture(): void {
+		this.clearStartupTerminalReply();
+		this.startupTerminalReplyCapture = true;
+	}
+
+	endStartupTerminalReplyCapture(): void {
+		this.startupTerminalReplyCapture = false;
+		this.clearStartupTerminalReply();
+	}
+
+	onInput(data: string): { consume?: boolean; data?: string } | undefined {
+		const startupReply = this.captureStartupTerminalReply(data);
+		if (startupReply) return startupReply;
 		if (isKeyRelease(data)) return undefined;
 		if (this.actions.exitConfirmationVisible()) {
 			this.discardPartialPaste();
@@ -221,6 +249,54 @@ export class AppKeyboardController {
 	private discardPartialPaste(): void {
 		this.currentPaste = "";
 		this.capturingPaste = false;
+	}
+
+	private captureStartupTerminalReply(data: string): { consume?: boolean; data?: string } | undefined {
+		if (!this.startupTerminalReplyCapture) return undefined;
+		const standaloneControlByte = data.length === 1 && data.charCodeAt(0) < 0x20;
+		if (this.startupTerminalReply && (data.startsWith("\u001b") || standaloneControlByte)) {
+			this.clearStartupTerminalReply();
+			if (standaloneControlByte) {
+				this.startupTerminalReplyCapture = false;
+				return undefined;
+			}
+		}
+		if (!this.startupTerminalReply) {
+			if (isKittyFlagsOrDeviceAttributesReply(data)) return { consume: true };
+			if (isCellSizeReply(data)) return undefined;
+			if (!isStartupTerminalReplyPrefix(data)) {
+				this.startupTerminalReplyCapture = false;
+				return undefined;
+			}
+			this.holdStartupTerminalReply(data);
+			return { consume: true };
+		}
+
+		const candidate = this.startupTerminalReply + data;
+		if (isKittyFlagsOrDeviceAttributesReply(candidate)) {
+			this.clearStartupTerminalReply();
+			return { consume: true };
+		}
+		if (isCellSizeReply(candidate)) {
+			this.clearStartupTerminalReply();
+			return { data: candidate };
+		}
+		if (isStartupTerminalReplyPrefix(candidate)) {
+			this.holdStartupTerminalReply(candidate);
+			return { consume: true };
+		}
+
+		this.startupTerminalReplyCapture = false;
+		this.clearStartupTerminalReply();
+		return { data: candidate };
+	}
+
+	private holdStartupTerminalReply(candidate: string): void {
+		this.startupTerminalReply = candidate;
+	}
+
+	private clearStartupTerminalReply(): void {
+		this.startupTerminalReply = "";
 	}
 
 	private toggleInspector(panel: InspectorPanel): void {
