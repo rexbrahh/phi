@@ -253,7 +253,8 @@ export class AppKeyboardController {
 
 	private captureStartupTerminalReply(data: string): { consume?: boolean; data?: string } | undefined {
 		if (!this.startupTerminalReplyCapture) return undefined;
-		const standaloneControlByte = data.length === 1 && data.charCodeAt(0) < 0x20;
+		const standaloneControlByte = data.length === 1
+			&& (data.charCodeAt(0) < 0x20 || data.charCodeAt(0) === 0x7f);
 		if (this.startupTerminalReply && (data.startsWith("\u001b") || standaloneControlByte)) {
 			this.clearStartupTerminalReply();
 			if (standaloneControlByte) {

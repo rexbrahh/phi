@@ -369,3 +369,24 @@ test("Ctrl+C remains a keyboard action after a pending startup prefix", async ()
 		}
 	});
 });
+
+test("Backspace deletes the draft after a pending startup reply prefix", async () => {
+	await withLaunch(async (launch) => {
+		const terminal = new FakeTerminal();
+		const fake = new FakeQueryHarness();
+		const controller = makeController(launch, fake, terminal);
+		const running = controller.run();
+		void running.catch(() => undefined);
+
+		try {
+			await waitFor(() => fake.parameters !== undefined);
+			controller.setDraft("x");
+			terminal.input("\u001b[?");
+			terminal.input("\u007f");
+			assert.equal(controller.views.editor.getExpandedText(), "");
+		} finally {
+			await controller.close(1).catch(() => undefined);
+			await running.catch(() => undefined);
+		}
+	});
+});
