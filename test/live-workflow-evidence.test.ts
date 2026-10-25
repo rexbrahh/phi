@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 const FIXTURE_NAME = "phi-live-acceptance";
@@ -12,6 +15,34 @@ type WorkflowOutputProbe = (
 	messages: readonly unknown[],
 	workflowToolUseId: string,
 ) => Record<string, unknown> | undefined;
+type FailureTraceWriter = (
+	root: string,
+	initialMessages: readonly unknown[],
+	resumedMessages: readonly unknown[],
+	selectedApiKey?: string,
+) => Promise<string>;
+
+const FAILURE_TRACE_FILENAME = "native-sdk-failure-trace.json";
+
+async function writeFailureTrace(
+	root: string,
+	initialMessages: readonly unknown[],
+	resumedMessages: readonly unknown[],
+	selectedApiKey?: string,
+): Promise<string> {
+	const harness = await import("./live.js") as unknown as { writeLiveFailureTrace?: FailureTraceWriter };
+	assert.equal(typeof harness.writeLiveFailureTrace, "function", "private SDK failure trace writer must exist");
+	return harness.writeLiveFailureTrace!(root, initialMessages, resumedMessages, selectedApiKey);
+}
+
+async function withFailureTraceRoot(run: (root: string) => Promise<void>): Promise<void> {
+	const root = await mkdtemp(join(tmpdir(), "phi-live-failure-trace-test-"));
+	try {
+		await run(root);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+}
 
 async function formatEvidence(messages: readonly unknown[], selectedApiKey?: string): Promise<string> {
 	const harness = await import("./live.js") as unknown as { formatWorkflowFailureEvidence?: EvidenceFormatter };
@@ -320,4 +351,61 @@ test("redacts secrets in input and model names and status while bounding large i
 	assert.equal(summary.includes(SECRET_PATH), false);
 	assert.equal(summary.includes("999"), false);
 	assert.ok(summary.length <= 2_000);
+});
+
+test("private SDK failure trace retains native task IDs and event payloads", async () => {
+	await withFailureTraceRoot(async (root) => {
+		const initialMessages = [{
+			type: "system",
+			subtype: "task_started",
+			task_id: "native-task-start-7",
+			tool_use_id: "native-control-use-7",
+			parent_task_id: "native-workflow-task-3",
+			task_type: "local_agent",
+			prompt: "synthetic initial agent prompt",
+		}];
+		const resumedMessages = [{
+			type: "system",
+			subtype: "task_updated",
+			task_id: "native-task-resumed-9",
+			patch: { status: "failed", error: "synthetic task payload" },
+		}];
+
+		const path = await writeFailureTrace(root, initialMessages, resumedMessages);
+		assert.equal(path, join(root, FAILURE_TRACE_FILENAME));
+		assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { initialMessages, resumedMessages });
+	});
+});
+
+test("private SDK failure trace redacts the selected API key", async () => {
+	await withFailureTraceRoot(async (root) => {
+		const selectedApiKey = "offline-synthetic-selected-api-key";
+		const path = await writeFailureTrace(root, [{ type: "assistant", message: { content: selectedApiKey } }], [], selectedApiKey);
+		const serialized = await readFile(path, "utf8");
+
+		assert.equal(serialized.includes(selectedApiKey), false);
+		assert.ok(serialized.includes("[redacted API key]"));
+	});
+});
+
+test("private SDK failure trace uses mode 0600 and does not replace an existing artifact", async () => {
+	await withFailureTraceRoot(async (root) => {
+		const path = await writeFailureTrace(root, [{ type: "system", task_id: "native-task-private" }], []);
+		assert.equal((await stat(path)).mode & 0o777, 0o600);
+		const original = await readFile(path, "utf8");
+
+		await assert.rejects(writeFailureTrace(root, [{ type: "system", task_id: "replacement" }], []), { code: "EEXIST" });
+		assert.equal(await readFile(path, "utf8"), original);
+	});
+});
+
+test("private SDK failure trace refuses serialized data above 2 MiB", async () => {
+	await withFailureTraceRoot(async (root) => {
+		const oversizedText = "é".repeat(1_048_577);
+		await assert.rejects(
+			writeFailureTrace(root, [{ type: "assistant", message: { content: oversizedText } }], []),
+			/exceeds 2 MiB/,
+		);
+		assert.deepEqual(await readdir(root), []);
+	});
 });

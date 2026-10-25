@@ -28,6 +28,8 @@ const MAX_WORKFLOW_FAILURE_EVIDENCE_CHARS = 1_900;
 const MAX_WORKFLOW_ERROR_EXCERPT_CHARS = 320;
 const MAX_DIAGNOSTIC_LIST_ITEMS = 6;
 const MAX_DIAGNOSTIC_LABEL_CHARS = 40;
+const MAX_FAILURE_TRACE_BYTES = 2 * 1024 * 1024;
+const FAILURE_TRACE_FILENAME = "native-sdk-failure-trace.json";
 const MAX_PERMISSION_DENIALS = 3;
 const MAX_PERMISSION_SUMMARY_CHARS = 640;
 const MAX_PERMISSION_INPUT_KEYS = 3;
@@ -657,6 +659,27 @@ function reportLiveFailureDiagnostic(error: unknown, options: LiveFailureDiagnos
 	}));
 }
 
+export async function writeLiveFailureTrace(
+	root: string,
+	initialMessages: readonly unknown[],
+	resumedMessages: readonly unknown[],
+	selectedApiKey?: string,
+): Promise<string> {
+	const path = join(root, FAILURE_TRACE_FILENAME);
+	const serialized = JSON.stringify({ initialMessages, resumedMessages });
+	if (typeof serialized !== "string") throw new Error("Could not serialize private native SDK failure trace");
+	const redacted = selectedApiKey
+		? serialized
+			.replaceAll(selectedApiKey, "[redacted API key]")
+			.replaceAll(JSON.stringify(selectedApiKey).slice(1, -1), "[redacted API key]")
+		: serialized;
+	if (Buffer.byteLength(redacted, "utf8") > MAX_FAILURE_TRACE_BYTES) {
+		throw new Error("Serialized private native SDK failure trace exceeds 2 MiB");
+	}
+	await writeFile(path, redacted, { encoding: "utf8", flag: "wx", mode: 0o600 });
+	return path;
+}
+
 export async function cleanupLiveFixture(
 	root: string,
 	options: {
@@ -721,6 +744,7 @@ async function main(): Promise<void> {
 	let scenarioFailed = false;
 	let scenarioFailure: unknown;
 	const initialEvents: EventLog = { messages: [], errors: [] };
+	const resumedEvents: EventLog = { messages: [], errors: [] };
 	const permissionEvidence: LivePermissionEvidence = { deniedActionCount: 0, denials: [] };
 	try {
 		const firstBudgetUsd = maxBudgetUsd * INITIAL_BUDGET_SHARE;
@@ -1009,7 +1033,6 @@ async function main(): Promise<void> {
 			CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "2",
 		};
 
-		const resumedEvents: EventLog = { messages: [], errors: [] };
 		const resumed = createFixtureSession(resumeOptions, {
 			onMessage(message) {
 				resumedEvents.messages.push(message);
@@ -1086,6 +1109,20 @@ async function main(): Promise<void> {
 		}
 		const allQueriesTerminated = closeOutcomes.every((outcome) => outcome.terminated);
 		if (!allQueriesTerminated) process.exitCode = process.exitCode || 1;
+		let failureTraceError: unknown;
+		if (scenarioFailed && sessions.length > 0 && !(scenarioFailure instanceof QueryCreationTripwireError)) {
+			try {
+				const tracePath = await writeLiveFailureTrace(
+					fixture.root,
+					initialEvents.messages,
+					resumedEvents.messages,
+					process.env.ANTHROPIC_API_KEY,
+				);
+				console.error(`Private native SDK failure trace: ${tracePath}`);
+			} catch (error) {
+				failureTraceError = new Error("Could not write private native SDK failure trace", { cause: error });
+			}
+		}
 		const fixtureCleanupError = await cleanupLiveFixture(fixture.root, {
 			scenarioFailed,
 			nativeScenarioStarted: sessions.length > 0,
@@ -1094,9 +1131,10 @@ async function main(): Promise<void> {
 		});
 		if (fixtureCleanupError !== undefined) process.exitCode = process.exitCode || 1;
 
-		const cleanupErrors = closeOutcomes
+		const cleanupErrors: unknown[] = failureTraceError === undefined ? [] : [failureTraceError];
+		cleanupErrors.push(...closeOutcomes
 			.map((outcome) => outcome.error)
-			.filter((error) => error !== undefined);
+			.filter((error) => error !== undefined));
 		if (fixtureCleanupError !== undefined) cleanupErrors.push(fixtureCleanupError);
 		const cleanupDidFail = cleanupFailure !== undefined || fixtureCleanupError !== undefined;
 		if (scenarioFailed || cleanupDidFail) {
