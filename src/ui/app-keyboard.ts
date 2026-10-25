@@ -1,4 +1,4 @@
-import { Key, matchesKey } from "@earendil-works/pi-tui";
+import { isKeyRelease, Key, matchesKey } from "@earendil-works/pi-tui";
 import type { PhiState } from "../state.js";
 import { AppAttachmentController } from "./app-attachments.js";
 import type { AppShellController } from "./app-shell.js";
@@ -43,6 +43,7 @@ export class AppKeyboardController {
 	) {}
 
 	onInput(data: string): { consume?: boolean } | undefined {
+		if (isKeyRelease(data)) return undefined;
 		if (this.actions.exitConfirmationVisible()) {
 			this.discardPartialPaste();
 			this.actions.handleExitConfirmationInput(data);
