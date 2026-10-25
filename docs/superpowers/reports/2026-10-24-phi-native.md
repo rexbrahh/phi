@@ -45,3 +45,5 @@ Controls 2 passed its recorded scope. It did not pass the mandatory Workflow-chi
 - Check continued main input, session resume, checkpoint limits, and query termination.
 
 The native Bash stop does not satisfy the fourth gate. No more paid Workflow-stop guess probes are planned. The latest budget ledger reports no active runs. Its SDK estimates are not a billing total. See the [v1 report](2026-10-24-phi-v1.md) for the full budget record.
+
+Three later configuration probes on `b17508c` used one query and a $0.03 cap each. Native Skill invocation and the project settings hook produced positive evidence. Workflow launch remained incomplete: the callback included a nonempty `script` string that the private empty-script guard denied. No child started. All three queries terminated; their final costs are unreported, not zero. The fixtures remain preserved. This result does not establish backgrounding or continuation and does not change the child-stop blocker.
