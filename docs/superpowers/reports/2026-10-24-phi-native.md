@@ -40,6 +40,26 @@ The offline investigation found no proven request or result-projection mismatch 
 
 Follow-up source `1982fd5f52f8d42d91b95e403f69c1deb2ab86cf` adds one bounded failure-only Workflow summary. It correlates the result internally, reports safe shape/status/model metadata, and redacts any short tool-error excerpt. It excludes prompts and identifier/path values. Build, typecheck, and 15 focused offline tests passed. No second native attempt ran during this work.
 
-The next proposed run uses the same cheapest model with a $0.02 SDK budget to capture the missing result evidence. It remains unrun. Required native assertions remain intact. Ghostty acceptance also remains pending because the user has not opened Phi yet.
+The instrumented follow-up used the same cheapest model with a $0.02 SDK budget to capture the missing result evidence. Required native assertions remain intact. Ghostty acceptance also remains pending because the user has not opened Phi yet.
+
+## Second authorized attempt
+
+The user authorized one additional attempt with a $0.02 SDK budget. Source `be105b07aa479eaccfb197718f12b3c001bfacb6` ran from 00:05:37 to 00:08:38 UTC on 2026-10-25. It exited with status 1. Query termination was observed, and the outer watchdog did not fire.
+
+The summary correlated the exact named Workflow call with a tool result carrying `is_error=true`. Its error excerpt was:
+
+> The live fixture denied an unlisted tool action.
+
+That text originates in the fixture's permission callback. The assistant request had only the expected `name` key. The callback's actual input shape was not retained, so the exact reason for its denial remains unverified. The evidence identifies a fixture permission denial rather than a proven SDK Workflow implementation defect.
+
+The latest model-result subtype was `success`, and its reported model usage contained only `claude-haiku-5-5`. This establishes the reported main-session model, not successful Workflow execution. Later native acceptance assertions were not reached.
+
+The second attempt's latest observed SDK cost was **$0.0052**. The two reported estimates sum to **$0.0102**. This sum does not establish actual billing or a remaining credit balance. No further paid attempt is authorized by the user's one-attempt approval.
+
+Offline source inspection and a direct callback regression confirm that the exact `{name}` request is allowed. The SDK wrapper passes its control-request fields to the callback without normalizing them. The actual denied callback name and input were not retained, so a causal permission correction remains unsupported.
+
+Source `24ca1944649f98985caf215a5be3e0aa75f0823b` preserves all allow/deny rules and adds a failure-only summary of at most three denied actions. It records sanitized tool names, input key names, and fixed rejection reasons. It excludes input values and credentials. Build, typecheck, and 17 focused checks passed with synthetic inputs. No further paid run was performed.
+
+Required native assertions and Ghostty acceptance remain open. The next diagnostic run requires further authorization.
 
 Primary references: [Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing), [Haiku 5.5](https://platform.claude.com/docs/en/models/haiku-5-5/overview), [SDK dynamic workflows](https://platform.claude.com/cookbook/claude-agent-sdk-08-dynamic-workflows), and [runtime environment variables](https://code.claude.com/docs/en/env-vars).
