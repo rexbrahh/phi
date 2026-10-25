@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID, type UUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -396,6 +396,38 @@ function reportLiveFailureDiagnostic(error: unknown, options: LiveFailureDiagnos
 	}));
 }
 
+export async function cleanupLiveFixture(
+	root: string,
+	options: {
+		scenarioFailed: boolean;
+		nativeScenarioStarted: boolean;
+		queriesTerminated: boolean;
+		expectedTripwireFailure: boolean;
+	},
+	reportRetainedRoot: (root: string) => void = (retainedRoot) => {
+		console.error(`Retained private native acceptance fixture root: ${retainedRoot}`);
+	},
+): Promise<unknown | undefined> {
+	if (!options.queriesTerminated) return undefined;
+
+	if (options.scenarioFailed && options.nativeScenarioStarted && !options.expectedTripwireFailure) {
+		try {
+			await chmod(root, 0o700);
+			reportRetainedRoot(root);
+			return undefined;
+		} catch (error) {
+			return error;
+		}
+	}
+
+	try {
+		await rm(root, { recursive: true, force: true });
+		return undefined;
+	} catch (error) {
+		return error;
+	}
+}
+
 async function main(): Promise<void> {
 	const maxBudgetUsd = validateLiveInvocation(process.env, process.argv.slice(2));
 	const deadline = Date.now() + MAX_TOTAL_TIME_MS;
@@ -773,17 +805,14 @@ async function main(): Promise<void> {
 			process.exitCode = process.exitCode || 1;
 		}
 		const allQueriesTerminated = closeOutcomes.every((outcome) => outcome.terminated);
-		let fixtureCleanupError: unknown;
-		if (allQueriesTerminated) {
-			try {
-				await rm(fixture.root, { recursive: true, force: true });
-			} catch (error) {
-				fixtureCleanupError = error;
-				process.exitCode = process.exitCode || 1;
-			}
-		} else {
-			process.exitCode = process.exitCode || 1;
-		}
+		if (!allQueriesTerminated) process.exitCode = process.exitCode || 1;
+		const fixtureCleanupError = await cleanupLiveFixture(fixture.root, {
+			scenarioFailed,
+			nativeScenarioStarted: sessions.length > 0,
+			queriesTerminated: allQueriesTerminated,
+			expectedTripwireFailure: scenarioFailure instanceof QueryCreationTripwireError,
+		});
+		if (fixtureCleanupError !== undefined) process.exitCode = process.exitCode || 1;
 
 		const cleanupErrors = closeOutcomes
 			.map((outcome) => outcome.error)

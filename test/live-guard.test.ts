@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -61,9 +61,33 @@ type FixtureCallbackHarness = {
 	};
 };
 
+type FixtureCleanupHarness = {
+	cleanupLiveFixture?: (
+		root: string,
+		options: {
+			scenarioFailed: boolean;
+			nativeScenarioStarted: boolean;
+			queriesTerminated: boolean;
+			expectedTripwireFailure: boolean;
+		},
+		reportRetainedRoot?: (root: string) => void,
+	) => Promise<unknown | undefined>;
+};
+
 const runner = join(dirname(fileURLToPath(import.meta.url)), "live.js");
 const workflowScriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../test/live-workflow.js");
 const workflowScript = readFileSync(workflowScriptPath, "utf8");
+
+async function withCleanupFixture(run: (root: string) => Promise<void>): Promise<void> {
+	const parent = mkdtempSync(join(tmpdir(), "phi-live-cleanup-test-"));
+	const root = join(parent, "owned-fixture");
+	mkdirSync(root, { mode: 0o700 });
+	try {
+		await run(root);
+	} finally {
+		rmSync(parent, { recursive: true, force: true });
+	}
+}
 
 test("live budget parser accepts the planned positive cap and rejects malformed arguments", () => {
 	assert.equal(parseLiveBudget(["--max-budget-usd", "0.10"]), 0.10);
@@ -330,6 +354,98 @@ test("deadline closes the query and waits for iterator termination", async () =>
 	assert.equal(outcome.terminated, false, "fixture cleanup must know when iterator termination was not observed");
 });
 
+test("successful fixture cleanup removes its owned root", async () => {
+	const harness = await import("./live.js") as unknown as FixtureCleanupHarness;
+	assert.equal(typeof harness.cleanupLiveFixture, "function", "fixture cleanup policy must be available for offline coverage");
+	await withCleanupFixture(async (root) => {
+		const retainedRoots: string[] = [];
+		const error = await harness.cleanupLiveFixture!(root, {
+			scenarioFailed: false,
+			nativeScenarioStarted: true,
+			queriesTerminated: true,
+			expectedTripwireFailure: false,
+		}, (retainedRoot) => retainedRoots.push(retainedRoot));
+
+		assert.equal(error, undefined);
+		assert.equal(existsSync(root), false);
+		assert.deepEqual(retainedRoots, []);
+	});
+});
+
+test("failure before native query creation removes its fixture root", async () => {
+	const harness = await import("./live.js") as unknown as FixtureCleanupHarness;
+	assert.equal(typeof harness.cleanupLiveFixture, "function", "fixture cleanup policy must be available for offline coverage");
+	await withCleanupFixture(async (root) => {
+		const retainedRoots: string[] = [];
+		const error = await harness.cleanupLiveFixture!(root, {
+			scenarioFailed: true,
+			nativeScenarioStarted: false,
+			queriesTerminated: true,
+			expectedTripwireFailure: false,
+		}, (retainedRoot) => retainedRoots.push(retainedRoot));
+
+		assert.equal(error, undefined);
+		assert.equal(existsSync(root), false);
+		assert.deepEqual(retainedRoots, []);
+	});
+});
+
+test("real scenario failure retains the private fixture root and reports its pointer", async () => {
+	const harness = await import("./live.js") as unknown as FixtureCleanupHarness;
+	assert.equal(typeof harness.cleanupLiveFixture, "function", "fixture cleanup policy must be available for offline coverage");
+	await withCleanupFixture(async (root) => {
+		chmodSync(root, 0o755);
+		const retainedRoots: string[] = [];
+		const error = await harness.cleanupLiveFixture!(root, {
+			scenarioFailed: true,
+			nativeScenarioStarted: true,
+			queriesTerminated: true,
+			expectedTripwireFailure: false,
+		}, (retainedRoot) => retainedRoots.push(retainedRoot));
+
+		assert.equal(error, undefined);
+		assert.equal(existsSync(root), true);
+		assert.equal(statSync(root).mode & 0o777, 0o700);
+		assert.deepEqual(retainedRoots, [root]);
+	});
+});
+
+test("expected query-creation tripwire failure removes its fixture root", async () => {
+	const harness = await import("./live.js") as unknown as FixtureCleanupHarness;
+	assert.equal(typeof harness.cleanupLiveFixture, "function", "fixture cleanup policy must be available for offline coverage");
+	await withCleanupFixture(async (root) => {
+		const retainedRoots: string[] = [];
+		const error = await harness.cleanupLiveFixture!(root, {
+			scenarioFailed: true,
+			nativeScenarioStarted: false,
+			queriesTerminated: true,
+			expectedTripwireFailure: true,
+		}, (retainedRoot) => retainedRoots.push(retainedRoot));
+
+		assert.equal(error, undefined);
+		assert.equal(existsSync(root), false);
+		assert.deepEqual(retainedRoots, []);
+	});
+});
+
+test("unobserved query termination keeps the fixture without a retained-root notice", async () => {
+	const harness = await import("./live.js") as unknown as FixtureCleanupHarness;
+	assert.equal(typeof harness.cleanupLiveFixture, "function", "fixture cleanup policy must be available for offline coverage");
+	await withCleanupFixture(async (root) => {
+		const retainedRoots: string[] = [];
+		const error = await harness.cleanupLiveFixture!(root, {
+			scenarioFailed: true,
+			nativeScenarioStarted: true,
+			queriesTerminated: false,
+			expectedTripwireFailure: false,
+		}, (retainedRoot) => retainedRoots.push(retainedRoot));
+
+		assert.equal(error, undefined);
+		assert.equal(existsSync(root), true);
+		assert.deepEqual(retainedRoots, []);
+	});
+});
+
 test(
 	"live runner refuses missing opt-in, missing or invalid budget, and missing isolated fixture key before query import",
 	async () => {
@@ -412,6 +528,11 @@ test(
 			assert.equal(tripwire.status, 86, "query tripwire must stop before the SDK query function runs");
 			assert.match(tripwire.stderr, /query-creation tripwire blocked/i);
 			assert.doesNotMatch(`${tripwire.stdout}\n${tripwire.stderr}`, /offline-tripwire-only/);
+			assert.deepEqual(
+				readdirSync(testHome).filter((entry) => entry.startsWith("phi-live-acceptance-")),
+				[],
+				"expected query-creation tripwire must remove its scratch fixture",
+			);
 		} finally {
 			rmSync(testHome, { recursive: true, force: true });
 		}
