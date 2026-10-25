@@ -3,6 +3,7 @@ import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { NativeControlTrace } from "./live.js";
 
 const FIXTURE_NAME = "phi-live-acceptance";
 const WORKFLOW_ID = "private-workflow-tool-use-id";
@@ -27,6 +28,7 @@ type FailureTraceWriter = (
 	resumedMessages: readonly unknown[],
 	selectedApiKey?: string,
 	permissionDenials?: readonly PermissionTraceDenial[],
+	nativeControl?: NativeControlTrace,
 ) => Promise<string>;
 
 type PermissionTraceHarness = {
@@ -59,10 +61,11 @@ async function writeFailureTrace(
 	resumedMessages: readonly unknown[],
 	selectedApiKey?: string,
 	permissionDenials?: readonly PermissionTraceDenial[],
+	nativeControl?: NativeControlTrace,
 ): Promise<string> {
 	const harness = await import("./live.js") as unknown as { writeLiveFailureTrace?: FailureTraceWriter };
 	assert.equal(typeof harness.writeLiveFailureTrace, "function", "private SDK failure trace writer must exist");
-	return harness.writeLiveFailureTrace!(root, initialMessages, resumedMessages, selectedApiKey, permissionDenials);
+	return harness.writeLiveFailureTrace!(root, initialMessages, resumedMessages, selectedApiKey, permissionDenials, nativeControl);
 }
 
 async function withFailureTraceRoot(run: (root: string) => Promise<void>): Promise<void> {
@@ -404,6 +407,51 @@ test("private SDK failure trace retains native task IDs and event payloads", asy
 		const path = await writeFailureTrace(root, initialMessages, resumedMessages);
 		assert.equal(path, join(root, FAILURE_TRACE_FILENAME));
 		assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { initialMessages, resumedMessages });
+	});
+});
+
+test("private SDK failure trace retains typed native control evidence without changing legacy callers", async () => {
+	const nativeControl: NativeControlTrace = {
+		lifecycle: [{
+			event: "SubagentStart",
+			agentId: "private-native-agent-id",
+			agentType: "general-purpose",
+			callbackToolUseId: "private-lifecycle-tool-use",
+		}],
+		monitorRequests: [{
+			agentId: "private-native-agent-id",
+			agentType: "general-purpose",
+			toolUseId: "private-monitor-tool-use",
+			callbackToolUseId: "private-monitor-callback-use",
+			scenario: "stopped",
+			settlement: "signal-aborted",
+		}],
+		backgroundControls: [{
+			targetClass: "all-foreground",
+			returned: false,
+			subsequentTaskClasses: [["local_workflow", "local_agent"]],
+		}],
+		stopAttempts: [{
+			agentId: "private-native-agent-id",
+			targetId: "private-native-agent-id",
+			candidateKind: "agent-id-diagnostic",
+			callResolved: true,
+			stoppedNotification: true,
+			monitorCancelled: true,
+			siblingPending: true,
+		}],
+		journalPhaseStarts: 2,
+		journalMatchedAgentStarts: 2,
+		pendingMonitorRequestCount: 2,
+		siblingPendingAfterFirstStop: true,
+		continuedInput: true,
+		checkpointPreview: true,
+		resumed: true,
+	};
+	await withFailureTraceRoot(async (root) => {
+		const path = await writeFailureTrace(root, [], [], undefined, undefined, nativeControl);
+		const trace = JSON.parse(await readFile(path, "utf8")) as { nativeControl: NativeControlTrace };
+		assert.deepEqual(trace.nativeControl, nativeControl);
 	});
 });
 

@@ -30,6 +30,7 @@ const AGENT_SLEEP_COMMAND = "sleep 90";
 const INITIAL_BUDGET_SHARE = 0.75;
 const MAX_TOTAL_TIME_MS = 180_000;
 const STEP_TIMEOUT_MS = 60_000;
+const NATIVE_STOP_OBSERVATION_MS = 8_000;
 const TERMINATION_TIMEOUT_MS = 15_000;
 const WORKFLOW_AGENT_RELEASE_FILE_NAMES = {
 	stopped: ".phi-live-agent-stopped.release",
@@ -824,12 +825,14 @@ export async function writeLiveFailureTrace(
 	resumedMessages: readonly unknown[],
 	selectedApiKey?: string,
 	permissionDenials?: readonly LivePermissionTraceDenial[],
+	nativeControl?: NativeControlTrace,
 ): Promise<string> {
 	const path = join(root, FAILURE_TRACE_FILENAME);
 	const serialized = JSON.stringify({
 		initialMessages,
 		resumedMessages,
 		...(permissionDenials !== undefined && permissionDenials.length > 0 ? { permissionDenials } : {}),
+		...(nativeControl === undefined ? {} : { nativeControl }),
 	});
 	if (typeof serialized !== "string") throw new Error("Could not serialize private native SDK failure trace");
 	const redacted = selectedApiKey
@@ -900,7 +903,6 @@ async function main(): Promise<void> {
 	let latestObservedTotalCostUsd: number | undefined;
 	let sessionId: string | undefined;
 	let workflowTaskId: string | undefined;
-	let workflowRunId: string | undefined;
 	let validatedWorkflowJournalRef: WorkflowReference | undefined;
 	let workflowJournal: WorkflowJournalMetadata | undefined;
 	let workflowJournalWarningCount: number | undefined;
@@ -910,6 +912,10 @@ async function main(): Promise<void> {
 	const initialEvents: EventLog = { messages: [], errors: [] };
 	const resumedEvents: EventLog = { messages: [], errors: [] };
 	const permissionEvidence: LivePermissionEvidence = { deniedActionCount: 0, denials: [] };
+	const nativeControl = createNativeControlTrace();
+	const pendingMonitorGate = new PendingMonitorGate(nativeControl);
+	let backgroundSnapshotStartIndex: number | undefined;
+	let backgroundControlRecord: NativeBackgroundControlRecord | undefined;
 	try {
 		const firstBudgetUsd = maxBudgetUsd * INITIAL_BUDGET_SHARE;
 		const initialLaunch = parseArgs([
@@ -919,6 +925,7 @@ async function main(): Promise<void> {
 			"--max-budget-usd", String(firstBudgetUsd),
 		], environment);
 		const firstOptions = buildOptions(initialLaunch, fixtureCallbacks(fixture, permissionEvidence), environment);
+		firstOptions.hooks = mergeHookMatchers(firstOptions.hooks, createNativeControlHooks(nativeControl, pendingMonitorGate));
 		assert.equal(firstOptions.model, LIVE_MODEL);
 		firstOptions.maxTurns = MAX_MAIN_TURNS;
 		firstOptions.effort = "low";
@@ -1015,8 +1022,8 @@ async function main(): Promise<void> {
 		assert.ok(workflowOutput.taskId, "WorkflowOutput.taskId is required for the workflow task");
 		assert.ok(workflowOutput.runId, "WorkflowOutput.runId is required for local workflow resume metadata");
 		assert.ok(workflowOutput.transcriptDir, "WorkflowOutput.transcriptDir is required for native metadata inspection");
-		workflowTaskId = workflowOutput.taskId;
-		workflowRunId = workflowOutput.runId;
+		const nativeWorkflowTaskId = workflowOutput.taskId;
+		workflowTaskId = nativeWorkflowTaskId;
 
 		const journalRef: WorkflowReference = {
 			sessionId,
@@ -1027,8 +1034,9 @@ async function main(): Promise<void> {
 			readWorkflowJournal,
 			journalRef,
 			events,
-			deadline,
+			Math.min(deadline, Date.now() + STEP_TIMEOUT_MS),
 			session,
+			nativeWorkflowTaskId,
 		);
 		validatedWorkflowJournalRef = journalRef;
 		workflowJournal = journal;
@@ -1037,41 +1045,173 @@ async function main(): Promise<void> {
 		);
 		assert.equal(new Set(startedAgentRecords.map((record) => record.agentId)).size, 2);
 		assert.ok(startedAgentRecords.every((record) => record.agentId), "phase records must expose native agent ids");
+		nativeControl.journalPhaseStarts = startedAgentRecords.length;
+		const journalAgentIds = startedAgentRecords.map((record) => record.agentId!);
+		const journalAgentIdSet = new Set(journalAgentIds);
+		const pendingAgents = await waitFor(() => {
+			const workflowStatus = workflowTaskTerminalStatus(events.messages, nativeWorkflowTaskId);
+			if (workflowStatus !== undefined) {
+				throw new Error("Workflow completed before both native agents reached the Monitor hook boundary.");
+			}
+			if (nativeControl.monitorRequests.some((record) => record.settlement === "denied-invalid")) {
+				throw new Error("A Monitor hook request lacked the exact fixture identity required for controlled cancellation.");
+			}
+			const lifecycleStops = nativeControl.lifecycle.filter((record) =>
+				record.event === "SubagentStop" && journalAgentIdSet.has(record.agentId),
+			);
+			if (lifecycleStops.length > 0) {
+				throw new Error("A Workflow agent completed before both real Monitor requests were held.");
+			}
 
-		const workflowAgents = await waitFor(
-			() => {
-				const agents = findAgentTaskIDs(events.messages, workflowTaskId);
-				return agents.length >= 2 ? agents.slice(0, 2) : undefined;
-			},
-			events,
+			const lifecycleStarts = nativeControl.lifecycle.filter((record) =>
+				record.event === "SubagentStart" && journalAgentIdSet.has(record.agentId),
+			);
+			const lifecycleStartIds = new Set(lifecycleStarts.map((record) => record.agentId));
+			nativeControl.journalMatchedAgentStarts = lifecycleStartIds.size;
+			if (lifecycleStarts.length > 2 || lifecycleStartIds.size !== lifecycleStarts.length) {
+				throw new Error("The Workflow produced duplicate native SubagentStart records for its two journal agents.");
+			}
+
+			const requests = nativeControl.monitorRequests.filter((record) => record.scenario !== "invalid");
+			if (requests.some((record) => record.agentId !== undefined && !journalAgentIdSet.has(record.agentId))) {
+				throw new Error("A held Monitor request did not match either native Workflow journal agent.");
+			}
+			for (const request of requests) {
+				const lifecycleStart = lifecycleStarts.find((record) => record.agentId === request.agentId);
+				if (lifecycleStart && lifecycleStart.agentType !== request.agentType) {
+					throw new Error("A Monitor request agent type did not match its native SubagentStart identity.");
+				}
+			}
+			if (requests.length >= 2 && (
+				requests.length !== 2 ||
+				requests.filter((record) => record.scenario === "stopped").length !== 1 ||
+				requests.filter((record) => record.scenario === "continued").length !== 1 ||
+				new Set(requests.map((record) => record.agentId)).size !== 2
+			)) {
+				throw new Error("The two held Monitor requests did not map one-to-one to the exact fixture agents.");
+			}
+			if (requests.length === 2 && lifecycleStartIds.size !== 2) {
+				throw new Error("Two real Monitor requests arrived without two matching native SubagentStart identities.");
+			}
+
+			const stopped = requests.filter((record) =>
+				record.scenario === "stopped" && record.settlement === "pending" &&
+				record.agentId !== undefined && record.toolUseId !== undefined &&
+				pendingMonitorGate.isPending(record.toolUseId),
+			);
+			const continued = requests.filter((record) =>
+				record.scenario === "continued" && record.settlement === "pending" &&
+				record.agentId !== undefined && record.toolUseId !== undefined &&
+				pendingMonitorGate.isPending(record.toolUseId),
+			);
+			if (
+				lifecycleStartIds.size === 2 && lifecycleStarts.length === 2 &&
+				stopped.length === 1 && continued.length === 1 &&
+				stopped[0]?.agentId !== continued[0]?.agentId &&
+				[stopped[0]?.agentId, continued[0]?.agentId].every((agentId) =>
+					agentId !== undefined && lifecycleStartIds.has(agentId),
+				)
+			) {
+				return { stopped: stopped[0]!, continued: continued[0]! };
+			}
+			return undefined;
+		}, events, Math.min(deadline, Date.now() + STEP_TIMEOUT_MS), "two native agents held at exact Monitor requests", session);
+		nativeControl.pendingMonitorRequestCount = 2;
+
+		const backgroundControlStartIndex = events.messages.length;
+		backgroundSnapshotStartIndex = backgroundControlStartIndex;
+		const backgroundedForegroundTasks = await withDeadline(
+			session.query.backgroundTasks(),
 			deadline,
-			"two native Workflow agent tasks",
+			"post-phase foreground-task background control observation",
 			session,
 		);
-		const [firstAgentTaskId, secondAgentTaskId] = workflowAgents;
-		assert.ok(firstAgentTaskId && secondAgentTaskId);
-		const secondAgentStartIndex = events.messages.findIndex((message) => {
-			const record = asRecord(message);
-			return record?.subtype === "task_started" && record.task_id === secondAgentTaskId;
-		});
-		assert.ok(
-			!events.messages.slice(0, secondAgentStartIndex).some(
-				(message) => isTaskNotification(message, firstAgentTaskId),
-			),
-			"both Workflow agents must overlap before the first one settles",
-		);
+		backgroundControlRecord = {
+			targetClass: "all-foreground",
+			returned: backgroundedForegroundTasks,
+			subsequentTaskClasses: backgroundTaskClassesAfter(events.messages, backgroundControlStartIndex),
+		};
+		nativeControl.backgroundControls.push(backgroundControlRecord);
 
-		await withDeadline(session.query.stopTask(firstAgentTaskId), deadline, "stop first Workflow agent", session);
-		await waitFor(
-			() => hasTaskNotification(events.messages, firstAgentTaskId, "stopped"),
-			events,
-			deadline,
-			"individual native task stop",
-			session,
-		);
+		const stopHeldAgent = async (
+			selected: NativeMonitorRequestRecord,
+			sibling: NativeMonitorRequestRecord,
+			label: string,
+			requireSiblingActive: boolean,
+		): Promise<void> => {
+			assert.ok(selected.agentId && selected.toolUseId && sibling.agentId && sibling.toolUseId);
+			const selectedAgentId = selected.agentId!;
+			const selectedToolUseId = selected.toolUseId!;
+			const siblingAgentId = sibling.agentId!;
+			const siblingToolUseId = sibling.toolUseId!;
+			assert.ok(pendingMonitorGate.isPending(selectedToolUseId), "selected agent Monitor request must still be pending before stop");
+			if (requireSiblingActive) {
+				assert.ok(pendingMonitorGate.isPending(siblingToolUseId), "sibling Monitor request must still be pending before first stop");
+			}
+			const agentStart = nativeControl.lifecycle.find((record) =>
+				record.event === "SubagentStart" && record.agentId === selectedAgentId,
+			);
+			const matchingNativeTaskId = agentStart === undefined
+				? undefined
+				: findMatchingNativeAgentTaskID(events.messages, nativeWorkflowTaskId, agentStart);
+			const candidateId = matchingNativeTaskId ?? selectedAgentId;
+			const attempt: NativeStopAttemptRecord = {
+				agentId: selectedAgentId,
+				targetId: candidateId,
+				candidateKind: matchingNativeTaskId === undefined ? "agent-id-diagnostic" : "native-task",
+			};
+			nativeControl.stopAttempts.push(attempt);
+			const stopDeadline = Math.min(deadline, Date.now() + NATIVE_STOP_OBSERVATION_MS);
+			try {
+				await withDeadline(session.query.stopTask(candidateId), stopDeadline, label, session);
+				attempt.callResolved = true;
+				await waitFor(() => {
+					if (requireSiblingActive && workflowTaskTerminalStatus(events.messages, nativeWorkflowTaskId) !== undefined) {
+						throw new Error("Workflow completed before the sibling's pending Monitor request was confirmed active.");
+					}
+					if (requireSiblingActive && (
+						hasTerminalTaskNotification(events.messages, siblingAgentId) ||
+						nativeControl.lifecycle.some((record) =>
+							record.event === "SubagentStop" && record.agentId === siblingAgentId,
+						)
+					)) {
+						throw new Error("The sibling agent completed before the selected stop was observed.");
+					}
+					const stoppedNotification = hasTaskNotification(events.messages, candidateId, "stopped");
+					const monitorCancelled = selected.settlement === "signal-aborted";
+					const siblingPending = !requireSiblingActive || pendingMonitorGate.isPending(siblingToolUseId);
+					const siblingStopped = hasTerminalTaskNotification(events.messages, siblingAgentId) ||
+						nativeControl.lifecycle.some((record) =>
+							record.event === "SubagentStop" && record.agentId === siblingAgentId,
+						);
+					const workflowStillActive = !requireSiblingActive ||
+						workflowTaskTerminalStatus(events.messages, nativeWorkflowTaskId) === undefined;
+					if (stoppedNotification && monitorCancelled && siblingPending && workflowStillActive &&
+						(!requireSiblingActive || !siblingStopped)) return true;
+					return undefined;
+				}, events, stopDeadline, label, session);
+			} catch (error) {
+				attempt.stoppedNotification = hasTaskNotification(events.messages, candidateId, "stopped");
+				attempt.monitorCancelled = selected.settlement === "signal-aborted";
+				attempt.siblingPending = pendingMonitorGate.isPending(siblingToolUseId);
+				attempt.subagentStopObserved = nativeControl.lifecycle.some((record) =>
+					record.event === "SubagentStop" && record.agentId === selectedAgentId,
+				);
+				throw new Error("Native agent stop candidate did not produce an exact stopped notification and isolated Monitor cancellation.", { cause: error });
+			}
+			attempt.stoppedNotification = hasTaskNotification(events.messages, candidateId, "stopped");
+			attempt.monitorCancelled = selected.settlement === "signal-aborted";
+			attempt.siblingPending = pendingMonitorGate.isPending(siblingToolUseId);
+			attempt.subagentStopObserved = nativeControl.lifecycle.some((record) =>
+				record.event === "SubagentStop" && record.agentId === selectedAgentId,
+			);
+		};
+
+		await stopHeldAgent(pendingAgents.stopped, pendingAgents.continued, "first isolated Workflow agent stop", true);
+		nativeControl.siblingPendingAfterFirstStop = pendingMonitorGate.isPending(pendingAgents.continued.toolUseId!);
 		assert.ok(
-			isBackgroundTaskActive(events.messages, secondAgentTaskId),
-			"stopping one Workflow agent must leave its parallel sibling active",
+			nativeControl.siblingPendingAfterFirstStop,
+			"stopping the selected Workflow agent must leave its sibling's real Monitor request pending",
 		);
 
 		const firstTurn = await waitFor(
@@ -1082,7 +1222,6 @@ async function main(): Promise<void> {
 			session,
 		);
 		reportedSpend = firstTurn.total_cost_usd;
-		console.log(`Reported session spend after initial turn: $${reportedSpend.toFixed(4)} USD.`);
 		assert.equal(firstTurn.session_id, sessionId);
 		assert.equal(firstTurn.is_error, false, "initial native session turn must succeed");
 		assertPinnedModelUsage(firstTurn.modelUsage);
@@ -1116,9 +1255,10 @@ async function main(): Promise<void> {
 			"checkpoint preview must stay within the single synthetic Edit target",
 		);
 		assert.equal(await readFile(fixture.toolEditTarget, "utf8"), "after\n", "dry-run checkpoint preview must not restore files");
+		nativeControl.checkpointPreview = true;
 		assert.ok(
-			isBackgroundTaskActive(events.messages, secondAgentTaskId),
-			"the second Workflow agent must remain in current background membership before continued main input",
+			pendingMonitorGate.isPending(pendingAgents.continued.toolUseId!),
+			"the sibling's real Monitor request must remain pending before continued main input",
 		);
 		const continuationPromptId = randomUUID();
 		session.send(userMessage("The first turn is complete. Reply only `continuation accepted`; do not use tools.", continuationPromptId));
@@ -1131,14 +1271,14 @@ async function main(): Promise<void> {
 			session,
 		);
 		reportedSpend = continuedTurn.total_cost_usd;
-		console.log(`Reported session spend before resume: $${reportedSpend.toFixed(4)} USD.`);
 		assert.equal(continuedTurn.session_id, sessionId);
 		assert.equal(continuedTurn.is_error, false);
 		assertPinnedModelUsage(continuedTurn.modelUsage);
 		assert.ok(
-			isBackgroundTaskActive(events.messages, secondAgentTaskId),
-			"the sibling must still be active when continued main input completes",
+			pendingMonitorGate.isPending(pendingAgents.continued.toolUseId!),
+			"the sibling's real Monitor request must remain pending when continued main input completes",
 		);
+		nativeControl.continuedInput = true;
 		const remainingBudgetUsd = Math.min(
 			maxBudgetUsd - firstBudgetUsd,
 			maxBudgetUsd - reportedSpend,
@@ -1152,14 +1292,7 @@ async function main(): Promise<void> {
 			"background Bash completion",
 			session,
 		);
-		await withDeadline(session.query.stopTask(secondAgentTaskId), deadline, "stop remaining Workflow agent", session);
-		await waitFor(
-			() => hasTaskNotification(events.messages, secondAgentTaskId, "stopped"),
-			events,
-			deadline,
-			"cleanup stop for the remaining Workflow agent",
-			session,
-		);
+		await stopHeldAgent(pendingAgents.continued, pendingAgents.stopped, "second isolated Workflow agent stop", false);
 		await Promise.all(Object.values(fixture.workflowReleaseFiles).map((releaseFile) =>
 			writeFile(releaseFile, "release\n", { flag: "wx", mode: 0o600 }),
 		));
@@ -1223,7 +1356,6 @@ async function main(): Promise<void> {
 		);
 		assert.equal(resumedResult.session_id, sessionId, "native session resume must retain the original session id");
 		reportedSpend = resumedResult.total_cost_usd;
-		console.log(`Reported session spend after resume: $${reportedSpend.toFixed(4)} USD.`);
 		assert.equal(resumedResult.is_error, false);
 		assertPinnedModelUsage(resumedResult.modelUsage);
 		if (resumedResult.subtype !== "success") {
@@ -1232,11 +1364,8 @@ async function main(): Promise<void> {
 		const expectedResumeMarker = extractResumeMarker(events.messages, checkpointUserMessageUuid);
 		assert.ok(resumedResult.result.includes(expectedResumeMarker), "resumed conversation must retain its earlier user context");
 		assert.ok(reportedSpend <= maxBudgetUsd, "reported session spend must remain within the requested budget");
-
-		console.log(`Native SDK acceptance scenario completed. Reported session spend: $${reportedSpend.toFixed(4)} USD.`);
-		console.log(
-			`Session ${sessionId}; Workflow task ${workflowTaskId}; Workflow run ${workflowRunId}; checkpoint message ${checkpointUserMessageUuid}.`,
-		);
+		nativeControl.resumed = true;
+		console.log(`Native SDK acceptance scenario completed; ${formatNativeControlSummary(nativeControl)}`);
 	} catch (error) {
 		scenarioFailed = true;
 		scenarioFailure = error;
@@ -1255,8 +1384,10 @@ async function main(): Promise<void> {
 			SKILL_NAME,
 			{ workflowTaskId, journal: workflowJournal, journalWarningCount: workflowJournalWarningCount },
 		));
+		console.error(`Native control evidence: ${formatNativeControlSummary(nativeControl)}`);
 		throw error;
 	} finally {
+		await pendingMonitorGate.denyPending();
 		const closeOutcomes = await Promise.all(sessions.reverse().map(async (session) => {
 			try {
 				return await closeSession(session, TERMINATION_TIMEOUT_MS, "final session cleanup");
@@ -1270,6 +1401,12 @@ async function main(): Promise<void> {
 		}
 		const allQueriesTerminated = closeOutcomes.every((outcome) => outcome.terminated);
 		if (!allQueriesTerminated) process.exitCode = process.exitCode || 1;
+		if (backgroundControlRecord && backgroundSnapshotStartIndex !== undefined) {
+			backgroundControlRecord.subsequentTaskClasses = backgroundTaskClassesAfter(
+				initialEvents.messages,
+				backgroundSnapshotStartIndex,
+			);
+		}
 		let failureTraceError: unknown;
 		if (scenarioFailed && sessions.length > 0 && !(scenarioFailure instanceof QueryCreationTripwireError)) {
 			try {
@@ -1279,6 +1416,7 @@ async function main(): Promise<void> {
 					resumedEvents.messages,
 					process.env.ANTHROPIC_API_KEY,
 					permissionEvidence.traceDenials,
+					nativeControl,
 				);
 				console.error(`Private native SDK failure trace: ${tracePath}`);
 			} catch (error) {
@@ -1778,6 +1916,19 @@ export function findAgentTaskIDs(messages: readonly unknown[], workflowTaskId?: 
 		.map((task) => asString(task.task_id)!);
 }
 
+export function findMatchingNativeAgentTaskID(
+	messages: readonly unknown[],
+	workflowTaskId: string,
+	agentStart: NativeAgentLifecycleRecord,
+): string | undefined {
+	if (agentStart.event !== "SubagentStart") return undefined;
+	const agentTasks = uniqueTaskStarts(messages)
+		.filter((task) => isNativeWorkflowAgentTask(task, workflowTaskId) && task.parent_task_id === workflowTaskId);
+	if (agentStart.callbackToolUseId === undefined) return undefined;
+	const matches = agentTasks.filter((task) => task.tool_use_id === agentStart.callbackToolUseId);
+	return matches.length === 1 ? asString(matches[0]?.task_id) : undefined;
+}
+
 function isNativeWorkflowAgentTask(task: Record<string, unknown>, workflowTaskId?: string): boolean {
 	const taskId = asString(task.task_id);
 	return task.task_type === "local_agent" && taskId !== undefined && taskId.length > 0 && taskId !== workflowTaskId;
@@ -1842,6 +1993,32 @@ function hasBackgroundTask(messages: SDKMessage[], taskId: string): boolean {
 	});
 }
 
+function workflowTaskTerminalStatus(messages: readonly unknown[], workflowTaskId: string): string | undefined {
+	for (const message of messages) {
+		const record = asRecord(message);
+		if (record?.type !== "system" || record.subtype !== "task_notification" || record.task_id !== workflowTaskId) continue;
+		if (typeof record.status === "string" && WORKFLOW_TERMINAL_STATUSES.includes(record.status as (typeof WORKFLOW_TERMINAL_STATUSES)[number])) {
+			return record.status;
+		}
+	}
+	return undefined;
+}
+
+function backgroundTaskClassesAfter(messages: readonly unknown[], startIndex: number): string[][] {
+	const snapshots: string[][] = [];
+	for (const message of messages.slice(startIndex)) {
+		const record = asRecord(message);
+		if (record?.type !== "system" || record.subtype !== "background_tasks_changed" || !Array.isArray(record.tasks)) continue;
+		const classes = record.tasks.map((taskValue) => {
+			const task = asRecord(taskValue);
+			const taskClass = asString(task?.task_type) ?? asString(task?.type);
+			return taskClass !== undefined && SAFE_BACKGROUND_TASK_CLASSES.has(taskClass) ? taskClass : "other";
+		});
+		snapshots.push(classes);
+	}
+	return snapshots;
+}
+
 function resultForMessage(messages: SDKMessage[], userMessageId: UUID): SDKResultMessage | undefined {
 	for (let index = messages.length - 1; index >= 0; index -= 1) {
 		const message = messages[index];
@@ -1881,15 +2058,25 @@ async function waitForJournal(
 	events: EventLog,
 	deadline: number,
 	session: LiveQueryLifecycle,
+	workflowTaskId: string,
 ): Promise<import("../src/workflows.js").WorkflowJournalMetadata> {
 	return waitFor(async () => {
+		if (workflowTaskTerminalStatus(events.messages, workflowTaskId) !== undefined) {
+			throw new Error("Workflow completed before its two native phase-start records were available.");
+		}
 		const page = await readJournal(ref);
 		const started = page.metadata.records.filter(
 			(record) => record.type === "started" && record.phase === "Parallel fixture probes",
 		);
-		return new Set(started.map((record) => record.agentId).filter(Boolean)).size >= 2
-			? page.metadata
-			: undefined;
+		const startedIds = new Set(started.map((record) => record.agentId).filter(Boolean));
+		const completed = page.metadata.records.some((record) =>
+			(record.type === "result" || record.type === "failed") &&
+			(record.phase === "Parallel fixture probes" ||
+				(record.agentId !== undefined && startedIds.has(record.agentId)) ||
+				(record.type === "failed" && record.agentId === undefined)),
+		);
+		if (completed) throw new Error("A Workflow agent completed before the native control probe reached its hook boundary.");
+		return startedIds.size >= 2 ? page.metadata : undefined;
 	}, events, deadline, "workflow phase journal metadata", session);
 }
 
