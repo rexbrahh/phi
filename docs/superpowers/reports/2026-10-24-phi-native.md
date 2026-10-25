@@ -8,6 +8,8 @@ Native SDK acceptance remains incomplete. The user requires an independent TUI c
 
 This finding applies to SDK `0.3.310` and CLI `2.1.310` checked on 2026-10-25. The [official package registry](https://registry.npmjs.org/%40anthropic-ai%2Fclaude-agent-sdk) and [SDK release](https://github.com/anthropics/claude-agent-sdk-typescript/releases/tag/v0.3.310) identify the checked SDK version. This report does not claim that every SDK version lacks this operation.
 
+[SDK issue 518](https://github.com/anthropics/claude-agent-sdk-typescript/issues/518) requests access to the existing native child-scoped operation. It was posted with user authorization on 2026-10-25. The operation and its live acceptance remain open.
+
 ## Workflow-child control contract
 
 The native CLI's Workflow `x` action calls its local `onSkipAgent` callback with `(workflowTaskId, agentId)`. The runtime uses that pair to find and abort one child controller with reason `user-skip`. The child reports a skipped result, and its `agent()` call returns `null`. `parallel()` waits for its sibling slots. This is the native child lifecycle that Phi must control and report.
