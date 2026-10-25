@@ -15,12 +15,41 @@ type WorkflowOutputProbe = (
 	messages: readonly unknown[],
 	workflowToolUseId: string,
 ) => Record<string, unknown> | undefined;
+type PermissionTraceDenial = {
+	toolName: string;
+	input: Record<string, unknown>;
+	reason: string;
+	toolUseID?: string;
+};
 type FailureTraceWriter = (
 	root: string,
 	initialMessages: readonly unknown[],
 	resumedMessages: readonly unknown[],
 	selectedApiKey?: string,
+	permissionDenials?: readonly PermissionTraceDenial[],
 ) => Promise<string>;
+
+type PermissionTraceHarness = {
+	fixtureCallbacks(
+		fixture: { repository: string; toolEditTarget: string; workflowScript: string },
+		permissionEvidence: {
+			deniedActionCount: number;
+			denials: Array<{ toolName: string; inputKeys: string; reason: string }>;
+			traceDenials?: PermissionTraceDenial[];
+		},
+		selectedApiKey?: string,
+	): { canUseTool: NonNullable<import("@anthropic-ai/claude-agent-sdk").Options["canUseTool"]> };
+	formatLiveFailureDiagnostic(
+		error: unknown,
+		options?: {
+			permissionEvidence?: {
+				deniedActionCount: number;
+				denials: Array<{ toolName: string; inputKeys: string; reason: string }>;
+			};
+			selectedApiKey?: string;
+		},
+	): string;
+};
 
 const FAILURE_TRACE_FILENAME = "native-sdk-failure-trace.json";
 
@@ -29,10 +58,11 @@ async function writeFailureTrace(
 	initialMessages: readonly unknown[],
 	resumedMessages: readonly unknown[],
 	selectedApiKey?: string,
+	permissionDenials?: readonly PermissionTraceDenial[],
 ): Promise<string> {
 	const harness = await import("./live.js") as unknown as { writeLiveFailureTrace?: FailureTraceWriter };
 	assert.equal(typeof harness.writeLiveFailureTrace, "function", "private SDK failure trace writer must exist");
-	return harness.writeLiveFailureTrace!(root, initialMessages, resumedMessages, selectedApiKey);
+	return harness.writeLiveFailureTrace!(root, initialMessages, resumedMessages, selectedApiKey, permissionDenials);
 }
 
 async function withFailureTraceRoot(run: (root: string) => Promise<void>): Promise<void> {
@@ -374,6 +404,60 @@ test("private SDK failure trace retains native task IDs and event payloads", asy
 		const path = await writeFailureTrace(root, initialMessages, resumedMessages);
 		assert.equal(path, join(root, FAILURE_TRACE_FILENAME));
 		assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { initialMessages, resumedMessages });
+	});
+});
+
+test("private SDK failure trace retains exact denied callbacks and keeps values out of the public summary", async () => {
+	const harness = await import("./live.js") as unknown as PermissionTraceHarness;
+	const selectedApiKey = "offline-synthetic-denied-input-api-key";
+	const permissionEvidence = { deniedActionCount: 0, denials: [] as Array<{ toolName: string; inputKeys: string; reason: string }> };
+	const callback = harness.fixtureCallbacks({
+		repository: "/tmp/phi-live-fixture",
+		toolEditTarget: "/tmp/phi-live-fixture/target.txt",
+		workflowScript: "",
+	}, permissionEvidence, selectedApiKey).canUseTool;
+	const deniedInput = {
+		command: "curl --data PRIVATE_DENIED_COMMAND_VALUE",
+		credential: { token: selectedApiKey },
+		marker: "PRIVATE_DENIED_MARKER_VALUE",
+	};
+	const callbackResult = await callback("Bash", deniedInput, {
+		signal: new AbortController().signal,
+		toolUseID: "private-denied-bash-use-id",
+	});
+	assert.equal(callbackResult?.behavior, "deny");
+	assert.equal(permissionEvidence.deniedActionCount, 1);
+	assert.equal(permissionEvidence.denials.length, 1);
+
+	await withFailureTraceRoot(async (root) => {
+		const path = await writeFailureTrace(root, [], [], selectedApiKey, permissionEvidence.traceDenials);
+		const serialized = await readFile(path, "utf8");
+		const trace = JSON.parse(serialized) as { permissionDenials: PermissionTraceDenial[] };
+		assert.deepEqual(trace.permissionDenials, [{
+			toolName: "Bash",
+			input: {
+				command: deniedInput.command,
+				credential: { token: "[redacted API key]" },
+				marker: deniedInput.marker,
+			},
+			reason: "bash-command-not-allowlisted",
+			toolUseID: "private-denied-bash-use-id",
+		}]);
+		assert.equal(serialized.includes(selectedApiKey), false);
+
+		const summary = harness.formatLiveFailureDiagnostic(new Error("fixture failed"), {
+			permissionEvidence,
+			selectedApiKey,
+		});
+		assert.match(summary, /Bash keys=\[command,credential,marker\] reason=bash-command-not-allowlisted/);
+		for (const privateValue of [
+			deniedInput.command,
+			deniedInput.marker,
+			"private-denied-bash-use-id",
+			selectedApiKey,
+		]) {
+			assert.equal(summary.includes(privateValue), false, `public summary must omit ${privateValue}`);
+		}
 	});
 });
 

@@ -66,9 +66,17 @@ export interface LivePermissionDenial {
 	reason: string;
 }
 
+export interface LivePermissionTraceDenial {
+	toolName: string;
+	input: Record<string, unknown>;
+	reason: string;
+	toolUseID?: string;
+}
+
 export interface LivePermissionEvidence {
 	deniedActionCount: number;
 	denials: LivePermissionDenial[];
+	traceDenials?: LivePermissionTraceDenial[];
 }
 
 export interface LiveFailureDiagnosticOptions {
@@ -664,9 +672,14 @@ export async function writeLiveFailureTrace(
 	initialMessages: readonly unknown[],
 	resumedMessages: readonly unknown[],
 	selectedApiKey?: string,
+	permissionDenials?: readonly LivePermissionTraceDenial[],
 ): Promise<string> {
 	const path = join(root, FAILURE_TRACE_FILENAME);
-	const serialized = JSON.stringify({ initialMessages, resumedMessages });
+	const serialized = JSON.stringify({
+		initialMessages,
+		resumedMessages,
+		...(permissionDenials !== undefined && permissionDenials.length > 0 ? { permissionDenials } : {}),
+	});
 	if (typeof serialized !== "string") throw new Error("Could not serialize private native SDK failure trace");
 	const redacted = selectedApiKey
 		? serialized
@@ -1117,6 +1130,7 @@ async function main(): Promise<void> {
 					initialEvents.messages,
 					resumedEvents.messages,
 					process.env.ANTHROPIC_API_KEY,
+					permissionEvidence.traceDenials,
 				);
 				console.error(`Private native SDK failure trace: ${tracePath}`);
 			} catch (error) {
@@ -1158,7 +1172,7 @@ export function fixtureCallbacks(
 	selectedApiKey = process.env.ANTHROPIC_API_KEY,
 ): Pick<Options, "canUseTool" | "onElicitation" | "hooks"> {
 	return {
-		canUseTool: async (toolName, input) => {
+		canUseTool: async (toolName, input, options) => {
 			const rejectionReason = fixturePermissionRejectionReason(toolName, input, fixture);
 			if (rejectionReason === undefined) return { behavior: "allow", updatedInput: input };
 			permissionEvidence.deniedActionCount += 1;
@@ -1167,6 +1181,15 @@ export function fixtureCallbacks(
 					toolName: boundedDiagnosticText(toolName, selectedApiKey, MAX_DIAGNOSTIC_LABEL_CHARS) || "unknown",
 					inputKeys: formatPermissionInputKeys(input, selectedApiKey),
 					reason: rejectionReason,
+				});
+			}
+			const traceDenials = permissionEvidence.traceDenials ??= [];
+			if (traceDenials.length < MAX_PERMISSION_DENIALS) {
+				traceDenials.push({
+					toolName,
+					input: structuredClone(input),
+					reason: rejectionReason,
+					...(options?.toolUseID === undefined ? {} : { toolUseID: options.toolUseID }),
 				});
 			}
 			return { behavior: "deny", message: "The live fixture denied an unlisted tool action." };

@@ -49,6 +49,7 @@ type DiagnosticHarness = {
 type PermissionEvidence = {
 	deniedActionCount: number;
 	denials: Array<{ toolName: string; inputKeys: string; reason: string }>;
+	traceDenials?: Array<{ toolName: string; input: Record<string, unknown>; reason: string; toolUseID?: string }>;
 };
 
 type FixtureCallbackHarness = {
@@ -306,6 +307,7 @@ test("failure diagnostics summarize only bounded denied tool names, input keys, 
 	}
 	assert.equal(permissionEvidence.deniedActionCount, 5);
 	assert.equal(permissionEvidence.denials.length, 3, "permission evidence retains only three denied actions");
+	assert.equal(permissionEvidence.traceDenials?.length, 3, "private callback evidence retains only three denied actions");
 
 	const diagnostic = harness.formatLiveFailureDiagnostic(new Error("fixture failed"), {
 		permissionEvidence,
