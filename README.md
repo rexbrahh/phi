@@ -2,7 +2,22 @@
 
 Phi is a local coding terminal built with the Claude Agent SDK and pi-tui.
 
-Read the [v1 implementation and acceptance report](docs/superpowers/reports/2026-10-24-phi-v1.md) for checked behavior and pending native/terminal acceptance.
+## Install with Homebrew
+
+Install the `phi` formula from [rexbrahh/homebrew-tap](https://github.com/rexbrahh/homebrew-tap):
+
+```sh
+brew install rexbrahh/tap/phi
+```
+
+Start Phi from the project directory where it should work. Run `phi auth login` first if you want to save an API key. On the first interactive coding launch, Phi asks for a key if no inherited or saved key is available.
+
+```sh
+cd /path/to/project
+phi
+```
+
+See the [Phi 1.0.0 release notes](docs/releases/v1.0.0.md) and the [v1 evidence report](docs/superpowers/reports/2026-10-24-phi-v1.md) for release limits and source-scoped evidence.
 
 ## Requirements
 
@@ -14,7 +29,7 @@ Read the [v1 implementation and acceptance report](docs/superpowers/reports/2026
 
 Phi is a normal terminal process. It can also run inside Rex. Phi preserves its inherited environment for tools that use Rex. It does not create or move Rex sessions. Rex-specific behavior is not verified.
 
-## Install and launch from a project directory
+## Launch a checkout from a project directory
 
 Run these commands from the project directory where Phi should work. Replace `/path/to/phi` with the Phi checkout path.
 
