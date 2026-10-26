@@ -39,8 +39,18 @@ export class TranscriptView implements Component {
 	private readonly renderedBlocks = new Map<string, CachedBlock>();
 	private readonly toolResultPreviews = new WeakMap<ToolReceipt, CachedPreview>();
 	private fittedLines: FittedLinesCache | undefined;
+	private noticeCount = -1;
+	private noticeTail: PhiState["notices"][number] | undefined;
+	private groupedNotices: DisplayBlock[] = [];
 
-	constructor(private readonly state: PhiState) {}
+	constructor(
+		private readonly state: PhiState,
+		private readonly formatDiagnostic: (text: string) => string = (text) => text,
+	) {}
+
+	diagnosticsText(): string {
+		return this.displayNotices().map((notice) => `${notice.role}:\n${notice.text}`).join("\n\n") || "No diagnostics reported.";
+	}
 
 	render(width: number): string[] {
 		const lines: string[] = [];
@@ -57,21 +67,21 @@ export class TranscriptView implements Component {
 			if (display) this.appendBlock(lines, display, width, currentKeys);
 		}
 
-		for (const notice of this.state.notices.slice(-20)) {
-			const display = {
-				key: `notice:${notice.id}`,
-				role: "Notice",
-				text: `${notice.text}\n${safeMessageDetails(notice.sourceMessage)}`.trim(),
-				markdown: false,
-			};
-			this.appendBlock(lines, display, width, currentKeys);
+		const notices = this.displayNotices();
+		for (const display of notices.slice(-2)) {
+			const preview = new Text(display.text.slice(0, 8_192), 0, 0).render(Math.max(1, width));
+			const clipped = preview.length > 2 || display.text.length > 8_192;
+			const text = preview.slice(0, 2);
+			if (clipped) text[text.length - 1] = `${truncateToWidth(text.at(-1) ?? "", Math.max(0, width - 1), "")}…`;
+			this.appendBlock(lines, { ...display, text: text.join("\n") }, width, currentKeys);
 		}
+		if (notices.length > 0) lines.push(...new Text(`${notices.length} diagnostic${notices.length === 1 ? "" : "s"} · /phi diagnostics for details`, 0, 0).render(width));
 
 		for (const key of this.renderedBlocks.keys()) {
 			if (!currentKeys.has(key)) this.renderedBlocks.delete(key);
 		}
 
-		if (lines.length === 0) lines.push(...new Text("Waiting for a message. Type a prompt below.").render(width));
+		if (lines.length === 0) lines.push(...new Text("Waiting for a message. Type a prompt below.", 0, 0).render(width));
 		const result = fitLines(lines, width, this.fittedLines);
 		this.fittedLines = result.cache;
 		return result.lines;
@@ -95,16 +105,17 @@ export class TranscriptView implements Component {
 		const fingerprint = `${display.role}\0${component.fingerprint}`;
 		const rendered = component.renderedLines;
 		if (rendered?.width === width && rendered.fingerprint === fingerprint) {
+			if (lines.length > 0) lines.push("");
 			lines.push(...rendered.lines);
 			return;
 		}
 
 		const renderedLines = [
-			...new Text(`${display.role}:`).render(width),
+			...new Text(`${display.role}:`, 0, 0).render(width),
 			...component.component.render(width),
-			"",
 		];
 		component.renderedLines = { width, fingerprint, lines: renderedLines };
+		if (lines.length > 0) lines.push("");
 		lines.push(...renderedLines);
 	}
 
@@ -116,10 +127,34 @@ export class TranscriptView implements Component {
 
 		const component = display.markdown
 			? new Markdown(safeText, 0, 0, markdownTheme)
-			: new Text(safeText);
+			: new Text(safeText, 0, 0);
 		const next = { fingerprint, component };
 		this.renderedBlocks.set(display.key, next);
 		return next;
+	}
+
+	private displayNotices(): DisplayBlock[] {
+		const tail = this.state.notices.at(-1);
+		if (this.noticeCount === this.state.notices.length && this.noticeTail === tail) return this.groupedNotices;
+		const groups = new Map<string, { display: DisplayBlock; count: number }>();
+		for (const notice of this.state.notices) {
+			const display = displayNotice(notice);
+			if (!display) continue;
+			const signature = `${display.role}\0${display.text}`;
+			const group = groups.get(signature);
+			if (group) {
+				group.count += 1;
+				groups.delete(signature);
+				groups.set(signature, group);
+			}
+			else groups.set(signature, { display: { ...display, text: sanitizeTerminalText(this.formatDiagnostic(display.text)) }, count: 1 });
+		}
+		this.noticeCount = this.state.notices.length;
+		this.noticeTail = tail;
+		this.groupedNotices = [...groups.values()].map(({ display, count }) => count === 1
+			? display
+			: { ...display, text: `×${count} ${display.text}` });
+		return this.groupedNotices;
 	}
 
 	private displayConversationBlock(block: ConversationBlock, width: number): DisplayBlock | undefined {
@@ -250,12 +285,118 @@ function formatToolReceipt(content: unknown, receipt: ToolReceipt | undefined, p
 	].filter(Boolean).join("\n");
 }
 
-function safeMessageDetails(message: PhiState["notices"][number]["sourceMessage"]): string {
-	if (message.type === "system" && (message.subtype === "hook_response" || message.subtype === "plugin_install")) {
-		return boundedPreviewValue(message);
+function displayNotice(notice: PhiState["notices"][number]): DisplayBlock | undefined {
+	const message = notice.sourceMessage;
+	const key = `notice:${notice.id}`;
+	if (message.type === "system") {
+		switch (message.subtype) {
+			case "init":
+			case "hook_started":
+			case "hook_progress":
+			case "control_request_progress":
+			case "commands_changed":
+			case "compact_boundary":
+			case "session_state_changed":
+			case "status":
+			case "task_started":
+			case "task_updated":
+			case "task_progress":
+			case "task_notification":
+			case "background_tasks_changed":
+			case "permission_denied":
+			case "memory_recall":
+				return undefined;
+			case "hook_response":
+				if (message.outcome === "success") return undefined;
+				const detail = message.stderr || message.output || message.stdout;
+				return {
+					key,
+					role: message.outcome === "error" ? "Hook failed" : "Hook cancelled",
+					text: [
+						`${message.hook_name}${message.exit_code === undefined ? "" : ` · exit ${message.exit_code}`}`,
+						detail,
+					].filter(Boolean).join("\n"),
+					markdown: false,
+				};
+			case "informational":
+				if (message.level !== "warning" && message.level !== "suggestion" && !message.prevent_continuation) return undefined;
+				return {
+					key,
+					role: message.prevent_continuation ? "Blocked" : message.level === "warning" ? "Warning" : "Suggestion",
+					text: message.content,
+					markdown: false,
+				};
+			case "plugin_install":
+				if (message.status !== "failed") return undefined;
+				return {
+					key,
+					role: "Plugin error",
+					text: [message.name, message.error].filter(Boolean).join(": ") || "Plugin installation failed.",
+					markdown: false,
+				};
+			case "api_retry":
+				return {
+					key,
+					role: "Request retry",
+					text: `${message.attempt}/${message.max_retries}${message.error_status === null ? "" : ` · HTTP ${message.error_status}`} · ${message.error}`,
+					markdown: false,
+				};
+			case "model_refusal_fallback":
+				return {
+					key,
+					role: "Model fallback",
+					text: `${message.original_model} → ${message.fallback_model}\n${message.content}`,
+					markdown: false,
+				};
+			case "model_refusal_no_fallback":
+				return { key, role: "Request refused", text: message.content, markdown: false };
+			case "mirror_error":
+				return { key, role: "Transcript save error", text: message.error, markdown: false };
+			case "files_persisted":
+				if (message.failed.length === 0) return undefined;
+				return {
+					key,
+					role: "File save error",
+					text: message.failed.map((failure) => `${failure.filename}: ${failure.error}`).join("\n"),
+					markdown: false,
+				};
+			case "notification":
+				if (message.priority !== "high" && message.priority !== "immediate") return undefined;
+				return { key, role: "Notice", text: message.text, markdown: false };
+			case "local_command_output":
+				return { key, role: "Phi", text: message.content, markdown: false };
+			default: {
+				const error = getStringProperty(message, "error");
+				return {
+					key,
+					role: error ? "SDK error" : "System",
+					text: error ?? notice.text,
+					markdown: false,
+				};
+			}
+		}
 	}
-	if (message.type === "system" && message.subtype === "informational") {
-		return boundedPreviewValue(message);
+	if (message.type === "auth_status") {
+		return message.error
+			? { key, role: "Authentication error", text: message.error, markdown: false }
+			: undefined;
 	}
-	return "";
+	if (message.type === "rate_limit_event") {
+		const info = message.rate_limit_info;
+		if (info.status === "allowed" && info.overageStatus !== "allowed_warning" && info.overageStatus !== "rejected") return undefined;
+		return { key, role: "Rate limit", text: `${info.status}${info.overageStatus ? ` · overage ${info.overageStatus}` : ""}`, markdown: false };
+	}
+	if (message.type === "prompt_suggestion") {
+		return { key, role: "Suggestion", text: message.suggestion, markdown: false };
+	}
+	if (message.type === "tool_use_summary") {
+		return { key, role: "Tool summary", text: message.summary, markdown: false };
+	}
+	const error = getStringProperty(message, "error");
+	return {
+		key,
+		role: error ? "SDK error" : "Notice",
+		text: error ?? notice.text,
+		markdown: false,
+	};
 }

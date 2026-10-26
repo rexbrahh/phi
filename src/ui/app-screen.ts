@@ -12,6 +12,9 @@ import { theme } from "./theme.js";
 export interface ScreenUpdate {
 	workspace?: WorkspaceInfo;
 	notice?: string;
+	model?: string;
+	effort?: string;
+	pendingInteraction?: boolean;
 	shellMode: boolean;
 	shellCwd?: string;
 	shellPreview?: ShellPreview;
@@ -22,11 +25,11 @@ export interface ScreenUpdate {
 export class MainScreen {
 	readonly root: VStack;
 	private readonly editorView: Component;
-	private readonly heading = new Text();
-	private readonly notice = new Text();
-	private readonly attachmentLine = new Text();
-	private readonly activity = new Text();
-	private readonly footer = new Text();
+	private readonly heading = new Text("", 0, 0);
+	private readonly notice = new Text("", 0, 0);
+	private readonly attachmentLine = new Text("", 0, 0);
+	private readonly activity = new Text("", 0, 0);
+	private readonly footer = new Text("", 0, 0);
 
 	constructor(
 		private readonly tui: TUI,
@@ -59,12 +62,14 @@ export class MainScreen {
 			workspaceLabel = " · Git status unavailable";
 		}
 		this.heading.setText(theme.accent(`Phi · ${sanitizeTerminalText(this.state.cwd)}${workspaceLabel}`));
-		this.notice.setText(values.notice ? theme.dim(sanitizeTerminalText(values.notice)) : "");
+		this.notice.setText(values.notice ? sanitizeTerminalText(values.notice) : "");
 		this.attachmentLine.setText(values.attachments.length
 			? `Images: ${values.attachments.map((attachment) => sanitizeTerminalText(attachment.name)).join(" · ")} · Alt+Backspace removes the last image`
 			: "");
 
 		const activity = [statusLabel(this.state)];
+		if (values.model?.trim()) activity.push(`model ${sanitizeTerminalText(values.model.trim())}`);
+		if (values.effort?.trim()) activity.push(`effort ${sanitizeTerminalText(values.effort.trim())}`);
 		if (this.state.usage) {
 			const cost = this.state.usage.totalCostUsd;
 			if (cost !== null) activity.push(`cost $${cost.toFixed(4)}`);
@@ -81,7 +86,10 @@ export class MainScreen {
 			if (values.shellPreview.stderr) activity.push(theme.dim(sanitizeTerminalText(values.shellPreview.stderr)));
 		}
 		this.activity.setText(activity.join(" · "));
-		this.footer.setText(theme.dim("Enter send · Ctrl+T tasks · Ctrl+B background · Ctrl+R history · Ctrl+W workspace · Ctrl+V image · Ctrl+C interrupt or exit · Esc close view"));
+		const hint = values.pendingInteraction
+			? "Response waiting · /phi questions reopens it"
+			: values.notice ? "Esc dismisses this notice" : "Ctrl+Shift+P commands · Ctrl+T tasks · Ctrl+R history";
+		this.footer.setText(theme.dim(`Enter send · ${hint} · Ctrl+C stop/exit`));
 		this.tui.requestRender();
 	}
 }
