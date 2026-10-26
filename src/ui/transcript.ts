@@ -140,12 +140,13 @@ export class TranscriptView implements Component {
 			return;
 		}
 
-		const body = component.component.render(Math.max(1, width - 2));
-		const prefix = display.role === "You" ? theme.accent("› ")
+		const indent = width > 2 ? "  " : "";
+		const body = component.component.render(Math.max(1, width - indent.length));
+		const prefix = !indent ? "" : display.role === "You" ? theme.accent("› ")
 			: display.role === "Phi" ? theme.accent("● ") : "  ";
 		const renderedLines = body.map((line, index) => {
 			const text = display.role === "Tool" || display.role === "Command" ? theme.dim(line) : line;
-			return `${index === 0 ? prefix : "  "}${text}`;
+			return `${index === 0 ? prefix : indent}${text}`;
 		});
 		component.renderedLines = { width, fingerprint, lines: renderedLines };
 		lines.push(...renderedLines);
@@ -197,8 +198,9 @@ export class TranscriptView implements Component {
 			if (command && !command.text.trim()) return undefined;
 			return {
 				key: block.id,
-				role: command?.kind === "output" ? "Command" : block.role === "assistant" ? "Phi" : "You",
-				text: command?.text ?? text,
+				role: command?.kind === "stderr" ? "Command stderr"
+					: command?.kind === "output" ? "Command" : block.role === "assistant" ? "Phi" : "You",
+				text: command?.kind === "stderr" ? `stderr: ${command.text}` : command?.text ?? text,
 				markdown: block.role === "assistant",
 			};
 		}

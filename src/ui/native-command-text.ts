@@ -1,9 +1,9 @@
-export function nativeCommandText(text: string): { kind: "command" | "output"; text: string } | undefined {
+export function nativeCommandText(text: string): { kind: "command" | "output" | "stderr"; text: string } | undefined {
 	const output = /^<local-command-(stdout|stderr)>([\s\S]*)<\/local-command-\1>(?![\s\S])/.exec(text);
 	if (output) {
 		const content = output[2]!;
 		if (containsNativeEnvelopeTag(content)) return undefined;
-		return { kind: "output", text: content };
+		return { kind: output[1] === "stderr" ? "stderr" : "output", text: content };
 	}
 
 	const command = /^<command-message>([\s\S]*?)<\/command-message>\r?\n<command-name>([\s\S]*?)<\/command-name>(?:\r?\n<command-args>([\s\S]*?)<\/command-args>)?(?![\s\S])/.exec(text);

@@ -78,3 +78,23 @@ test("ordinary XML stays visible, and empty native output adds no blank block", 
 	applySdkMessage(state, userTextMessage({ inputUuid: "empty", text: "<local-command-stdout></local-command-stdout>" }));
 	assert.deepEqual(view.render(100), before);
 });
+
+test("native stderr keeps its channel label", () => {
+	const state = createState("/repo");
+	applySdkMessage(state, userTextMessage({ inputUuid: "stderr", text:
+		"<local-command-stderr>Could not switch model</local-command-stderr>" }));
+	const text = stripVTControlCharacters(new TranscriptView(state).render(80).join("\n"));
+	assert.match(text, /stderr: Could not switch model/);
+	assert.doesNotMatch(text, /<local-command/);
+});
+
+test("one-column and two-column transcripts retain body text without decorative prefixes", () => {
+	const state = createState("/repo");
+	applySdkMessage(state, userTextMessage({ inputUuid: "tiny", text: "ABC" }));
+	const view = new TranscriptView(state);
+	for (const width of [1, 2]) {
+		const lines = view.render(width);
+		assert.ok(lines.every((line) => visibleWidth(line) <= width));
+		assert.equal(stripVTControlCharacters(lines.join("")).replace(/\s/gu, ""), "ABC");
+	}
+});

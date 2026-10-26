@@ -31,7 +31,7 @@ test("nativeCommandText presents complete local command output without its envel
 		text: "Set model to `haiku (claude-haiku-5-5)`",
 	});
 	assert.deepEqual(nativeCommandText("<local-command-stderr>Could not switch model</local-command-stderr>"), {
-		kind: "output",
+		kind: "stderr",
 		text: "Could not switch model",
 	});
 });
