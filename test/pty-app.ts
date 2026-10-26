@@ -1,4 +1,5 @@
 import { appendFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { SDKControlInitializeResponse, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
@@ -6,9 +7,10 @@ import { parseArgs } from "../src/config.js";
 import { AppController, runApp, type AppDependencies } from "../src/ui/app.js";
 import { FakeQueryHarness, initializedResponse } from "./helpers/fake-query.js";
 
-type Scenario = "input" | "paste" | "resize" | "escape" | "dialog" | "kitty" | "repeat-interrupt-exit" | "suspend" | "initialization-failure" | "sigterm";
+type Scenario = "input" | "paste" | "resize" | "escape" | "dialog" | "kitty" | "repeat-interrupt-exit" | "suspend" | "initialization-failure" | "sigterm" | "prompt-editor" | "prompt-editor-shutdown" | "prompt-editor-vi";
 
 const scenario = process.argv[2] as Scenario | undefined;
+const promptEditorScenario = scenario === "prompt-editor" || scenario === "prompt-editor-shutdown" || scenario === "prompt-editor-vi";
 const markerPath = process.env.PHI_PTY_MARKERS;
 const gatePath = process.env.PHI_PTY_START_GATE;
 const failureGatePath = process.env.PHI_PTY_FAILURE_GATE;
@@ -20,6 +22,26 @@ process.on("SIGTERM", () => { terminationRequested = true; });
 function record(event: string, detail: Record<string, unknown> = {}): void {
 	if (!markerPath) return;
 	appendFileSync(markerPath, `${JSON.stringify({ event, ...detail })}\n`, "utf8");
+}
+
+function shellQuote(value: string): string {
+	return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function configurePromptEditorEnvironment(): void {
+	if (!promptEditorScenario) return;
+	if (scenario === "prompt-editor-vi") {
+		process.env.VISUAL = "/usr/bin/vi";
+		return;
+	}
+	const temporaryRoot = process.env.TMPDIR || cwd || process.cwd();
+	const fixturePath = resolve(process.cwd(), "test", "pty-editor.mjs");
+	if (!existsSync(fixturePath)) throw new Error(`Prompt editor PTY fixture is missing: ${fixturePath}`);
+	process.env.PHI_PTY_EDITOR_MARKERS = resolve(temporaryRoot, "prompt-editor-markers.jsonl");
+	process.env.PHI_PTY_EDITOR_GATE = resolve(temporaryRoot, "prompt-editor-release");
+	process.env.PHI_PTY_EDITOR_WRITES = resolve(temporaryRoot, "prompt-editor-helper-writes.txt");
+	if (scenario === "prompt-editor-shutdown") process.env.PHI_PTY_EDITOR_HELPER = "1";
+	process.env.VISUAL = `${shellQuote(process.execPath)} ${shellQuote(fixturePath)}`;
 }
 
 async function waitFor(condition: () => boolean, description: string): Promise<void> {
@@ -64,8 +86,18 @@ async function run(): Promise<void> {
 	if (!scenario || !markerPath || !cwd) throw new Error("PTY scenario, marker path, and isolated cwd are required");
 	record("harness-loaded");
 	await waitForParentGate();
+	configurePromptEditorEnvironment();
 
 	const terminal = new ProcessTerminal();
+	if (promptEditorScenario) {
+		let terminalStartCalls = 0;
+		const startTerminal = terminal.start.bind(terminal);
+		terminal.start = (...args) => {
+			terminalStartCalls += 1;
+			record("terminal-start", { count: terminalStartCalls });
+			startTerminal(...args);
+		};
+	}
 	let rejectInitialization: ((error: Error) => void) | undefined;
 	const initialization: Promise<SDKControlInitializeResponse> = scenario === "initialization-failure"
 		? new Promise((_resolve, reject) => { rejectInitialization = reject; })
@@ -79,6 +111,7 @@ async function run(): Promise<void> {
 	};
 	const launch = parseArgs(["--cwd", cwd]);
 	const controller = scenario === "escape" || scenario === "dialog" || scenario === "repeat-interrupt-exit"
+		|| promptEditorScenario
 		? new AppController(launch, dependencies)
 		: undefined;
 	const exitConfirmation = controller
@@ -103,6 +136,7 @@ async function run(): Promise<void> {
 	let observedExitConfirmation = exitConfirmation?.visible;
 	let observedSize = `${terminal.columns}x${terminal.rows}`;
 	let madeIdleAfterInterrupt = false;
+	let observedRawMode = Boolean(process.stdin.isRaw);
 	const watcher = setInterval(() => {
 		while (observedInputs < fake.receivedMessages.length) {
 			const message = fake.receivedMessages[observedInputs++];
@@ -128,12 +162,17 @@ async function run(): Promise<void> {
 			observedKittyProtocol = true;
 			record("kitty-protocol-active", { active: true });
 		}
-		if (scenario === "repeat-interrupt-exit" && controller) {
+		if ((scenario === "repeat-interrupt-exit" || promptEditorScenario) && controller) {
 			const draft = controller.views.editor.getExpandedText();
 			if (draft !== observedDraft) {
 				observedDraft = draft;
 				record("draft", { content: draft });
 			}
+		}
+		const rawMode = Boolean(process.stdin.isRaw);
+		if (promptEditorScenario && rawMode !== observedRawMode) {
+			observedRawMode = rawMode;
+			record("terminal-mode", { raw: rawMode });
 		}
 		const active = controller?.views.active;
 		if (active && active !== observedActive) {

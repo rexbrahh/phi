@@ -9,13 +9,14 @@ import signal
 import sys
 import tempfile
 import termios
+import time
 import traceback
 from pathlib import Path
 from typing import Callable
 
 sys.dont_write_bytecode = True
 
-from helpers.pty_harness import APP, AUTH_APP, ROOT, PTYChild, mode_snapshot
+from helpers.pty_harness import APP, AUTH_APP, ROOT, PTYChild, TIMEOUT, mode_snapshot
 
 
 AUTH_TEST_KEY = b"phi_pty_test_saved_secret"
@@ -362,6 +363,174 @@ def run_sigterm(child: PTYChild, issues: list[str]) -> None:
 	check(issues, child.mode_error(expect_restored=True) is None, "SIGTERM did not restore exact terminal settings")
 
 
+def read_editor_events(child: PTYChild) -> list[dict[str, object]]:
+	marker_path = child.directory / "prompt-editor-markers.jsonl"
+	try:
+		lines = marker_path.read_text(encoding="utf-8").splitlines()
+	except FileNotFoundError:
+		return []
+	events: list[dict[str, object]] = []
+	for line in lines:
+		try:
+			event = json.loads(line)
+		except json.JSONDecodeError:
+			continue
+		if isinstance(event, dict):
+			events.append(event)
+	return events
+
+
+def process_exists(pid: int) -> bool:
+	try:
+		os.kill(pid, 0)
+	except ProcessLookupError:
+		return False
+	return True
+
+
+def kill_fixture_process(pid: int) -> None:
+	try:
+		os.kill(pid, signal.SIGKILL)
+	except ProcessLookupError:
+		pass
+
+
+def wait_editor_event(
+	child: PTYChild,
+	name: str,
+	predicate: Callable[[dict[str, object]], bool] | None = None,
+	*,
+	timeout: float = TIMEOUT,
+) -> dict[str, object]:
+	deadline = time.monotonic() + timeout
+	while time.monotonic() < deadline:
+		for event in read_editor_events(child):
+			if event.get("event") == name and (predicate is None or predicate(event)):
+				return event
+		if child.node_exit_code is not None:
+			raise AssertionError(f"child exited before external editor marker {name!r}: {child.exit_code()}")
+		child.pump(min(0.02, max(0, deadline - time.monotonic())))
+	raise AssertionError(f"timed out waiting for external editor marker {name!r}")
+
+
+def run_prompt_editor(child: PTYChild, issues: list[str]) -> None:
+	draft = "original draft first\noriginal draft second"
+	child.send(draft.encode("utf-8"))
+	child.wait_event("draft", lambda event: event.get("content") == draft)
+	child.send(b"\x07")
+	started = wait_editor_event(child, "editor-started")
+	check(issues, started.get("content") == draft, "external editor did not receive the multiline composer draft")
+	child.wait_event("terminal-mode", lambda event: event.get("raw") is False)
+	child.wait_raw_mode(raw=False)
+	child.mode_history["editor"] = mode_snapshot(termios.tcgetattr(child.slave))
+	check(issues, child.mode_error(expect_restored=True) is None, "terminal was not restored exactly while the external editor owned stdin")
+	check(issues, child.mode_history["editor"].get("canonical") is True, "external editor did not receive cooked terminal input")
+	check(issues, child.mode_history["editor"].get("echo") is True, "external editor did not receive terminal echo")
+	child.send(b"editor stdin sentinel\n")
+	stdin_event = wait_editor_event(child, "editor-input")
+	check(issues, stdin_event.get("content") == "editor stdin sentinel", "external editor did not receive input from the PTY")
+	(child.directory / "prompt-editor-release").write_text("release\n", encoding="utf-8")
+	edited = "edited draft first\nedited draft second"
+	changed = wait_editor_event(child, "editor-edited")
+	check(issues, changed.get("content") == edited, "external editor did not write the expected changed draft")
+	child.wait_event("terminal-start", lambda event: event.get("count") == 2)
+	child.wait_raw_mode(raw=True)
+	child.mode_history["resumed"] = mode_snapshot(termios.tcgetattr(child.slave))
+	child.wait_event("terminal-mode", lambda event: event.get("raw") is True)
+	child.wait_event("draft", lambda event: event.get("content") == edited)
+	check(issues, not any(event.get("event") == "user-input" for event in child.events), "edited draft was submitted before Enter")
+	child.send(b"!")
+	child.wait_event("draft", lambda event: event.get("content") == f"{edited}!")
+	check(issues, not any(event.get("event") == "user-input" for event in child.events), "typing after editor exit submitted the draft before Enter")
+	child.send(b"\r")
+	submitted = child.wait_event("user-input", lambda event: event.get("content") == f"{edited}!")
+	check(issues, submitted.get("origin") == "human", "Enter after editor exit did not submit a human input")
+	check(issues, submitted.get("inlinePastes") == [], "editor draft submission carried stale paste metadata")
+	child.send(b"after editor\r")
+	after = child.wait_event("user-input", lambda event: event.get("content") == "after editor")
+	check(issues, after.get("origin") == "human", "subsequent input did not work after external editing")
+	child.send(b"\x03")
+	exit_event = child.wait_event("exit")
+	check(issues, exit_event.get("code") == 0, "external-editor scenario did not exit through Ctrl+C")
+	check(issues, exit_event.get("queryCloseCalls") == 1, "external-editor scenario did not close the session query once")
+	check(issues, child.wait_exit() == 0, "external-editor scenario process exit code was not 0")
+	prompt_path = Path(str(started.get("promptPath", "")))
+	check(issues, not prompt_path.exists(), "successful external editing did not remove the temporary prompt file")
+	check(issues, child.mode_error(expect_restored=True) is None, "external-editor scenario did not restore exact terminal settings")
+
+
+def run_prompt_editor_vi(child: PTYChild, issues: list[str]) -> None:
+	draft = "real vi draft first\nreal vi draft second"
+	child.send(draft.encode("utf-8"))
+	child.wait_event("draft", lambda event: event.get("content") == draft)
+	child.send(b"\x07")
+	child.wait_event("terminal-mode", lambda event: event.get("raw") is False)
+	child.wait_raw_mode(raw=False)
+	check(issues, child.mode_error(expect_restored=True) is None, "terminal settings were not restored before real vi started")
+	child.pump(0.1)
+	child.send(b"\x03")
+	child.pump(0.1)
+	check(issues, child.node_exit_code is None, "Ctrl+C during real vi exited Phi")
+	check(issues, not any(event.get("event") == "exit" for event in child.events), "Ctrl+C during real vi emitted the Phi exit event")
+	child.send(b":q!\r")
+	child.wait_event("terminal-start", lambda event: event.get("count") == 2)
+	child.wait_raw_mode(raw=True)
+	child.wait_event("terminal-mode", lambda event: event.get("raw") is True)
+	child.send(b"after vi\r")
+	child.wait_event("user-input", lambda event: event.get("content") == f"{draft}after vi")
+	child.send(b"\x03")
+	exit_event = child.wait_event("exit")
+	check(issues, exit_event.get("code") == 0, "real vi scenario did not exit through Ctrl+C")
+	check(issues, child.wait_exit() == 0, "real vi scenario process exit code was not 0")
+	check(issues, child.mode_error(expect_restored=True) is None, "real vi scenario did not restore exact terminal settings")
+
+
+def run_prompt_editor_shutdown(child: PTYChild, issues: list[str]) -> None:
+	draft = "shutdown draft first\nshutdown draft second"
+	child.send(draft.encode("utf-8"))
+	child.wait_event("draft", lambda event: event.get("content") == draft)
+	child.send(b"\x07")
+	started = wait_editor_event(child, "editor-started")
+	editor_pid = int(started.get("pid", 0))
+	pids = [editor_pid]
+	try:
+		check(issues, started.get("content") == draft, "external editor did not receive the shutdown draft")
+		helper = wait_editor_event(child, "helper-started")
+		helper_pid = int(helper.get("pid", 0))
+		pids.append(helper_pid)
+		child.wait_event("terminal-mode", lambda event: event.get("raw") is False)
+		child.wait_raw_mode(raw=False)
+		check(issues, child.mode_error(expect_restored=True) is None, "terminal was not restored while the blocked editor owned stdin")
+		child.signal_application(signal.SIGTERM)
+		terminated = wait_editor_event(child, "editor-terminated")
+		check(issues, terminated.get("pid") == editor_pid, "shutdown did not terminate the owned external editor process")
+		check(issues, terminated.get("signal") == "SIGTERM", "owned external editor did not receive SIGTERM on shutdown")
+		check(issues, not any(event.get("event") == "editor-edited" for event in read_editor_events(child)), "blocked external editor passed its release gate during shutdown")
+		exit_event = child.wait_event("exit")
+		check(issues, exit_event.get("code") == 143, f"shutdown during external editing returned {exit_event.get('code')}, expected 143")
+		check(issues, exit_event.get("queryCloseCalls") == 1, "shutdown during external editing did not close the session query once")
+		check(issues, child.wait_exit() == 143, "shutdown during external editing process exit code was not 143")
+		starts = [event for event in child.events if event.get("event") == "terminal-start"]
+		check(issues, len(starts) == 1, f"shutdown restarted Phi's terminal {max(0, len(starts) - 1)} times")
+		mode_transitions = [event.get("raw") for event in child.events if event.get("event") == "terminal-mode"]
+		check(issues, mode_transitions == [False], f"terminal mode changed after shutdown began: {mode_transitions}")
+		prompt_path = Path(str(started.get("promptPath", "")))
+		check(issues, prompt_path.is_file(), "aborted external editing did not retain its recovery draft")
+		if prompt_path.is_file():
+			check(issues, prompt_path.read_text(encoding="utf-8") == draft, "aborted external editing changed the retained recovery draft")
+		check(issues, child.mode_error(expect_restored=True) is None, "shutdown during external editing did not restore exact terminal settings")
+		check(issues, not process_exists(editor_pid), "external editor PID remained after shutdown")
+		check(issues, not process_exists(helper_pid), "inherited-stdio editor helper PID remained after shutdown")
+		writes_path = child.directory / "prompt-editor-helper-writes.txt"
+		writes_at_exit = writes_path.read_text(encoding="utf-8")
+		time.sleep(0.1)
+		check(issues, writes_path.read_text(encoding="utf-8") == writes_at_exit, "editor helper wrote after shutdown cleanup completed")
+	finally:
+		for pid in pids:
+			if pid > 0:
+				kill_fixture_process(pid)
+
+
 def main() -> int:
 	missing = [str(path) for path in (APP, AUTH_APP) if not path.is_file()]
 	if missing:
@@ -379,6 +548,9 @@ def main() -> int:
 		("suspend and resume", "suspend", run_suspend, APP),
 		("SDK initialization failure cleanup", "initialization-failure", run_initialization_failure, APP),
 		("SIGTERM cleanup", "sigterm", run_sigterm, APP),
+		("external prompt editor round trip", "prompt-editor", run_prompt_editor, APP),
+		("real vi terminal ownership and Ctrl+C", "prompt-editor-vi", run_prompt_editor_vi, APP),
+		("shutdown during external prompt editing", "prompt-editor-shutdown", run_prompt_editor_shutdown, APP),
 		("hidden auth save and restart", "save-restart", run_auth_save_restart, AUTH_APP),
 		("hidden auth cancellation", "cancel", run_auth_cancel, AUTH_APP),
 	]
