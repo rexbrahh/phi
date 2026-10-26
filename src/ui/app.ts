@@ -1,5 +1,4 @@
 import {
-	CombinedAutocompleteProvider,
 	Editor,
 	TuiMainScreen,
 	type ProgramStatus,
@@ -20,7 +19,7 @@ import { InteractionQueue } from "../interactions.js";
 import { startSession, type Session } from "../session.js";
 import { createState, resetStateForProcess, type PhiState } from "../state.js";
 import { AppAttachmentController } from "./app-attachments.js";
-import { AppCommandPaletteController, localAutocompleteCommands, type PaletteCommandChoice } from "./app-command-palette.js";
+import { AppCommandPaletteController, PhiAutocompleteProvider, localAutocompleteCommands, type PaletteCommandChoice } from "./app-command-palette.js";
 import { AppControlPickerController, type ControlPickerApplyResult, type ControlPickerKind } from "./app-control-picker.js";
 import { AppExitConfirmationController } from "./app-exit-confirmation.js";
 import { AppKeyboardController } from "./app-keyboard.js";
@@ -619,7 +618,7 @@ export class AppController {
 	refreshNativeCommands(commands: SDKControlInitializeResponse["commands"]): void {
 		if (this.ready) this.ready = { ...this.ready, commands };
 		const nativeCommands = commands.filter((command) => command.name !== "model" && command.name !== "effort" && command.name !== "phi");
-		this.views.editor.setAutocompleteProvider(new CombinedAutocompleteProvider([
+		this.views.editor.setAutocompleteProvider(new PhiAutocompleteProvider([
 			...nativeCommands,
 			...localAutocompleteCommands(),
 		], this.state.cwd));

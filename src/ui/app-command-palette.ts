@@ -1,4 +1,4 @@
-import { Input, SelectList, Text, TuiMainScreen, type Component, type Editor, type OverlayHandle, type SelectItem, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
+import { CombinedAutocompleteProvider, Input, SelectList, Text, TuiMainScreen, type Component, type Editor, type OverlayHandle, type SelectItem, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import type { SlashCommand } from "@anthropic-ai/claude-agent-sdk";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { sanitizeTerminalText } from "./safe-text.js";
@@ -69,6 +69,15 @@ export function localAutocompleteCommands(): import("@earendil-works/pi-tui").Sl
 			},
 		},
 	];
+}
+
+export class PhiAutocompleteProvider extends CombinedAutocompleteProvider {
+	override getSuggestions(lines: string[], cursorLine: number, cursorCol: number, options: { signal: AbortSignal; force?: boolean }) {
+		const beforeCursor = (lines[cursorLine] ?? "").slice(0, cursorCol);
+		// pi-tui requests file completion on Tab after a slash command's first space.
+		const localSubcommand = /^\s*\/phi +[^\s]*$/u.test(beforeCursor);
+		return super.getSuggestions(lines, cursorLine, cursorCol, localSubcommand ? { ...options, force: false } : options);
+	}
 }
 
 class CommandPaletteView implements Component {
