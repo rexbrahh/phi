@@ -7,6 +7,7 @@ type ArgumentlessKind =
 	| "help"
 	| "status"
 	| "diagnostics"
+	| "details"
 	| "context"
 	| "tasks"
 	| "workflows"
@@ -26,6 +27,7 @@ export type LocalCommand =
 	| { readonly kind: "help" }
 	| { readonly kind: "status" }
 	| { readonly kind: "diagnostics" }
+	| { readonly kind: "details" }
 	| { readonly kind: "context" }
 	| { readonly kind: "model"; readonly name?: string }
 	| { readonly kind: "effort"; readonly level?: string }
@@ -104,6 +106,8 @@ export function parseLocalCommand(text: string): LocalCommand | null {
 			return argumentless(text, name, argumentsText, "status");
 		case "diagnostics":
 			return argumentless(text, name, argumentsText, "diagnostics");
+		case "details":
+			return argumentless(text, name, argumentsText, "details");
 		case "context":
 			return argumentless(text, name, argumentsText, "context");
 		case "model":
@@ -235,7 +239,7 @@ export async function dispatchLocalCommand(command: LocalCommand, app: AppContro
 		return;
 	}
 	if (command.kind === "help") {
-		app.showNotice("Local Phi: /model [id], /effort [level] (also /phi model and /phi effort), /phi status, diagnostics, context, permissions [mode], tasks, workflows, transcript [text], copy, sessions, new, resume <id>, fork, rewind, worktrees, shell, attach <path>, mcp [server], reload, palette, questions, ultracode [on|off], workflow-size [unrestricted|small|medium|large], send <text>, quit. In Tasks, x stops the selected task; Ctrl+B backgrounds foreground work. Other SDK slash commands and @ paths pass through unchanged.");
+		app.showNotice("Local Phi: /model [id], /effort [level] (also /phi model and /phi effort), /phi status, diagnostics, details, context, permissions [mode], tasks, workflows, transcript [text], copy, sessions, new, resume <id>, fork, rewind, worktrees, shell, attach <path>, mcp [server], reload, palette, questions, ultracode [on|off], workflow-size [unrestricted|small|medium|large], send <text>, quit. In Tasks, x stops the selected task; Ctrl+B backgrounds foreground work. Other SDK slash commands and @ paths pass through unchanged.");
 		return;
 	}
 
@@ -243,6 +247,9 @@ export async function dispatchLocalCommand(command: LocalCommand, app: AppContro
 		switch (command.kind) {
 			case "status":
 				app.showNotice(formatStatus(app));
+				return;
+			case "details":
+				app.showNotice(app.views.transcript.toggleToolDetails() ? "Tool details shown. /phi details collapses them." : "Tool details collapsed.");
 				return;
 			case "diagnostics":
 				app.showNotice(app.views.transcript.diagnosticsText());

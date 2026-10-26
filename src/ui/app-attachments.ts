@@ -43,7 +43,7 @@ export class AppAttachmentController {
 	async copySelectedOutput(): Promise<void> {
 		const text = this.options.selectedOutput();
 		if (!text) {
-			this.options.showNotice("Select a task or load history before copying output.");
+			this.options.showNotice("No completed answer or selected output is available to copy.");
 			return;
 		}
 		const controller = new AbortController();
@@ -51,7 +51,7 @@ export class AppAttachmentController {
 		const operation = (async () => {
 			try {
 				await this.options.dependencies.copyText(sanitizeTerminalText(text), controller.signal);
-				if (!this.options.isClosing()) this.options.showNotice("Selected output copied to the clipboard.");
+				if (!this.options.isClosing()) this.options.showNotice("Output copied to the clipboard.");
 			} catch (error) {
 				if (!controller.signal.aborted && !this.options.isClosing()) {
 					this.options.showNotice(`Could not copy output: ${errorText(error)}`);

@@ -190,7 +190,9 @@ export class AppController {
 			draftRevision: () => this.draftRevision,
 			sessionId: () => this.sessionId,
 			processGeneration: () => this.processGeneration,
-			selectedOutput: () => this.views.inspectors.selectedOutput(),
+			selectedOutput: () => this.views.active === "transcript"
+				? transcript.latestAssistantText()
+				: this.views.inspectors.selectedOutput(),
 			isClosing: () => this.closing,
 			showNotice: (message) => this.showNotice(message),
 		});
