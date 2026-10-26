@@ -44,8 +44,8 @@ interface GitResult {
 	error?: Error & { code?: number | string | null; signal?: NodeJS.Signals | null };
 }
 
-export function environmentForLocalGit(): NodeJS.ProcessEnv {
-	const environment = { ...process.env };
+export function environmentForLocalGit(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+	const environment = { ...source };
 	delete environment.GIT_INDEX_FILE;
 	delete environment.GIT_DIR;
 	delete environment.GIT_WORK_TREE;
