@@ -20,6 +20,7 @@ import { startSession, type Session } from "../session.js";
 import { createState, resetStateForProcess, type PhiState } from "../state.js";
 import { AppAttachmentController } from "./app-attachments.js";
 import { AppCommandPaletteController, type PaletteCommandChoice } from "./app-command-palette.js";
+import { AppControlPickerController, type ControlPickerApplyResult, type ControlPickerKind } from "./app-control-picker.js";
 import { AppExitConfirmationController } from "./app-exit-confirmation.js";
 import { AppKeyboardController } from "./app-keyboard.js";
 import { AppDialogController } from "./app-dialogs.js";
@@ -52,6 +53,11 @@ interface PendingSessionTransition {
 	launch: LaunchOptions;
 	sessionId: string;
 	cwdWarning?: string;
+}
+interface ControlSessionSnapshot {
+	query: Query;
+	session: Session;
+	generation: number;
 }
 
 export interface AppViews {
@@ -91,6 +97,7 @@ export class AppController {
 	private readonly shell: AppShellController;
 	private readonly attachmentController: AppAttachmentController;
 	private readonly commandPalette: AppCommandPaletteController;
+	private readonly controlPicker: AppControlPickerController;
 	private readonly exitConfirmation: AppExitConfirmationController;
 	private readonly keyboard: AppKeyboardController;
 	private readonly dialogController: AppDialogController;
@@ -105,10 +112,12 @@ export class AppController {
 	private terminalStarted = false;
 	private suspended = false;
 	private notice: string | undefined;
+	private restoreDialogAfterInspector = false;
 	private sessionId: string | undefined;
 	private lastCheckpointId: string | undefined;
 	private reportedModelValueOverride: string | undefined;
 	private sessionControlSelections: SessionControlSelections = {};
+	private controlPickerSnapshot: ControlSessionSnapshot | undefined;
 	private transitionTail: Promise<void> = Promise.resolve();
 	private localCommandTail: Promise<void> = Promise.resolve();
 	private pendingTransition: PendingSessionTransition | undefined;
@@ -131,7 +140,7 @@ export class AppController {
 		});
 		const tui = new TuiMainScreen(this.dependencies.terminal);
 		const editor = new Editor(tui, editorTheme);
-		const transcript = new TranscriptView(this.state);
+		const transcript = new TranscriptView(this.state, (text) => this.formatDiagnostic(text));
 		const inspectors = new AppInspectorController(this.state, launch.cwd, this.dependencies, () => this.render());
 		const screen = new MainScreen(tui, this.state, transcript, inspectors.view, editor);
 		const dialogController = new AppDialogController(
@@ -152,6 +161,12 @@ export class AppController {
 			editor,
 			(choice) => this.dispatchPaletteChoice(choice),
 			(restoreDialog) => { if (restoreDialog) this.dialogController.reopen(); },
+			() => this.render(),
+		);
+		this.controlPicker = new AppControlPickerController(
+			tui,
+			editor,
+			(kind, value, isCurrent) => this.applyControlPickerChoice(kind, value, isCurrent),
 			() => this.render(),
 		);
 		this.exitConfirmation = new AppExitConfirmationController(
@@ -184,11 +199,18 @@ export class AppController {
 			handleDialogInput: (data) => this.dialogController.handleKey(data),
 			exitConfirmationVisible: () => this.exitConfirmation.visible,
 			handleExitConfirmationInput: (data) => this.exitConfirmation.handleInput(data),
+			controlPickerVisible: () => this.controlPicker.visible,
+			handleControlPickerInput: (data) => this.controlPicker.handleInput(data),
 			commandPaletteVisible: () => this.commandPalette.visible,
 			handleCommandPaletteInput: (data) => this.commandPalette.handleInput(data),
 			toggleCommandPalette: () => this.toggleCommandPalette(),
 			openTranscriptInspector: () => this.openTranscriptInspector(),
 			hideDialog: () => this.dialogController.hide(),
+			dismissNotice: () => {
+				if (this.notice === undefined) return false;
+				this.showNotice(undefined);
+				return true;
+			},
 			leaveShellMode: () => this.shell.leave(),
 			interruptForeground: () => { void this.interruptForeground(); },
 			backgroundTasks: () => { void this.backgroundTasks(); },
@@ -257,6 +279,10 @@ export class AppController {
 		return this.commandPalette.visible;
 	}
 
+	get controlPickerVisible(): boolean {
+		return this.controlPicker.visible;
+	}
+
 	run(): Promise<number> {
 		if (this.runPromise) return this.runPromise;
 		this.runPromise = this.runInternal();
@@ -280,6 +306,10 @@ export class AppController {
 
 	showInspector(panel: InspectorPanel | null): void {
 		this.views.inspectors.show(panel);
+		if (panel === null && this.restoreDialogAfterInspector) {
+			this.restoreDialogAfterInspector = false;
+			this.dialogController.reopen();
+		}
 	}
 
 	selectTask(taskId: string): Promise<void> {
@@ -345,10 +375,188 @@ export class AppController {
 
 	setSessionControl<K extends keyof SessionControlSelections>(key: K, value: SessionControlSelections[K]): void {
 		this.sessionControlSelections = { ...this.sessionControlSelections, [key]: value };
+		this.render();
 	}
 
 	setReportedModel(model: string): void {
 		this.reportedModelValueOverride = model;
+		this.render();
+	}
+
+	openModelPicker(): void {
+		this.openControlPicker("model");
+	}
+
+	openEffortPicker(): void {
+		this.openControlPicker("effort");
+	}
+
+	private openControlPicker(kind: ControlPickerKind): void {
+		if (this.interactions.pending.length > 0) {
+			this.dialogController.reopen();
+			this.showNotice("Resolve the pending permission or question before changing model or effort.");
+			return;
+		}
+		const snapshot = this.controlSessionSnapshot();
+		if (!snapshot) {
+			this.showNotice("The SDK session is not ready.");
+			return;
+		}
+		this.controlPickerSnapshot = snapshot;
+		const requestId = this.controlPicker.show({
+			kind,
+			title: kind === "model" ? "Choose model" : "Choose effort",
+			detail: kind === "model" ? "Loading SDK models…" : "Loading SDK effort levels…",
+			items: [],
+			loading: true,
+		});
+		void this.loadControlPickerChoices(requestId, kind, snapshot);
+	}
+
+	private async loadControlPickerChoices(
+		requestId: number,
+		kind: ControlPickerKind,
+		snapshot: ControlSessionSnapshot,
+	): Promise<void> {
+		try {
+			const models = await snapshot.query.supportedModels();
+			if (!this.isCurrentControlSession(snapshot)) return;
+			if (kind === "model") {
+				const currentModelId = this.sessionControlSelections.model ?? this.reportedModelValue();
+				const current = models.find((model) => model.value === currentModelId || model.resolvedModel === currentModelId);
+				const items = models.map((model) => ({
+					value: model.value,
+					label: model.displayName,
+					description: [model.value, model.description].filter(Boolean).join(" · "),
+				}));
+				const detail = current
+					? `Current: ${current.displayName} (${current.value})`
+					: currentModelId ? `Current model: ${currentModelId}` : "Current model: not reported";
+				const content = {
+					kind,
+					title: "Choose model",
+					detail,
+					items,
+					...(current ? { selectedValue: current.value } : {}),
+					emptyMessage: "The SDK reported no available models.",
+				};
+				if (this.controlPicker.update(requestId, content) && models.length === 0) {
+					this.showNotice("The SDK reported no available models.");
+				}
+				return;
+			}
+
+			let modelId = this.sessionControlSelections.model ?? this.reportedModelValue();
+			if (!modelId) {
+				const usage = await snapshot.query.getContextUsage({ detail: "summary" });
+				if (!this.isCurrentControlSession(snapshot)) return;
+				modelId = usage.model;
+				this.setReportedModel(modelId);
+			}
+			const model = models.find((candidate) => candidate.value === modelId || candidate.resolvedModel === modelId);
+			const levels = model?.supportedEffortLevels ?? [];
+			const currentEffort = this.sessionControlSelections.effort;
+			if (!model || levels.length === 0) {
+				const message = `The SDK reports no selectable effort levels for ${modelId ?? "the current model"}.`;
+				this.controlPicker.update(requestId, {
+					kind,
+					title: "Choose effort",
+					detail: message,
+					items: [],
+					emptyMessage: message,
+				});
+				return;
+			}
+			const unsupportedCurrent = currentEffort !== undefined && !levels.includes(currentEffort);
+			const detail = unsupportedCurrent
+				? `Current effort ${currentEffort} is not supported by ${model.displayName}; choose a supported level.`
+				: `Current effort: ${currentEffort ?? "not selected"} · ${model.displayName}`;
+			const items = levels.map((level) => ({ value: level, label: level }));
+			this.controlPicker.update(requestId, {
+				kind,
+				title: "Choose effort",
+				detail,
+				items,
+				...(currentEffort && !unsupportedCurrent ? { selectedValue: currentEffort } : {}),
+			});
+		} catch (error) {
+			if (!this.isCurrentControlSession(snapshot)) return;
+			const message = this.formatDiagnostic(`Could not load SDK ${kind === "model" ? "models" : "effort levels"}: ${errorText(error)}`);
+			this.controlPicker.update(requestId, {
+				kind,
+				title: kind === "model" ? "Choose model" : "Choose effort",
+				detail: message,
+				items: [],
+				emptyMessage: message,
+			});
+			this.showNotice(message);
+		}
+	}
+
+	private async applyControlPickerChoice(kind: ControlPickerKind, value: string, isCurrent: () => boolean): Promise<ControlPickerApplyResult> {
+		const snapshot = this.controlPickerSnapshot;
+		if (!snapshot || !this.isCurrentControlSession(snapshot) || !isCurrent()) return undefined;
+		try {
+			const models = await snapshot.query.supportedModels();
+			if (!this.isCurrentControlSession(snapshot) || !isCurrent()) return undefined;
+			if (kind === "model") {
+				const model = models.find((candidate) => candidate.value === value);
+				if (!model) return this.rejectPickerChoice(`Model ${value} is no longer supported by the SDK.`);
+				await snapshot.query.setModel(model.value);
+				if (!this.isCurrentControlSession(snapshot)) return undefined;
+				this.setSessionControl("model", model.value);
+				this.showNotice(`Model changed to ${model.displayName} (${model.value}).`);
+				return { accepted: true };
+			}
+
+			let modelId = this.sessionControlSelections.model ?? this.reportedModelValue();
+			if (!modelId) {
+				const usage = await snapshot.query.getContextUsage({ detail: "summary" });
+				if (!this.isCurrentControlSession(snapshot) || !isCurrent()) return undefined;
+				modelId = usage.model;
+				this.setReportedModel(modelId);
+			}
+			const model = models.find((candidate) => candidate.value === modelId || candidate.resolvedModel === modelId);
+			const levels = model?.supportedEffortLevels ?? [];
+			if (!model || !levels.includes(value as EffortLevel)) {
+				return this.rejectPickerChoice(`Effort ${value} is no longer supported for ${model?.displayName ?? modelId}.`);
+			}
+			await snapshot.query.applyFlagSettings({ effortLevel: value as EffortLevel });
+			if (!this.isCurrentControlSession(snapshot)) return undefined;
+			this.setSessionControl("effort", value as EffortLevel);
+			this.showNotice(`Effort changed to ${value}.`);
+			return { accepted: true };
+		} catch (error) {
+			if (!this.isCurrentControlSession(snapshot)) return undefined;
+			return this.rejectPickerChoice(`Could not set ${kind}: ${errorText(error)}`);
+		}
+	}
+
+	private rejectPickerChoice(message: string): ControlPickerApplyResult {
+		const diagnostic = this.formatDiagnostic(message);
+		this.showNotice(diagnostic);
+		return { accepted: false, message: diagnostic };
+	}
+
+	private controlSessionSnapshot(): ControlSessionSnapshot | undefined {
+		const session = this.session;
+		const query = this.query;
+		if (!session || !query || !this.ready || this.sessionTransitionInProgress) return undefined;
+		return { query, session, generation: this.processGeneration };
+	}
+
+	private isCurrentControlSession(snapshot: ControlSessionSnapshot): boolean {
+		return this.processGeneration === snapshot.generation
+			&& this.session === snapshot.session
+			&& this.query === snapshot.query
+			&& !this.sessionTransitionInProgress
+			&& !this.exitRequested
+			&& !this.closing;
+	}
+
+	private dismissControlPicker(): void {
+		this.controlPicker.dismiss();
+		this.controlPickerSnapshot = undefined;
 	}
 
 	private queueLocalCommand(command: LocalCommand): void {
@@ -373,8 +581,12 @@ export class AppController {
 	}
 
 	private openTranscriptInspector(): void {
+		this.dismissControlPicker();
 		if (this.commandPalette.visible) this.commandPalette.hide(false);
-		if (this.dialogController.visible) this.dialogController.hide();
+		if (this.dialogController.visible) {
+			this.restoreDialogAfterInspector = true;
+			this.dialogController.hide();
+		}
 		this.showInspector("history");
 		this.views.tui.setFocus(this.views.editor);
 	}
@@ -390,7 +602,12 @@ export class AppController {
 
 	refreshNativeCommands(commands: SDKControlInitializeResponse["commands"]): void {
 		if (this.ready) this.ready = { ...this.ready, commands };
-		this.views.editor.setAutocompleteProvider(new CombinedAutocompleteProvider(commands, this.state.cwd));
+		const nativeCommands = commands.filter((command) => command.name !== "model" && command.name !== "effort");
+		this.views.editor.setAutocompleteProvider(new CombinedAutocompleteProvider([
+			...nativeCommands,
+			{ value: "model", label: "model", description: "Choose a model" },
+			{ value: "effort", label: "effort", description: "Choose an effort level" },
+		], this.state.cwd));
 		this.commandPalette.setNativeCommands(commands);
 	}
 
@@ -410,6 +627,7 @@ export class AppController {
 	}
 
 	reopenQuestions(): void {
+		this.restoreDialogAfterInspector = false;
 		this.dialogController.reopen();
 	}
 
@@ -579,6 +797,7 @@ export class AppController {
 	private async openSession(launch: LaunchOptions, generation: number, replacement: boolean): Promise<void> {
 		const isCurrent = (): boolean => generation === this.processGeneration && !this.exitRequested && !this.closing;
 		if (!isCurrent()) return;
+		this.dismissControlPicker();
 		const observer = new AppSessionObserver(
 			this.state,
 			this.interactions,
@@ -697,6 +916,7 @@ export class AppController {
 		}
 
 		this.sessionTransitionInProgress = true;
+		this.dismissControlPicker();
 		try {
 			const oldSession = this.session;
 			const oldQuery = oldSession?.query;
@@ -856,6 +1076,7 @@ export class AppController {
 			...(launch.effort ? { effort: launch.effort } : {}),
 			...(launch.permissionMode ? { permissionMode: launch.permissionMode } : {}),
 		};
+		this.render();
 	}
 
 	private reportedModelValue(): string | undefined {
@@ -896,11 +1117,14 @@ export class AppController {
 		this.views.screen.update({
 			workspace: this.views.inspectors.model.workspace,
 			notice: this.notice,
+			model: this.sessionControlSelections.model ?? this.reportedModelValue(),
+			effort: this.sessionControlSelections.effort,
 			shellMode: shell.mode,
 			shellCwd: shell.cwdSnapshot,
 			shellPreview: shell.preview,
 			shellJob: shell.job,
 			attachments: this.attachments,
+			pendingInteraction: this.interactions.pending.length > 0 && !this.dialogController.visible,
 		});
 		this.updateProgramStatus();
 	}
@@ -960,6 +1184,7 @@ export class AppController {
 		this.closing = true;
 		this.keyboard.endStartupTerminalReplyCapture();
 		this.processGeneration += 1;
+		this.dismissControlPicker();
 		this.removeInputListener?.();
 		this.removeInputListener = undefined;
 		for (const [signal, listener] of this.signalListeners) this.dependencies.signals.off(signal, listener);

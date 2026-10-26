@@ -6,7 +6,8 @@ test("passes ordinary text, native commands, and mentions outside the reserved n
 	for (const text of [
 		"Explain this code",
 		"/clear",
-		"/model sonnet",
+		"/modelx sonnet",
+		"/effortless high",
 		"@src/main.ts",
 		"Please inspect @src/main.ts",
 		"/philosophy is ordinary text",
@@ -22,9 +23,12 @@ test("parses every command in the Task 7 local command matrix", () => {
 		["/phi", { kind: "help" }],
 		["/phi help", { kind: "help" }],
 		["/phi status", { kind: "status" }],
+		["/phi diagnostics", { kind: "diagnostics" }],
 		["/phi context", { kind: "context" }],
 		["/phi model", { kind: "model" }],
 		["/phi effort", { kind: "effort" }],
+		["/model", { kind: "model" }],
+		["/effort", { kind: "effort" }],
 		["/phi permissions", { kind: "permissions" }],
 		["/phi tasks", { kind: "tasks" }],
 		["/phi workflows", { kind: "workflows" }],
@@ -54,6 +58,11 @@ test("parses every command in the Task 7 local command matrix", () => {
 });
 
 test("parses picker-versus-set arguments as literal values", () => {
+	assert.deepEqual(parseLocalCommand("/model claude-sonnet-4"), {
+		kind: "model",
+		name: "claude-sonnet-4",
+	});
+	assert.deepEqual(parseLocalCommand("/effort high"), { kind: "effort", level: "high" });
 	assert.deepEqual(parseLocalCommand("/phi model claude-sonnet-4"), {
 		kind: "model",
 		name: "claude-sonnet-4",

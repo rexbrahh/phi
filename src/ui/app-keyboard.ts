@@ -24,11 +24,14 @@ export interface AppKeyboardActions {
 	handleDialogInput(data: string): void;
 	exitConfirmationVisible(): boolean;
 	handleExitConfirmationInput(data: string): void;
+	controlPickerVisible(): boolean;
+	handleControlPickerInput(data: string): void;
 	commandPaletteVisible(): boolean;
 	handleCommandPaletteInput(data: string): void;
 	toggleCommandPalette(): void;
 	openTranscriptInspector(): void;
 	hideDialog(): void;
+	dismissNotice(): boolean;
 	leaveShellMode(): void;
 	interruptForeground(): void;
 	backgroundTasks(): void;
@@ -77,16 +80,12 @@ export class AppKeyboardController {
 			this.actions.handleExitConfirmationInput(data);
 			return { consume: true };
 		}
-		if (matchesKey(data, Key.ctrlShift("p"))) {
-			this.actions.toggleCommandPalette();
-			return { consume: true };
-		}
-		if (matchesKey(data, Key.ctrl("o"))) {
-			this.actions.openTranscriptInspector();
-			return { consume: true };
-		}
 		if (this.actions.dialogVisible()) {
 			this.discardPartialPaste();
+			if (matchesKey(data, Key.ctrl("o"))) {
+				this.actions.openTranscriptInspector();
+				return { consume: true };
+			}
 			if (matchesKey(data, Key.ctrl("c"))) {
 				this.actions.handleDialogInput(data);
 				this.actions.render();
@@ -100,9 +99,23 @@ export class AppKeyboardController {
 			this.actions.render();
 			return { consume: true };
 		}
+		if (this.actions.controlPickerVisible()) {
+			this.discardPartialPaste();
+			this.actions.handleControlPickerInput(data);
+			return { consume: true };
+		}
 		if (this.actions.commandPaletteVisible()) {
 			this.discardPartialPaste();
-			this.actions.handleCommandPaletteInput(data);
+			if (matchesKey(data, Key.ctrlShift("p"))) this.actions.toggleCommandPalette();
+			else this.actions.handleCommandPaletteInput(data);
+			return { consume: true };
+		}
+		if (matchesKey(data, Key.ctrlShift("p"))) {
+			this.actions.toggleCommandPalette();
+			return { consume: true };
+		}
+		if (matchesKey(data, Key.ctrl("o"))) {
+			this.actions.openTranscriptInspector();
 			return { consume: true };
 		}
 		if (this.shell.mode) this.discardPartialPaste();
@@ -114,14 +127,15 @@ export class AppKeyboardController {
 				return { consume: true };
 			}
 			if (this.views.active !== "transcript") {
-				this.actions.showInspector(null);
 				this.views.tui.setFocus(this.views.editor);
+				this.actions.showInspector(null);
 				return { consume: true };
 			}
 			if (this.state.effectiveStatus.foreground === "running") {
 				this.actions.interruptForeground();
 				return { consume: true };
 			}
+			if (this.actions.dismissNotice()) return { consume: true };
 			return undefined;
 		}
 		if (matchesKey(data, Key.ctrl("c"))) {
@@ -301,8 +315,8 @@ export class AppKeyboardController {
 	}
 
 	private toggleInspector(panel: InspectorPanel): void {
-		this.actions.showInspector(this.views.active === panel ? null : panel);
 		this.views.tui.setFocus(this.views.editor);
+		this.actions.showInspector(this.views.active === panel ? null : panel);
 	}
 
 	private selectNextInspectorItem(): void {

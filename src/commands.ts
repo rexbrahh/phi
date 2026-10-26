@@ -6,6 +6,7 @@ export type WorkflowSize = "unrestricted" | "small" | "medium" | "large";
 type ArgumentlessKind =
 	| "help"
 	| "status"
+	| "diagnostics"
 	| "context"
 	| "tasks"
 	| "workflows"
@@ -24,6 +25,7 @@ type ArgumentlessKind =
 export type LocalCommand =
 	| { readonly kind: "help" }
 	| { readonly kind: "status" }
+	| { readonly kind: "diagnostics" }
 	| { readonly kind: "context" }
 	| { readonly kind: "model"; readonly name?: string }
 	| { readonly kind: "effort"; readonly level?: string }
@@ -71,8 +73,17 @@ function argumentless(
 	return { kind };
 }
 
-/** Parse only the reserved /phi namespace. All other input remains available to native handling. */
+/** Parse local controls. Other slash commands remain available to native handling. */
 export function parseLocalCommand(text: string): LocalCommand | null {
+	for (const [alias, kind] of [["/model", "model"], ["/effort", "effort"]] as const) {
+		if (!text.startsWith(alias)) continue;
+		const boundary = text[alias.length];
+		if (boundary !== undefined && !/\s/u.test(boundary)) continue;
+		const argument = text.slice(alias.length).replace(/^\s+/u, "");
+		return kind === "model"
+			? { kind, ...(argument.length > 0 ? { name: argument } : {}) }
+			: { kind, ...(argument.length > 0 ? { level: argument } : {}) };
+	}
 	if (!text.startsWith("/phi")) return null;
 	const namespaceBoundary = text[4];
 	if (namespaceBoundary !== undefined && !/\s/u.test(namespaceBoundary)) return null;
@@ -91,6 +102,8 @@ export function parseLocalCommand(text: string): LocalCommand | null {
 			return argumentless(text, name, argumentsText, "help");
 		case "status":
 			return argumentless(text, name, argumentsText, "status");
+		case "diagnostics":
+			return argumentless(text, name, argumentsText, "diagnostics");
 		case "context":
 			return argumentless(text, name, argumentsText, "context");
 		case "model":
@@ -222,7 +235,7 @@ export async function dispatchLocalCommand(command: LocalCommand, app: AppContro
 		return;
 	}
 	if (command.kind === "help") {
-		app.showNotice("Local Phi: /phi status, context, model [id], effort [level], permissions [mode], tasks, workflows, transcript [text], copy, sessions, new, resume <id>, fork, rewind, worktrees, shell, attach <path>, mcp [server], reload, palette, questions, ultracode [on|off], workflow-size [unrestricted|small|medium|large], send <text>, quit. In Tasks, x stops the selected task; Ctrl+B backgrounds foreground work. SDK slash commands and @ paths pass through unchanged.");
+		app.showNotice("Local Phi: /model [id], /effort [level] (also /phi model and /phi effort), /phi status, diagnostics, context, permissions [mode], tasks, workflows, transcript [text], copy, sessions, new, resume <id>, fork, rewind, worktrees, shell, attach <path>, mcp [server], reload, palette, questions, ultracode [on|off], workflow-size [unrestricted|small|medium|large], send <text>, quit. In Tasks, x stops the selected task; Ctrl+B backgrounds foreground work. Other SDK slash commands and @ paths pass through unchanged.");
 		return;
 	}
 
@@ -230,6 +243,9 @@ export async function dispatchLocalCommand(command: LocalCommand, app: AppContro
 		switch (command.kind) {
 			case "status":
 				app.showNotice(formatStatus(app));
+				return;
+			case "diagnostics":
+				app.showNotice(app.views.transcript.diagnosticsText());
 				return;
 			case "context": {
 				const query = requireQuery(app);
@@ -244,10 +260,12 @@ export async function dispatchLocalCommand(command: LocalCommand, app: AppContro
 				return;
 			}
 			case "model":
-				await selectModel(app, command.name);
+				if (command.name === undefined) app.openModelPicker();
+				else await selectModel(app, command.name);
 				return;
 			case "effort":
-				await selectEffort(app, command.level);
+				if (command.level === undefined) app.openEffortPicker();
+				else await selectEffort(app, command.level);
 				return;
 			case "permissions":
 				await selectPermissionMode(app, command.mode);
@@ -302,28 +320,19 @@ function requireQuery(app: AppController) {
 	return query;
 }
 
-async function selectModel(app: AppController, requested: string | undefined): Promise<void> {
+async function selectModel(app: AppController, requested: string): Promise<void> {
 	const models = await requireQuery(app).supportedModels();
-	if (!requested) {
-		if (models.length === 0) {
-			app.showNotice("The SDK reported no available models.");
-			return;
-		}
-		const rows = models.map((model) => `${model.displayName} · ${model.value}${model.description ? ` · ${model.description}` : ""}`);
-		app.showNotice(`Runtime SDK models:\n${rows.join("\n")}\nUse /phi model <id> to select one. ${selectionLabel(app, "model")}`);
-		return;
-	}
 	const selected = models.find((model) => model.value === requested || model.resolvedModel === requested);
 	if (!selected) {
-		app.showNotice(`Model ${requested} is not in the SDK's current model list. Use /phi model to see available models.`);
+		app.showNotice(`Model ${requested} is not in the SDK's current model list. Use /model to open the picker.`);
 		return;
 	}
 	await requireQuery(app).setModel(selected.value);
 	app.setSessionControl("model", selected.value);
-			app.showNotice(`Model selection ${selected.value} was accepted by the SDK. Last SDK-reported model: ${app.reportedModel ?? "not reported yet"}.`);
+	app.showNotice(`Model changed to ${selected.displayName} (${selected.value}).`);
 }
 
-async function selectEffort(app: AppController, requested: string | undefined): Promise<void> {
+async function selectEffort(app: AppController, requested: string): Promise<void> {
 	const query = requireQuery(app);
 	const models = await query.supportedModels();
 	let modelId = app.sessionControls.model ?? app.reportedModel;
@@ -334,19 +343,13 @@ async function selectEffort(app: AppController, requested: string | undefined): 
 	}
 	const model = models.find((candidate) => candidate.value === modelId || candidate.resolvedModel === modelId);
 	const levels = model?.supportedEffortLevels ?? [];
-	if (!requested) {
-		app.showNotice(levels.length
-			? `Runtime effort levels for ${model?.displayName ?? modelId}: ${levels.join(", ")}. ${selectionLabel(app, "effort")}`
-			: `The SDK reports no selectable effort levels for ${modelId}.`);
-		return;
-	}
 	if (!levels.includes(requested as EffortLevel)) {
 		app.showNotice(`Effort ${requested} is not supported for ${modelId}. Available levels: ${levels.join(", ") || "none"}.`);
 		return;
 	}
 	await query.applyFlagSettings({ effortLevel: requested as EffortLevel });
 	app.setSessionControl("effort", requested as EffortLevel);
-	app.showNotice(`Effort selection ${requested} was accepted by the SDK. The effective effort level is not reported by this control.`);
+	app.showNotice(`Effort changed to ${requested}.`);
 }
 
 async function selectPermissionMode(app: AppController, requested: string | undefined): Promise<void> {
