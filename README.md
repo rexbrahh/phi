@@ -17,7 +17,7 @@ cd /path/to/project
 phi
 ```
 
-See the [Phi 1.0.1 release notes](docs/releases/v1.0.1.md) and the [v1 evidence report](docs/superpowers/reports/2026-10-24-phi-v1.md) for release limits and source-scoped evidence.
+See the [Phi 1.0.4 release notes](docs/releases/v1.0.4.md) and the [v1 evidence report](docs/superpowers/reports/2026-10-24-phi-v1.md) for release limits and source-scoped evidence.
 
 ## Requirements
 
@@ -122,10 +122,11 @@ Press Enter to submit a prompt. Use the editor for multiline input, history, pas
 | `Ctrl+C` | Cancel a visible native request, stop a local shell job, interrupt foreground SDK work, or request exit when those are idle. |
 | `Ctrl+Z` | Suspend Phi where the terminal supports process suspension. |
 | `Ctrl+T`, `Ctrl+R`, `Ctrl+Shift+W` | Open task, session-history, or workspace inspectors. |
-| `Ctrl+G`, `Ctrl+Shift+F`, `Ctrl+Shift+Y` | Refresh workspace status, search loaded history, or copy selected output. |
+| `Ctrl+Shift+G`, `Ctrl+Shift+F`, `Ctrl+Shift+Y` | Refresh workspace status, search loaded history, or copy selected output. |
 | `Ctrl+V`, `Alt+Backspace` | Attach a clipboard image, or remove the last attachment when the draft is empty. |
 | `Ctrl+W`, `Alt+Backspace` | Delete the previous word in the draft. |
 | `Ctrl+F`, `Ctrl+Y` | Move the cursor forward, or restore the last deleted text. |
+| `Ctrl+G` | Edit the draft in `VISUAL` or `EDITOR`. Save and exit to return without sending. |
 | `Ctrl+O` | Open transcript history. |
 | `Ctrl+Shift+P` | Open the command palette. |
 
@@ -137,6 +138,14 @@ Use `/model` and `/effort` to open the model and effort menus. The menus use the
 
 Routine SDK events do not appear in the transcript. Phi groups repeated diagnostics and shows short previews of the two most recent groups. Run `/phi diagnostics` for complete retained diagnostic text; Escape dismisses it.
 
+Tool inputs use compact one-line summaries. `/phi details` expands retained tool input and output previews. Run it again to collapse them. The previews remain bounded. Use the history inspector for native messages.
+
+`/phi copy` or `Ctrl+Shift+Y` copies the latest completed assistant answer when the conversation is active. In an inspector, it copies the selected output.
+
+`Ctrl+G` or `/phi editor` opens `VISUAL`, then `EDITOR`, or `vi` if neither is set. Save and exit to return the text to the composer. Nothing is submitted automatically. Use a blocking flag such as `code --wait` for a GUI editor. On editor failure or cancellation, Phi preserves the original draft and reports the private recovery file path.
+
+Type `/phi ` to complete local command names. Native commands, `/model`, `/effort`, and file references remain available in completion.
+
 The command palette lists supported SDK commands and local Phi controls. Search matches command names and descriptions. Select an SDK command to send it through the SDK command path. Select a local control to run its local command. Opening or closing the palette keeps the composer draft.
 
 With a visible native request, Ctrl+C cancels only that request and keeps Phi open. With a running local shell job, it stops the job. With foreground SDK work, it interrupts that work and keeps Phi open. Otherwise, Ctrl+C exits when no draft or background work remains. Phi asks for confirmation before it discards an unsent draft or stops remaining work. Choose “Stop work and exit Phi” to confirm. Choose “Keep Phi open” or press Escape to cancel. `/phi quit` follows the same confirmation rules.
@@ -145,9 +154,9 @@ Use `/phi help` to see local commands.
 
 | Group | Commands |
 | --- | --- |
-| Inspect | `/phi status`, `/phi diagnostics`, `/phi context`, `/phi model`, `/phi effort`, `/phi permissions`, `/phi tasks`, `/phi workflows`, `/phi transcript`, `/phi copy`, `/phi worktrees` |
+| Inspect | `/phi status`, `/phi diagnostics`, `/phi details`, `/phi context`, `/phi model`, `/phi effort`, `/phi permissions`, `/phi tasks`, `/phi workflows`, `/phi transcript`, `/phi copy`, `/phi worktrees` |
 | Session | `/phi sessions`, `/phi new`, `/phi resume <id>`, `/phi fork`, `/phi rewind`, `/phi questions`, `/phi quit` |
-| Local tools | `/phi shell`, `/phi attach <path>`, `/phi mcp`, `/phi reload`, `/phi palette` |
+| Local tools | `/phi shell`, `/phi editor`, `/phi attach <path>`, `/phi mcp`, `/phi reload`, `/phi palette` |
 | Settings | `/phi ultracode`, `/phi workflow-size`, `/phi send <text>` |
 
 In Tasks, press `x` to request a stop for the selected running task. This is separate from foreground interruption. If work is active, repeat the same `/phi new`, `/phi resume <id>`, or `/phi fork` command within 30 seconds to confirm stop-and-switch. Phi opens the target only if stop requests succeed.
@@ -160,7 +169,7 @@ Image attachments support PNG, JPEG, GIF, and WebP. One image can be up to 5 MB.
 
 `--resume <session-id>` and `--continue` reopen conversation history in a new Phi process. `--continue` selects the newest session in the launch directory. They do not restore local child processes or guarantee that an earlier workflow continues.
 
-Use `/phi sessions` to list sessions. Use `/phi new`, `/phi resume <id>`, or `/phi fork` to switch inside Phi. If you exit while background work remains, Phi closes its SDK query and local shell. A later resume restores conversation history, not those running processes.
+Use `/phi sessions` to search saved sessions by title, branch, or ID. Arrow keys select a row. Enter resumes it. Escape closes the picker and keeps the draft. Use `/phi new`, `/phi resume <id>`, or `/phi fork` to switch inside Phi. If you exit while background work remains, Phi closes its SDK query and local shell. A later resume restores conversation history, not those running processes.
 
 Use `/phi rewind` only when the session is idle and Phi has an SDK checkpoint. Phi shows a fresh preview first. Run the command again to apply the preview. Rewind applies SDK file checkpoints. It does not undo Git or shell effects, and it is not a full task rollback.
 
