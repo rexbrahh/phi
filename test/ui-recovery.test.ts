@@ -104,8 +104,11 @@ test("context, permissions, MCP reconnect, reload, sessions, and local views use
 		assert.equal(controller.ready?.commands[0]?.name, "fresh-native");
 
 		controller.submitPrompt("/phi sessions");
-		await waitFor(() => terminal.output.includes(RESUME_ID));
-		assert.match(terminal.output, /project session/u);
+		await waitFor(() => controller.sessionPickerVisible && terminal.output.includes("project session"));
+		terminal.input("\u001b");
+		assert.equal(controller.sessionPickerVisible, false);
+		controller.showInspector("history");
+		await waitFor(() => !controller.views.inspectors.model.historyLoading);
 
 		controller.views.inspectors.model.historyMessages = [{
 			type: "assistant",

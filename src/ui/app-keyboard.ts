@@ -24,6 +24,8 @@ export interface AppKeyboardActions {
 	handleDialogInput(data: string): void;
 	exitConfirmationVisible(): boolean;
 	handleExitConfirmationInput(data: string): void;
+	sessionPickerVisible(): boolean;
+	handleSessionPickerInput(data: string): void;
 	controlPickerVisible(): boolean;
 	handleControlPickerInput(data: string): void;
 	commandPaletteVisible(): boolean;
@@ -97,6 +99,11 @@ export class AppKeyboardController {
 			}
 			this.actions.handleDialogInput(data);
 			this.actions.render();
+			return { consume: true };
+		}
+		if (this.actions.sessionPickerVisible()) {
+			this.discardPartialPaste();
+			this.actions.handleSessionPickerInput(data);
 			return { consume: true };
 		}
 		if (this.actions.controlPickerVisible()) {

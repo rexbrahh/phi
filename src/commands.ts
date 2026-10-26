@@ -285,7 +285,7 @@ export async function dispatchLocalCommand(command: LocalCommand, app: AppContro
 				await app.copySelectedOutput();
 				return;
 			case "sessions":
-				await showSessions(app);
+				app.openSessionPicker();
 				return;
 			case "worktrees":
 				app.showInspector("workspace");
@@ -388,15 +388,6 @@ async function setWorkflowSize(app: AppController, size: WorkflowSize | undefine
 	await requireQuery(app).applyFlagSettings({ workflowSizeGuideline: size });
 	app.setSessionControl("workflowSize", size);
 	app.showNotice(`Workflow size ${size} was accepted by the SDK for this session.`);
-}
-
-async function showSessions(app: AppController): Promise<void> {
-	const sessions = await app.listProjectSessions({ limit: 20, offset: 0 });
-	if (sessions.length === 0) {
-		app.showNotice("No SDK sessions were found for this project.");
-		return;
-	}
-	app.showNotice(`Project sessions:\n${sessions.map((session) => `${session.sessionId === app.currentSessionId ? "› " : "  "}${session.sessionId} · ${session.summary || "untitled"}`).join("\n")}\nUse /phi resume <id> to open a session.`);
 }
 
 async function showOrReconnectMcp(app: AppController, serverName: string | undefined): Promise<void> {

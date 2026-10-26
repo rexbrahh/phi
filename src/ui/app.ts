@@ -8,6 +8,7 @@ import {
 	type Query,
 	type SDKControlInitializeResponse,
 	type SDKMessage,
+	type SDKSessionInfo,
 	type EffortLevel,
 	type PermissionMode,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -26,6 +27,7 @@ import { AppKeyboardController } from "./app-keyboard.js";
 import { AppDialogController } from "./app-dialogs.js";
 import { AppInspectorController } from "./app-inspectors.js";
 import { AppShellController } from "./app-shell.js";
+import { AppSessionPickerController } from "./app-session-picker.js";
 import { AppSessionObserver } from "./app-session-observer.js";
 import { AppSubmissionController } from "./app-submission.js";
 import { createDefaultDependencies, type AppDependencies } from "./app-types.js";
@@ -131,6 +133,9 @@ export class AppController {
 	private removeInputListener: (() => void) | undefined;
 	private readonly signalListeners = new Map<NodeJS.Signals, () => void>();
 	private draftRevision = 0;
+	private readonly sessionPicker: AppSessionPickerController;
+	private sessionPickerEpoch = 0;
+	private sessionPickerApplyingEpoch: number | undefined;
 
 	constructor(private launch: LaunchOptions, dependencies: Partial<AppDependencies> = {}) {
 		this.dependencies = { ...createDefaultDependencies(launch.home), ...dependencies, configRoot: launch.home };
@@ -169,6 +174,10 @@ export class AppController {
 			(kind, value, isCurrent) => this.applyControlPickerChoice(kind, value, isCurrent),
 			() => this.render(),
 		);
+		this.sessionPicker = new AppSessionPickerController(tui, editor, (id) => { void this.resumeFromPicker(id); }, () => {
+			if (!this.sessionPicker.visible) this.pendingTransition = undefined;
+			this.render();
+		});
 		this.exitConfirmation = new AppExitConfirmationController(
 			tui,
 			editor,
@@ -199,6 +208,8 @@ export class AppController {
 			handleDialogInput: (data) => this.dialogController.handleKey(data),
 			exitConfirmationVisible: () => this.exitConfirmation.visible,
 			handleExitConfirmationInput: (data) => this.exitConfirmation.handleInput(data),
+			sessionPickerVisible: () => this.sessionPicker.visible,
+			handleSessionPickerInput: (data) => this.sessionPicker.handleInput(data),
 			controlPickerVisible: () => this.controlPicker.visible,
 			handleControlPickerInput: (data) => this.controlPicker.handleInput(data),
 			commandPaletteVisible: () => this.commandPalette.visible,
@@ -639,6 +650,53 @@ export class AppController {
 		this.attachmentController.loadImage(resolve(this.state.cwd, path), restoreDraft);
 	}
 
+	get sessionPickerVisible(): boolean {
+		return this.sessionPicker.visible;
+	}
+
+	openSessionPicker(): void {
+		if (!this.ready || this.sessionTransitionInProgress || this.closing) return;
+		if (this.interactions.pending.length > 0) {
+			this.dialogController.reopen();
+			this.showNotice("Resolve the pending request before switching sessions.");
+			return;
+		}
+		this.dismissControlPicker();
+		this.commandPalette.hide(false);
+		this.pendingTransition = undefined;
+		const epoch = ++this.sessionPickerEpoch;
+		const generation = this.processGeneration;
+		this.sessionPicker.show(async () => {
+			const sessions = new Map<string, SDKSessionInfo>();
+			for (let offset = 0; ; offset += 100) {
+				const page = await this.listProjectSessions({ limit: 100, offset });
+				if (!this.sessionPicker.visible || epoch !== this.sessionPickerEpoch || generation !== this.processGeneration) return [];
+				const previousSize = sessions.size;
+				for (const session of page) sessions.set(session.sessionId, session);
+				if (page.length < 100 || sessions.size === previousSize) break;
+			}
+			return [...sessions.values()].sort((a, b) => b.lastModified - a.lastModified);
+		}, this.sessionId);
+	}
+
+	private async resumeFromPicker(sessionId: string): Promise<void> {
+		if (this.sessionPickerApplyingEpoch === this.sessionPickerEpoch) return;
+		if (sessionId === this.sessionId) { this.sessionPicker.hide(); return; }
+		const epoch = this.sessionPickerEpoch;
+		const isRequested = () => this.sessionPicker.visible && epoch === this.sessionPickerEpoch;
+		this.sessionPickerApplyingEpoch = epoch;
+		try {
+			await this.replaceSession({ kind: "resume", sessionId }, isRequested);
+			if (isRequested() && this.pendingTransition?.sessionId === sessionId) {
+				this.sessionPicker.setMessage("Work is active. Select again to stop it and resume. Esc cancels.");
+			}
+		} catch (error) {
+			if (isRequested()) this.sessionPicker.setMessage(`Could not resume: ${this.formatDiagnostic(error)}`);
+		} finally {
+			if (this.sessionPickerApplyingEpoch === epoch) this.sessionPickerApplyingEpoch = undefined;
+		}
+	}
+
 	copySelectedOutput(): Promise<void> {
 		return this.attachmentController.copySelectedOutput();
 	}
@@ -687,8 +745,8 @@ export class AppController {
 		}
 	}
 
-	replaceSession(command: SessionTransition): Promise<void> {
-		const operation = this.transitionTail.then(() => this.replaceSessionNow(command));
+	replaceSession(command: SessionTransition, isRequested: () => boolean = () => true): Promise<void> {
+		const operation = this.transitionTail.then(() => this.replaceSessionNow(command, isRequested));
 		this.transitionTail = operation.catch(() => undefined);
 		return operation;
 	}
@@ -895,7 +953,7 @@ export class AppController {
 		}
 	}
 
-	private async replaceSessionNow(command: SessionTransition): Promise<void> {
+	private async replaceSessionNow(command: SessionTransition, isRequested: () => boolean): Promise<void> {
 		let generation = this.processGeneration;
 		const isCurrent = (): boolean => generation === this.processGeneration && !this.exitRequested && !this.closing;
 		if (!isCurrent()) return;
@@ -906,7 +964,7 @@ export class AppController {
 		} else {
 			target = await this.createSessionTarget(command, key, isCurrent);
 		}
-		if (!target || !isCurrent()) return;
+		if (!target || !isCurrent() || !isRequested()) return;
 		const confirmed = this.pendingTransition?.key === key && this.pendingTransition.expiresAt >= Date.now();
 		this.pendingTransition = undefined;
 		if (this.hasActiveWork() && !confirmed) {
@@ -916,6 +974,7 @@ export class AppController {
 		}
 
 		this.sessionTransitionInProgress = true;
+		this.sessionPicker.hide();
 		this.dismissControlPicker();
 		try {
 			const oldSession = this.session;
@@ -1113,6 +1172,7 @@ export class AppController {
 
 	private render(): void {
 		if (!this.views) return;
+		if (this.dialogController?.visible && this.sessionPicker?.visible) this.sessionPicker.hide();
 		const shell = this.shell.screenState();
 		this.views.screen.update({
 			workspace: this.views.inspectors.model.workspace,
@@ -1182,6 +1242,7 @@ export class AppController {
 	private async cleanup(): Promise<string[]> {
 		if (this.closing) return [];
 		this.closing = true;
+		this.sessionPicker.hide();
 		this.keyboard.endStartupTerminalReplyCapture();
 		this.processGeneration += 1;
 		this.dismissControlPicker();
