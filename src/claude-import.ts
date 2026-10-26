@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ensurePhiHome } from "./home.js";
 
@@ -299,14 +299,7 @@ async function mergeEntry(source: string, target: string, relativePath: string, 
 		}
 		return;
 	}
-	const mode = isPrivateJson(relativePath) ? 0o600 : sourceMetadata.mode & 0o777;
-	const file = await open(target, "wx", mode);
-	try {
-		await file.chmod(mode);
-		await file.writeFile(await readFile(source));
-	} finally {
-		await file.close();
-	}
+	await link(source, target);
 	imported.push(relativePath);
 }
 

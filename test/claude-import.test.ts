@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { lstat, mkdir, mkdtemp, readFile, readlink, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, open, readFile, readlink, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { importClaudeCustomizations } from "../src/claude-import.js";
 
 const EXCLUDED = ["file-history", "debug", "credentials.json"];
@@ -169,6 +170,46 @@ test("preserves existing Phi targets while importing missing children", async ()
 		assert.equal(await readFile(join(home, "skills", "new.md"), "utf8"), "new skill\n");
 		assert.ok(result.skipped.includes("settings.json"));
 		assert.ok(result.skipped.includes("skills/existing/SKILL.md"));
+	});
+});
+
+test("a failed publication cannot leave a partial file that a retry trusts", async (t: TestContext) => {
+	await withFixture(async (_root, source, home) => {
+		const contents = "complete customization payload\n";
+		await writeFile(join(source, "CLAUDE.md"), contents);
+		const probe = await open(join(source, "CLAUDE.md"), "r");
+		const prototype = Object.getPrototypeOf(probe) as Pick<FileHandle, "writeFile">;
+		const originalWriteFile = prototype.writeFile;
+		await probe.close();
+
+		let matchingPayloadWrites = 0;
+		let faultInjected = false;
+		t.mock.method(prototype, "writeFile", async function (
+			this: FileHandle,
+			data: Parameters<FileHandle["writeFile"]>[0],
+			options?: Parameters<FileHandle["writeFile"]>[1],
+		) {
+			const matchesPayload = typeof data === "string"
+				? data === contents
+				: data instanceof Uint8Array && Buffer.from(data).equals(Buffer.from(contents));
+			if (matchesPayload && ++matchingPayloadWrites === 2) {
+				faultInjected = true;
+				await originalWriteFile.call(this, "partial");
+				throw new Error("synthetic merge write failure");
+			}
+			return originalWriteFile.call(this, data, options);
+		});
+
+		let firstAttemptFailed = false;
+		try {
+			await importClaudeCustomizations(source, home);
+		} catch {
+			firstAttemptFailed = true;
+		}
+		assert.equal(firstAttemptFailed, faultInjected, "only the injected publication failure should reject the first import");
+
+		await importClaudeCustomizations(source, home);
+		assert.equal(await readFile(join(home, "CLAUDE.md"), "utf8"), contents);
 	});
 });
 
