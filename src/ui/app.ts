@@ -20,7 +20,7 @@ import { InteractionQueue } from "../interactions.js";
 import { startSession, type Session } from "../session.js";
 import { createState, resetStateForProcess, type PhiState } from "../state.js";
 import { AppAttachmentController } from "./app-attachments.js";
-import { AppCommandPaletteController, type PaletteCommandChoice } from "./app-command-palette.js";
+import { AppCommandPaletteController, localAutocompleteCommands, type PaletteCommandChoice } from "./app-command-palette.js";
 import { AppControlPickerController, type ControlPickerApplyResult, type ControlPickerKind } from "./app-control-picker.js";
 import { AppExitConfirmationController } from "./app-exit-confirmation.js";
 import { AppKeyboardController } from "./app-keyboard.js";
@@ -613,11 +613,10 @@ export class AppController {
 
 	refreshNativeCommands(commands: SDKControlInitializeResponse["commands"]): void {
 		if (this.ready) this.ready = { ...this.ready, commands };
-		const nativeCommands = commands.filter((command) => command.name !== "model" && command.name !== "effort");
+		const nativeCommands = commands.filter((command) => command.name !== "model" && command.name !== "effort" && command.name !== "phi");
 		this.views.editor.setAutocompleteProvider(new CombinedAutocompleteProvider([
 			...nativeCommands,
-			{ value: "model", label: "model", description: "Choose a model" },
-			{ value: "effort", label: "effort", description: "Choose an effort level" },
+			...localAutocompleteCommands(),
 		], this.state.cwd));
 		this.commandPalette.setNativeCommands(commands);
 	}

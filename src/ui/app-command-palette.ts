@@ -19,6 +19,8 @@ const LOCAL_COMMANDS: readonly LocalPaletteCommand[] = [
 	{ command: "help", description: "Show local Phi commands" },
 	{ command: "status", description: "Show session status" },
 	{ command: "diagnostics", description: "Show complete diagnostic messages" },
+	{ command: "details", description: "Expand or collapse retained tool details" },
+	{ command: "editor", description: "Edit the draft in VISUAL or EDITOR" },
 	{ command: "context", description: "Show SDK context usage" },
 	{ command: "model", description: "Choose a model", shortAlias: true },
 	{ command: "effort", description: "Choose an effort level", shortAlias: true },
@@ -26,8 +28,8 @@ const LOCAL_COMMANDS: readonly LocalPaletteCommand[] = [
 	{ command: "tasks", description: "Open the Tasks inspector" },
 	{ command: "workflows", description: "Open workflow task details" },
 	{ command: "transcript", description: "Open transcript history" },
-	{ command: "copy", description: "Copy selected output" },
-	{ command: "sessions", description: "List SDK sessions" },
+	{ command: "copy", description: "Copy the last answer or selected output" },
+	{ command: "sessions", description: "Find and resume a saved session" },
 	{ command: "new", description: "Start a new session" },
 	{ command: "fork", description: "Fork the current session" },
 	{ command: "rewind", description: "Preview the latest file checkpoint" },
@@ -41,6 +43,33 @@ const LOCAL_COMMANDS: readonly LocalPaletteCommand[] = [
 	{ command: "questions", description: "Reopen a hidden native question or permission" },
 	{ command: "quit", description: "Exit Phi" },
 ];
+
+export function localAutocompleteCommands(): import("@earendil-works/pi-tui").SlashCommand[] {
+	const aliases = LOCAL_COMMANDS.filter((entry) => entry.shortAlias)
+		.map((entry) => ({ name: entry.command, description: entry.description }));
+	return [
+		...aliases,
+		{
+			name: "phi",
+			description: "Local Phi commands",
+			getArgumentCompletions(argumentPrefix) {
+				const prefix = argumentPrefix.trimStart();
+				if (/\s/u.test(prefix)) return null;
+				const local = LOCAL_COMMANDS.map((entry) => ({
+					value: entry.command,
+					label: entry.command,
+					description: entry.description,
+				}));
+				const argumentControls = [
+					{ value: "resume", label: "resume", description: "<id> — Resume an SDK session" },
+					{ value: "attach", label: "attach", description: "<path> — Attach an image" },
+					{ value: "send", label: "send", description: "<text> — Submit literal text" },
+				].filter((item) => !LOCAL_COMMANDS.some((entry) => entry.command === item.value));
+				return [...local, ...argumentControls].filter((item) => item.value.startsWith(prefix));
+			},
+		},
+	];
+}
 
 class CommandPaletteView implements Component {
 	private readonly filter = new Input({ prompt: "Find: ", placeholder: "Type to filter commands" });
