@@ -52,6 +52,17 @@ async function withTemporaryDirectory(run: (directory: string) => Promise<void>)
 	}
 }
 
+async function withPlatform(platform: "darwin" | "linux", run: () => Promise<void>): Promise<void> {
+	const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
+	if (!descriptor?.configurable) throw new Error("process.platform cannot be scoped for this test.");
+	Object.defineProperty(process, "platform", { ...descriptor, value: platform });
+	try {
+		await run();
+	} finally {
+		Object.defineProperty(process, "platform", descriptor);
+	}
+}
+
 test("loadImage derives MIME type from PNG, JPEG, GIF, and WebP signatures", async () => {
 	await withTemporaryDirectory(async (directory) => {
 		for (const fixture of imageFixtures) {
@@ -240,7 +251,7 @@ test("stale image failures cannot restore or report against a same-ID resumed pr
 	await controller.close();
 });
 
-test("clipboard image reading uses injected osascript and returns a typed image block", async () => {
+test("clipboard image reading uses injected osascript and returns a typed image block", () => withPlatform("darwin", async () => {
 	const png = imageFixtures[0].bytes;
 	const requests: SubprocessRequest[] = [];
 	const clipboard = createClipboardActions(async (request) => {
@@ -258,7 +269,7 @@ test("clipboard image reading uses injected osascript and returns a typed image 
 	assert.match(requests[0]?.args[1] ?? "", /NSPasteboard/);
 	assert.equal(requests[0]?.stdin, undefined);
 	assert.equal(requests[0]?.maxOutputBytes, 6_666_670);
-});
+}));
 
 test("clipboard image AppleScript compiles without reading the clipboard", { skip: process.platform !== "darwin" }, async () => {
 	let script: string | undefined;
@@ -279,7 +290,7 @@ test("clipboard image AppleScript compiles without reading the clipboard", { ski
 	});
 });
 
-test("clipboard image reading forwards its cancellation signal", async () => {
+test("clipboard image reading forwards its cancellation signal", () => withPlatform("darwin", async () => {
 	const controller = new AbortController();
 	let receivedSignal: AbortSignal | undefined;
 	const clipboard = createClipboardActions(async (request) => {
@@ -289,30 +300,30 @@ test("clipboard image reading forwards its cancellation signal", async () => {
 
 	await clipboard.readClipboardImage(controller.signal);
 	assert.equal(receivedSignal, controller.signal);
-});
+}));
 
-test("clipboard image reading returns null when AppKit has no image", async () => {
+test("clipboard image reading returns null when AppKit has no image", () => withPlatform("darwin", async () => {
 	const clipboard = createClipboardActions(async () => Buffer.from("\n"));
 	assert.equal(await clipboard.readClipboardImage(), null);
-});
+}));
 
-test("clipboard image reading rejects decoded images above the per-image limit", async () => {
+test("clipboard image reading rejects decoded images above the per-image limit", () => withPlatform("darwin", async () => {
 	const oversizedPng = Buffer.alloc(5_000_001, 0x01);
 	Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(oversizedPng);
 	const clipboard = createClipboardActions(async () => Buffer.from(`${oversizedPng.toString("base64")}\n`));
 
 	await assert.rejects(clipboard.readClipboardImage(), /5,000,000-byte limit/);
-});
+}));
 
-test("clipboard subprocess failures become actionable without exposing clipboard contents", async () => {
+test("clipboard subprocess failures become actionable without exposing clipboard contents", () => withPlatform("darwin", async () => {
 	const clipboard = createClipboardActions(async () => {
 		throw new Error("osascript unavailable");
 	});
 
 	await assert.rejects(clipboard.readClipboardImage(), /macOS clipboard image.*osascript unavailable/i);
-});
+}));
 
-test("copyText sends exact text to pbcopy stdin without shell interpolation", async () => {
+test("copyText sends exact text to pbcopy stdin without shell interpolation", () => withPlatform("darwin", async () => {
 	const requests: SubprocessRequest[] = [];
 	const clipboard = createClipboardActions(async (request) => {
 		requests.push(request);
@@ -326,7 +337,18 @@ test("copyText sends exact text to pbcopy stdin without shell interpolation", as
 	assert.equal(requests[0]?.command, "pbcopy");
 	assert.deepEqual(requests[0]?.args, []);
 	assert.equal(requests[0]?.stdin, text);
-});
+}));
+
+test("clipboard actions reject non-macOS hosts before running subprocesses", () => withPlatform("linux", async () => {
+	let invoked = false;
+	const clipboard = createClipboardActions(async () => {
+		invoked = true;
+		return Buffer.alloc(0);
+	});
+	await assert.rejects(clipboard.readClipboardImage(), /macOS is required for clipboard image paste/);
+	await assert.rejects(clipboard.copyText("private text"), /macOS is required for copying text/);
+	assert.equal(invoked, false);
+}));
 
 test("production subprocess runner rejects output above its byte limit", async () => {
 	await assert.rejects(

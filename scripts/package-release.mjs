@@ -10,7 +10,7 @@ const root = process.cwd();
 const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 const lock = JSON.parse(await readFile(join(root, "package-lock.json"), "utf8"));
 assert.equal(pkg.name, "phi");
-assert.equal(pkg.version, "1.0.0");
+assert.match(pkg.version, /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u, "release version must use stable semver");
 assert.equal(pkg.private, true);
 assert.equal(pkg.bin?.phi, "dist/src/cli.js");
 assert.equal(lock.version, pkg.version);
