@@ -118,7 +118,7 @@ Press Enter to submit a prompt. Use the editor for multiline input, history, pas
 | Key | Action |
 | --- | --- |
 | `Ctrl+B` | Ask the SDK to background foreground work. |
-| `Escape` | Hide a pending dialog, leave shell mode, close an inspector, or interrupt foreground work, in that order. |
+| `Escape` | Close a menu, hide a pending dialog, leave shell mode, close an inspector, interrupt foreground work, or dismiss an idle notice. |
 | `Ctrl+C` | Cancel a visible native request, stop a local shell job, interrupt foreground SDK work, or request exit when those are idle. |
 | `Ctrl+Z` | Suspend Phi where the terminal supports process suspension. |
 | `Ctrl+T`, `Ctrl+R`, `Ctrl+W` | Open task, session-history, or workspace inspectors. |
@@ -127,11 +127,15 @@ Press Enter to submit a prompt. Use the editor for multiline input, history, pas
 | `Ctrl+O` | Open transcript history. |
 | `Ctrl+Shift+P` | Open the command palette. |
 
-Permission dialogs accept `1` or `y` to allow once and `d` to deny. They accept `a` to allow the suggested action only when Phi offers that choice. Escape hides a dialog without answering it. Ctrl+C cancels only the visible native request. Phi and its SDK session stay open.
+Permission dialogs accept `1` or `y` to allow once and `d` to deny. They accept `a` to allow the suggested action only when Phi offers that choice. Escape hides a dialog without answering it. Ctrl+C cancels only the visible native request. Phi and its SDK session stay open. Use PgUp/PgDn to scroll long request details; response controls stay visible.
 
-Ctrl+O opens History and hides a visible native request. The request stays pending. Run `/phi questions` to reopen a hidden question or permission. Use `/phi transcript` to open History, `/phi tasks` to open Tasks, and `/phi worktrees` to open Workspace. Run `/phi palette` if the palette key is unavailable.
+Ctrl+O opens History and hides a visible native request. Escape returns to the pending request. Run `/phi questions` to reopen a hidden question or permission. Use `/phi transcript` to open History, `/phi tasks` to open Tasks, and `/phi worktrees` to open Workspace. Run `/phi palette` if the palette key is unavailable.
 
-The command palette lists supported SDK commands and local Phi controls. Select an SDK command to send it through the SDK command path. Select a local control to run its local command. Opening or closing the palette keeps the composer draft.
+Use `/model` and `/effort` to open the model and effort menus. The menus use the current SDK capabilities. Arrow keys move; Enter applies the choice; Escape closes the menu. Closing a menu after a change was sent does not cancel the SDK operation. Phi reports the accepted result in the status line. Explicit `/phi model <id>` and `/phi effort <level>` commands remain available.
+
+Routine SDK events do not appear in the transcript. Phi groups repeated diagnostics and shows short previews of the two most recent groups. Run `/phi diagnostics` for complete retained diagnostic text; Escape dismisses it.
+
+The command palette lists supported SDK commands and local Phi controls. Search matches command names and descriptions. Select an SDK command to send it through the SDK command path. Select a local control to run its local command. Opening or closing the palette keeps the composer draft.
 
 With a visible native request, Ctrl+C cancels only that request and keeps Phi open. With a running local shell job, it stops the job. With foreground SDK work, it interrupts that work and keeps Phi open. Otherwise, Ctrl+C exits when no draft or background work remains. Phi asks for confirmation before it discards an unsent draft or stops remaining work. Choose “Stop work and exit Phi” to confirm. Choose “Keep Phi open” or press Escape to cancel. `/phi quit` follows the same confirmation rules.
 
@@ -139,7 +143,7 @@ Use `/phi help` to see local commands.
 
 | Group | Commands |
 | --- | --- |
-| Inspect | `/phi status`, `/phi context`, `/phi model`, `/phi effort`, `/phi permissions`, `/phi tasks`, `/phi workflows`, `/phi transcript`, `/phi copy`, `/phi worktrees` |
+| Inspect | `/phi status`, `/phi diagnostics`, `/phi context`, `/phi model`, `/phi effort`, `/phi permissions`, `/phi tasks`, `/phi workflows`, `/phi transcript`, `/phi copy`, `/phi worktrees` |
 | Session | `/phi sessions`, `/phi new`, `/phi resume <id>`, `/phi fork`, `/phi rewind`, `/phi questions`, `/phi quit` |
 | Local tools | `/phi shell`, `/phi attach <path>`, `/phi mcp`, `/phi reload`, `/phi palette` |
 | Settings | `/phi ultracode`, `/phi workflow-size`, `/phi send <text>` |
