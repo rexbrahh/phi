@@ -6,6 +6,7 @@ import { Readable, Writable } from "node:stream";
 import { environmentForLocalGit } from "./workspace.js";
 
 const TERMINATION_GRACE_MS = 1_000;
+const PROCESS_GROUP_EXIT_TIMEOUT_MS = 2_000;
 const PROCESS_GROUP_POLL_MS = 25;
 const EDITOR_SHELL_COMMAND = [
 	"set -m",
@@ -145,8 +146,11 @@ function runEditor(
 			launchControl.destroy();
 		};
 		const waitForEditorGroupExit = async (pid: number) => {
+			const deadline = performance.now() + PROCESS_GROUP_EXIT_TIMEOUT_MS;
 			while (processGroupExists(pid)) {
 				if (protocolError) throw protocolError;
+				// Unreaped zombies can keep a group visible after every member has stopped.
+				if (performance.now() >= deadline) throw new Error("Could not confirm prompt editor process group exit");
 				await new Promise((resolveWait) => setTimeout(resolveWait, PROCESS_GROUP_POLL_MS));
 			}
 		};

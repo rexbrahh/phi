@@ -60,6 +60,51 @@ test("a denied group signal reports failure and keeps the recovery draft", async
 	}
 });
 
+test("abort settles when an unreaped editor group stays visible to signal probes", async (t) => {
+	const paths = await fixture(t);
+	const editor = join(paths.root, "held editor.mjs");
+	const marker = join(paths.root, "started");
+	await writeFile(editor, 'import { writeFileSync } from "node:fs"; writeFileSync(process.env.MARKER_FILE, "ready"); setInterval(() => {}, 1000);');
+	const originalKill = process.kill.bind(process);
+	let ownedGroup: number | undefined;
+	let forceStops = 0;
+	const mockedKill = t.mock.method(process, "kill", (pid: number, signal?: NodeJS.Signals | number) => {
+		if (pid < 0 && signal === "SIGTERM") ownedGroup = pid;
+		if (pid === ownedGroup && signal === 0) return true;
+		if (pid === ownedGroup && signal === "SIGKILL") { forceStops += 1; return true; }
+		return originalKill(pid, signal);
+	});
+	const controller = new AbortController();
+	const pending = editPrompt("recover this", paths.cwd, environment(paths.temporary, {
+		VISUAL: [shellQuote(process.execPath), shellQuote(editor)].join(" "), MARKER_FILE: marker,
+	}), controller.signal);
+	let timeout: NodeJS.Timeout | undefined;
+	try {
+		const deadline = Date.now() + 5_000;
+		while (!existsSync(marker) && Date.now() < deadline) await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+		assert.ok(existsSync(marker));
+		controller.abort();
+		await assert.rejects(Promise.race([
+			pending,
+			new Promise<never>((_resolve, reject) => {
+				timeout = setTimeout(() => reject(new Error("Editor abort remained pending")), 4_000);
+			}),
+		]), /Could not confirm prompt editor process group exit; draft retained at/);
+		assert.equal(forceStops, 1, "the force-stop grace period must run before the wait expires");
+		const [directory] = await readdir(paths.temporary);
+		assert.equal(await readFile(join(paths.temporary, directory, "prompt"), "utf8"), "recover this");
+	} finally {
+		if (timeout) clearTimeout(timeout);
+		mockedKill.mock.restore();
+		controller.abort();
+		if (ownedGroup) {
+			try { originalKill(ownedGroup, "SIGKILL"); }
+			catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+		}
+		await pending.catch(() => undefined);
+	}
+});
+
 test("round-trips UTF-8 through a blocking editor with private temp files", async (t) => {
 	const paths = await fixture(t);
 	const editor = join(paths.root, "fake editor.mjs");
