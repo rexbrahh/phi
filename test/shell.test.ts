@@ -159,7 +159,7 @@ test("runUserShell passes the exact command and inherited environment and stores
 });
 
 test("runUserShell Git commands follow the linked cwd despite inherited Git routing selectors", async () => {
-	const temporary = await mkdtemp(join("/private/tmp", "phi shell git context "));
+	const temporary = await mkdtemp(join(tmpdir(), "phi shell git context "));
 	const restoreEnvironment = setEnvironment({
 		XDG_STATE_HOME: join(temporary, "state"),
 		SHELL: "/bin/sh",
