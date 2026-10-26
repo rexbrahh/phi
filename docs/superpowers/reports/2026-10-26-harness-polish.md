@@ -19,7 +19,9 @@ User screenshots on 2026-10-26 showed more transcript clutter. The renderer now 
 
 Deterministic tests cover completion, more than one page of sessions, cancellation during metadata lookup, active-work confirmation, terminal-text sanitization, resize, copying, and tool-detail bounds. External-editor checks use a private temporary prompt and fake SDK. They cover multiline text, file permissions, Git environment isolation, failure recovery, terminal ownership, and shutdown.
 
-The isolated Ghostty attempt stopped at the lock screen before visual interaction. The fixture restored terminal settings and preserved the existing windows. That attempt is not a visual pass.
+The final isolated Ghostty run captured eight views with a fake SDK. It checked transcript density, model and effort selection, permission cancellation, history, pasted-command completion, details expansion, and session-picker cancellation. Copy reached a test clipboard. The fixture restored terminal settings, preserved existing windows, and restored focus. Ghostty did not expose window bounds for automated resizing; the separate PTY resize test passed.
+
+The visual check found that Tab treated a pasted `/phi` subcommand as a file path. The autocomplete provider now keeps local subcommands in command mode. File arguments still use file completion. A regression passes bracketed paste and Tab through the app before it submits the completed local command.
 
 Research also identified editable follow-up queues, configurable app hotkeys, a live context display, elapsed time, and search across all history pages. They are outside this patch. Queue controls need a separate design against the SDK's asynchronous input behavior. Context values must come from the SDK.
 
