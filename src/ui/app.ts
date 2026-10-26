@@ -133,6 +133,8 @@ export class AppController {
 	private removeInputListener: (() => void) | undefined;
 	private readonly signalListeners = new Map<NodeJS.Signals, () => void>();
 	private draftRevision = 0;
+	private promptEditorController: AbortController | undefined;
+	private promptEditorOperation: Promise<void> | undefined;
 	private readonly sessionPicker: AppSessionPickerController;
 	private sessionPickerEpoch = 0;
 	private sessionPickerApplyingEpoch: number | undefined;
@@ -231,6 +233,7 @@ export class AppController {
 			requestUserExit: () => this.requestUserExit(),
 			suspendTerminal: () => this.suspendTerminal(),
 			refreshWorkspace: () => void this.refreshWorkspace(this.state.cwd),
+			openPromptEditor: () => { void this.openPromptEditor(); },
 			showInspector: (panel) => this.showInspector(panel),
 			searchLoadedHistory: (query) => this.searchLoadedHistory(query),
 			selectTask: (taskId) => void this.selectTask(taskId),
@@ -651,6 +654,51 @@ export class AppController {
 		this.attachmentController.loadImage(resolve(this.state.cwd, path), restoreDraft);
 	}
 
+	async openPromptEditor(): Promise<void> {
+		if (this.promptEditorController || this.closing || this.exitRequested || this.sessionTransitionInProgress) return;
+		if (this.interactions.pending.length > 0) {
+			this.dialogController.reopen();
+			this.showNotice("Resolve the pending request before opening the editor.");
+			return;
+		}
+		this.sessionPicker.hide();
+		this.dismissControlPicker();
+		this.commandPalette.hide(false);
+		const controller = new AbortController();
+		this.promptEditorController = controller;
+		const revision = ++this.draftRevision;
+		const generation = this.processGeneration;
+		const draft = this.views.editor.getExpandedText();
+		const operation = (async () => {
+			try {
+				this.terminalStarted = false;
+				this.views.tui.stop({ preserveScreen: true });
+				const edited = await this.dependencies.editPrompt(draft, this.state.cwd, this.dependencies.environment, controller.signal);
+				if (this.closing || this.exitRequested) return;
+				if (generation === this.processGeneration && revision === this.draftRevision) {
+					this.views.editor.setText(edited);
+					this.showNotice("Draft updated. Enter sends it.");
+				} else this.showNotice("The draft or session changed. Editor text was not applied.");
+			} catch (error) {
+				if (!this.closing && !this.exitRequested) this.showNotice(`Could not edit prompt: ${this.formatDiagnostic(error)}. Your draft is unchanged.`);
+			} finally {
+				this.promptEditorController = undefined;
+				if (!this.closing && !this.exitRequested) {
+					try {
+						this.views.tui.setFocus(this.views.editor);
+						this.startTerminal();
+					} catch (error) {
+						this.setSessionError(`Could not restore the terminal after editing: ${this.formatDiagnostic(error)}`);
+						this.requestExit(1);
+					}
+				}
+			}
+		})();
+		this.promptEditorOperation = operation;
+		try { await operation; }
+		finally { if (this.promptEditorOperation === operation) this.promptEditorOperation = undefined; }
+	}
+
 	get sessionPickerVisible(): boolean {
 		return this.sessionPicker.visible;
 	}
@@ -747,6 +795,7 @@ export class AppController {
 	}
 
 	replaceSession(command: SessionTransition, isRequested: () => boolean = () => true): Promise<void> {
+		if (this.promptEditorController) { this.showNotice("Close the prompt editor before switching sessions."); return Promise.resolve(); }
 		const operation = this.transitionTail.then(() => this.replaceSessionNow(command, isRequested));
 		this.transitionTail = operation.catch(() => undefined);
 		return operation;
@@ -1161,7 +1210,7 @@ export class AppController {
 
 	private registerSignals(): void {
 		const bindings: Array<[NodeJS.Signals, () => void]> = [
-			["SIGINT", () => this.requestExit(130)],
+			["SIGINT", () => { if (!this.promptEditorController) this.requestExit(130); }],
 			["SIGTERM", () => this.requestExit(143)],
 			["SIGCONT", () => this.resumeTerminal()],
 		];
@@ -1172,7 +1221,7 @@ export class AppController {
 	}
 
 	private render(): void {
-		if (!this.views) return;
+		if (!this.views || this.promptEditorController) return;
 		if (this.dialogController?.visible && this.sessionPicker?.visible) this.sessionPicker.hide();
 		const shell = this.shell.screenState();
 		this.views.screen.update({
@@ -1243,6 +1292,8 @@ export class AppController {
 	private async cleanup(): Promise<string[]> {
 		if (this.closing) return [];
 		this.closing = true;
+		this.promptEditorController?.abort();
+		await this.promptEditorOperation;
 		this.sessionPicker.hide();
 		this.keyboard.endStartupTerminalReplyCapture();
 		this.processGeneration += 1;

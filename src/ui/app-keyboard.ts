@@ -41,6 +41,7 @@ export interface AppKeyboardActions {
 	requestUserExit(): void;
 	suspendTerminal(): void;
 	refreshWorkspace(): void;
+	openPromptEditor(): void;
 	showInspector(panel: InspectorPanel | null): void;
 	searchLoadedHistory(query: string): void;
 	selectTask(taskId: string): void;
@@ -172,6 +173,10 @@ export class AppKeyboardController {
 			return { consume: true };
 		}
 		if (matchesKey(data, Key.ctrl("g"))) {
+			this.actions.openPromptEditor();
+			return { consume: true };
+		}
+		if (matchesKey(data, Key.ctrlShift("g"))) {
 			this.actions.refreshWorkspace();
 			return { consume: true };
 		}

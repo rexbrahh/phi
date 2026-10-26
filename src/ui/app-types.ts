@@ -6,6 +6,7 @@ import {
 	readClipboardImage,
 	type ImageAttachment,
 } from "../attachments.js";
+import { editPrompt } from "../prompt-editor.js";
 import { resolveLaunchOptions } from "../config.js";
 import { createHistoryReader, type HistoryReader } from "../history.js";
 import { readWorkflowJournal, type JournalCursor, type JournalPage, type WorkflowReference } from "../workflows.js";
@@ -20,6 +21,7 @@ export interface SignalSource {
 
 export interface AppDependencies {
 	createQuery: typeof sdkQuery;
+	editPrompt: typeof editPrompt;
 	terminal: Terminal;
 	readClipboardImage(signal?: AbortSignal): Promise<ImageAttachment | null>;
 	copyText(text: string, signal?: AbortSignal): Promise<void>;
@@ -48,6 +50,7 @@ export interface AppDependencies {
 export function createDefaultDependencies(home: string): AppDependencies {
 	return {
 		createQuery: sdkQuery,
+		editPrompt,
 		terminal: new ProcessTerminal(),
 		readClipboardImage,
 		copyText,
