@@ -1,6 +1,6 @@
 import { Markdown, Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import type { ConversationBlock, PhiState, ProvisionalBlock, ToolReceipt } from "../state.js";
-import { boundedPreviewValue, getContentType, getDisplayText, getProperty, getStringProperty } from "../state-utils.js";
+import { boundedPreviewValue, getContentType, getDisplayText, getProperty, getStringProperty, parseInputObject } from "../state-utils.js";
 import { sanitizeTerminalText } from "./safe-text.js";
 import { markdownTheme } from "./theme.js";
 
@@ -42,6 +42,7 @@ export class TranscriptView implements Component {
 	private noticeCount = -1;
 	private noticeTail: PhiState["notices"][number] | undefined;
 	private groupedNotices: DisplayBlock[] = [];
+	private showToolDetails = false;
 
 	constructor(
 		private readonly state: PhiState,
@@ -50,6 +51,35 @@ export class TranscriptView implements Component {
 
 	diagnosticsText(): string {
 		return this.displayNotices().map((notice) => `${notice.role}:\n${notice.text}`).join("\n\n") || "No diagnostics reported.";
+	}
+
+	get toolDetailsVisible(): boolean {
+		return this.showToolDetails;
+	}
+
+	toggleToolDetails(): boolean {
+		this.showToolDetails = !this.showToolDetails;
+		this.invalidate();
+		this.fittedLines = undefined;
+		return this.showToolDetails;
+	}
+
+	latestAssistantText(): string | undefined {
+		const messages = new Map<string, string[]>();
+		for (const block of this.state.conversationBlocks) {
+			if (block.role !== "assistant" || block.aborted) continue;
+			const type = typeof block.content === "string" ? "text" : getContentType(block.content);
+			if (type !== "text") continue;
+			const text = typeof block.content === "string" ? block.content : getDisplayText(block.content);
+			const message = messages.get(block.messageId);
+			if (message) message.push(text);
+			else messages.set(block.messageId, [text]);
+		}
+
+		for (const textBlocks of [...messages.values()].reverse()) {
+			if (textBlocks.some((text) => text.length > 0)) return textBlocks.join("\n");
+		}
+		return undefined;
 	}
 
 	render(width: number): string[] {
@@ -63,7 +93,7 @@ export class TranscriptView implements Component {
 		}
 
 		for (const block of this.state.provisionalBlocks.values()) {
-			const display = this.displayProvisionalBlock(block);
+			const display = this.displayProvisionalBlock(block, width);
 			if (display) this.appendBlock(lines, display, width, currentKeys);
 		}
 
@@ -174,20 +204,24 @@ export class TranscriptView implements Component {
 		if (type === "tool_use") {
 			const id = getStringProperty(block.content, "id");
 			const receipt = id ? this.state.toolReceipts.get(id) : undefined;
+			const preview = receipt && !this.showToolDetails ? this.toolResultPreview(receipt, width) : undefined;
 			return {
 				key: block.id,
 				role: "Tool",
-				text: formatToolReceipt(block.content, receipt, receipt ? this.toolResultPreview(receipt, width) : undefined),
+				text: formatToolReceipt(block.content, receipt, preview, width, this.showToolDetails),
 				markdown: false,
 			};
 		}
 		if (type === "tool_result") {
 			const id = getStringProperty(block.content, "tool_use_id");
 			const receipt = id ? this.state.toolReceipts.get(id) : undefined;
+			const output = receipt?.resultPreview ?? getDisplayText(block.content) ?? "Tool output is available in the SDK history.";
 			return {
 				key: block.id,
-				role: "Tool result",
-				text: receipt?.resultPreview ?? getDisplayText(block.content) ?? "Tool output is available in the SDK history.",
+				role: `Tool result${receipt?.resultIsError ? " · failed" : ""}`,
+				text: this.showToolDetails && output
+					? `Retained output (bounded preview):\n${output}`
+					: output,
 				markdown: false,
 			};
 		}
@@ -210,17 +244,23 @@ export class TranscriptView implements Component {
 		return text;
 	}
 
-	private displayProvisionalBlock(block: ProvisionalBlock): DisplayBlock | undefined {
+	private displayProvisionalBlock(block: ProvisionalBlock, width: number): DisplayBlock | undefined {
 		if (block.contentType === "text") {
 			return { key: `partial:${block.id}`, role: "Phi · streaming", text: block.text, markdown: true };
 		}
 		if (block.contentType === "tool_use") {
-			const name = block.toolInput?.name ?? "tool";
-			const input = block.toolInput?.input ?? block.partialInputJson;
+			const receipt = block.toolUseId ? this.state.toolReceipts.get(block.toolUseId) : undefined;
+			const name = receipt?.toolName ?? "tool";
+			const input = block.partialInputJson
+				? parseInputObject(block.partialInputJson) ?? block.partialInputJson
+				: block.toolInput;
+			const details = this.showToolDetails
+				? retainedToolInput(input)
+				: compactToolInputSummary(input, width);
 			return {
 				key: `partial:${block.id}`,
 				role: "Tool · streaming",
-				text: `${String(name)}\n${boundedPreviewValue(input)}`,
+				text: [String(name), details].filter(Boolean).join("\n"),
 				markdown: false,
 			};
 		}
@@ -274,15 +314,51 @@ function clippedToolResultPreview(lines: string[]): string {
 	return `${lines.slice(0, MAX_TOOL_RESULT_DISPLAY_LINES - 1).join("\n")}\n…`;
 }
 
-function formatToolReceipt(content: unknown, receipt: ToolReceipt | undefined, preview: string | undefined): string {
+function formatToolReceipt(
+	content: unknown,
+	receipt: ToolReceipt | undefined,
+	preview: string | undefined,
+	width: number,
+	detailsVisible: boolean,
+): string {
 	const name = getStringProperty(content, "name") ?? receipt?.toolName ?? "Unknown tool";
-	const input = getProperty(content, "input") ?? receipt?.input;
+	const input = receipt?.input ?? (receipt?.partialInputJson || getProperty(content, "input"));
 	const state = receipt?.executionState ?? "requested";
+	if (detailsVisible) {
+		return [
+			`${name} · ${state}`,
+			retainedToolInput(input),
+			receipt?.resultPreview
+				? `Retained output (bounded preview${receipt.resultIsError ? ", error" : ""}):\n${receipt.resultPreview}`
+				: "",
+		].filter(Boolean).join("\n");
+	}
+	const summary = compactToolInputSummary(input, width);
 	return [
 		`${name} · ${state}`,
-		input === undefined ? "" : boundedPreviewValue(input),
+		summary,
 		preview ? `\n${preview}` : "",
 	].filter(Boolean).join("\n");
+}
+
+function compactToolInputSummary(input: unknown, width: number): string {
+	if (input === undefined) return "";
+	let summary: string | undefined;
+	for (const field of ["command", "file_path", "path", "pattern", "description"]) {
+		const value = getStringProperty(input, field);
+		if (value?.trim()) {
+			summary = `${field}: ${value}`;
+			break;
+		}
+	}
+	const safeSummary = sanitizeTerminalText(summary ?? boundedPreviewValue(input)).replace(/\s+/gu, " ").trim();
+	return safeSummary ? truncateToWidth(safeSummary, Math.max(1, width)) : "";
+}
+
+function retainedToolInput(input: unknown): string {
+	if (input === undefined) return "";
+	const preview = boundedPreviewValue(input);
+	return preview ? `Retained input (bounded preview):\n${preview}` : "";
 }
 
 function displayNotice(notice: PhiState["notices"][number]): DisplayBlock | undefined {
