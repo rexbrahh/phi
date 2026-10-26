@@ -80,7 +80,15 @@ export class AppSessionObserver {
 		if (this.isClosing() || !this.isCurrentGeneration()) return;
 		if (message.type === "system" && message.subtype === "commands_changed") this.onCommandsChanged(message.commands);
 		if (message.type === "user" && typeof message.uuid === "string") this.onCheckpoint(message.uuid);
-		if (message.type === "result") this.onResult();
+		if (message.type === "result") {
+			this.onResult();
+			if (message.subtype !== "success" || message.is_error) {
+				const detail = message.subtype === "success" ? message.result : message.errors.join("\n");
+				const diagnostic = this.formatDiagnostic(`Request failed: ${detail || "The request stopped before it could finish."}`);
+				this.onSdkError(diagnostic);
+				this.showNotice(diagnostic);
+			}
+		}
 		applySdkMessage(this.state, message);
 		if ("session_id" in message && typeof message.session_id === "string") {
 			this.setSessionId(message.session_id);
