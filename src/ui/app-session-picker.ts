@@ -111,7 +111,7 @@ class SessionPickerView implements Component {
 			return {
 				value: session.sessionId,
 				label: `${current ? "● Current · " : ""}${title}`,
-				description: [sanitizeTerminalText(modified), branch].filter(Boolean).join(" · "),
+				description: [branch, sanitizeTerminalText(modified)].filter(Boolean).join(" · "),
 			};
 		});
 		const list = new SelectList(items, maxVisible, theme.selectList);

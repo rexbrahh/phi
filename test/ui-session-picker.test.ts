@@ -43,6 +43,18 @@ test("filters more than twenty sessions by ID and selects the exact loaded sessi
 	} finally { f.tui.stop(); }
 });
 
+test("longer localized timestamps do not clip the branch name", async (t) => {
+	t.mock.method(Date.prototype, "toLocaleString", () => "11/14/2023, 10:13:20 PM");
+	const f = fixture();
+	try {
+		f.picker.show(async () => [session(24)], "session-24");
+		await settle();
+		assert.match(f.render(), /branch-24/);
+		f.picker.handleInput("\r");
+		assert.deepEqual(f.selected, ["session-24"]);
+	} finally { f.tui.stop(); }
+});
+
 test("cancel keeps the composer draft and restores editor focus", () => {
 	const f = fixture();
 	try {
