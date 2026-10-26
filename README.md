@@ -136,9 +136,9 @@ Ctrl+O opens History and hides a visible native request. Escape returns to the p
 
 Use `/model` and `/effort` to open the model and effort menus. The menus use the current SDK capabilities. Arrow keys move; Enter applies the choice; Escape closes the menu. Closing a menu after a change was sent does not cancel the SDK operation. Phi reports the accepted result in the status line. Explicit `/phi model <id>` and `/phi effort <level>` commands remain available.
 
-Routine SDK events do not appear in the transcript. Phi groups repeated diagnostics and shows short previews of the two most recent groups. Run `/phi diagnostics` for complete retained diagnostic text; Escape dismisses it.
+Prompts and replies use inline markers. Native command envelopes display as commands and results. Routine SDK events do not appear in the transcript. Phi groups repeated diagnostics and shows one-line previews of the two latest warning groups. Run `/phi diagnostics` for retained diagnostic text, including unknown SDK events. Escape dismisses it.
 
-Tool inputs use compact one-line summaries. `/phi details` expands retained tool input and output previews. Run it again to collapse them. The previews remain bounded. Use the history inspector for native messages.
+Tool rows combine the name, state, and a short description. Successful output uses one preview row. Failures keep three rows. `/phi details` expands retained tool input and output previews. Run it again to collapse them. The previews remain bounded. Use the history inspector for native messages.
 
 `/phi copy` or `Ctrl+Shift+Y` copies the latest completed assistant answer when the conversation is active. In an inspector, it copies the selected output.
 
