@@ -6,7 +6,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runUserShell, type ShellPreview } from "../src/shell.js";
+import { runUserShell, type ShellPreview, type ShellReceipt } from "../src/shell.js";
 
 function setEnvironment(values: Record<string, string>): () => void {
 	const previous = new Map<string, string | undefined>();
@@ -89,12 +89,18 @@ test("runUserShell passes the exact command and inherited environment and stores
 		PHI_TEST_CAPTURE: capturePath,
 		PHI_TEST_CWD_CAPTURE: cwdCapturePath,
 		PHI_TEST_VALUE: "inherited value",
+		GIT_SSH_COMMAND: "ssh -o BatchMode=yes -i /tmp/phi-test-key",
+		GIT_CONFIG_COUNT: "2",
+		GIT_CONFIG_KEY_0: "commit.gpgsign",
+		GIT_CONFIG_VALUE_0: "true",
+		GIT_CONFIG_KEY_1: "user.signingkey",
+		GIT_CONFIG_VALUE_1: "test-signing-key",
 	});
 
 	try {
 		await writeFile(
 			fakeShell,
-			'#!/bin/sh\nprintf \'%s\\n\' "$#" "$1" "$2" "$PHI_TEST_VALUE" > "$PHI_TEST_CAPTURE"\n' +
+			'#!/bin/sh\nprintf \'%s\\n\' "$#" "$1" "$2" "$PHI_TEST_VALUE" "$GIT_SSH_COMMAND" "$GIT_CONFIG_COUNT" "$GIT_CONFIG_KEY_0" "$GIT_CONFIG_VALUE_0" "$GIT_CONFIG_KEY_1" "$GIT_CONFIG_VALUE_1" > "$PHI_TEST_CAPTURE"\n' +
 			'pwd > "$PHI_TEST_CWD_CAPTURE"\n' +
 			"printf 'stdout line\\n'\n" +
 			"printf 'stderr line\\n' >&2\n" +
@@ -122,6 +128,12 @@ test("runUserShell passes the exact command and inherited environment and stores
 			"-lc",
 			command,
 			"inherited value",
+			"ssh -o BatchMode=yes -i /tmp/phi-test-key",
+			"2",
+			"commit.gpgsign",
+			"true",
+			"user.signingkey",
+			"test-signing-key",
 			"",
 		]);
 		assert.equal((await readFile(cwdCapturePath, "utf8")).trimEnd(), await realpath(temporary));
@@ -143,6 +155,106 @@ test("runUserShell passes the exact command and inherited environment and stores
 	} finally {
 		restoreEnvironment();
 		await rm(temporary, { recursive: true, force: true });
+	}
+});
+
+test("runUserShell Git commands follow the linked cwd despite inherited Git routing selectors", async () => {
+	const temporary = await mkdtemp(join("/private/tmp", "phi shell git context "));
+	const restoreEnvironment = setEnvironment({
+		XDG_STATE_HOME: join(temporary, "state"),
+		SHELL: "/bin/sh",
+		GIT_CONFIG_GLOBAL: "/dev/null",
+		GIT_CONFIG_NOSYSTEM: "1",
+		GIT_AUTHOR_NAME: "Workspace Test",
+		GIT_AUTHOR_EMAIL: "workspace-test@example.invalid",
+		GIT_COMMITTER_NAME: "Workspace Test",
+		GIT_COMMITTER_EMAIL: "workspace-test@example.invalid",
+	});
+	const routingVariables = ["GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE"] as const;
+	const originalRouting = new Map(routingVariables.map((name) => [name, process.env[name]]));
+	const linkedWorktrees: Array<[string, string]> = [];
+	for (const name of routingVariables) delete process.env[name];
+
+	try {
+		for (const name of routingVariables) {
+			const repository = join(temporary, `${name} primary`);
+			const linkedWorktree = join(temporary, `${name} linked`);
+			await mkdir(repository);
+			git(repository, "init", "--quiet", "-b", "main");
+			git(repository, "config", "user.name", "Workspace Test");
+			git(repository, "config", "user.email", "workspace-test@example.invalid");
+			await writeFile(join(repository, "tracked.txt"), "committed content\n");
+			await writeFile(join(repository, "primary-only.txt"), "committed primary content\n");
+			git(repository, "add", "--", "tracked.txt", "primary-only.txt");
+			git(repository, "commit", "--quiet", "-m", "test base");
+			const baseRevision = git(repository, "rev-parse", "HEAD").trim();
+
+			await writeFile(join(repository, "primary-only.txt"), "staged primary content\n");
+			git(repository, "add", "--", "primary-only.txt");
+			const primaryState = async () => ({
+				status: git(repository, "status", "--porcelain=v1", "--untracked-files=no"),
+				indexBlob: git(repository, "rev-parse", ":primary-only.txt").trim(),
+				indexContent: git(repository, "show", ":primary-only.txt"),
+				worktreeContent: await readFile(join(repository, "primary-only.txt"), "utf8"),
+			});
+			const stagedPrimaryState = await primaryState();
+			assert.equal(stagedPrimaryState.status, "M  primary-only.txt\n");
+			assert.equal(stagedPrimaryState.indexContent, "staged primary content\n");
+			assert.equal(stagedPrimaryState.worktreeContent, "staged primary content\n");
+			assert.notEqual(stagedPrimaryState.indexBlob, git(repository, "rev-parse", "HEAD:primary-only.txt").trim());
+
+			git(repository, "worktree", "add", "--quiet", "--detach", linkedWorktree, baseRevision);
+			linkedWorktrees.push([repository, linkedWorktree]);
+			const changedContent = `selected ${name} content\n`;
+			await writeFile(join(linkedWorktree, "tracked.txt"), changedContent);
+			const linkedIndexBefore = git(linkedWorktree, "rev-parse", ":tracked.txt").trim();
+			const expectedLinkedBlob = git(linkedWorktree, "hash-object", "tracked.txt").trim();
+			assert.notEqual(linkedIndexBefore, expectedLinkedBlob);
+
+			const gitDirectory = git(repository, "rev-parse", "--absolute-git-dir").trim();
+			const selector = name === "GIT_INDEX_FILE"
+				? join(gitDirectory, "index")
+				: name === "GIT_DIR" ? gitDirectory : repository;
+			process.env[name] = selector;
+			const command = "git add -- tracked.txt";
+			let receipt: ShellReceipt;
+			try {
+				receipt = await runUserShell(
+					command,
+					linkedWorktree,
+					`git-routing-${name.toLowerCase()}`,
+					new AbortController().signal,
+					() => {},
+					temporary,
+				).done;
+			} finally {
+				for (const variable of routingVariables) delete process.env[variable];
+			}
+
+			assert.equal(receipt.command, command);
+			assert.equal(receipt.cwd, linkedWorktree);
+			assert.equal(receipt.exitCode, 0);
+			assert.equal(receipt.signal, null);
+			assert.deepEqual(await primaryState(), stagedPrimaryState, `${name} must not change staged primary state`);
+			assert.notEqual(git(linkedWorktree, "rev-parse", ":tracked.txt").trim(), linkedIndexBefore);
+			assert.equal(git(linkedWorktree, "rev-parse", ":tracked.txt").trim(), expectedLinkedBlob);
+			assert.equal(git(linkedWorktree, "show", ":tracked.txt"), changedContent);
+			assert.equal(git(linkedWorktree, "status", "--porcelain=v1", "--untracked-files=no"), "M  tracked.txt\n");
+		}
+	} finally {
+		for (const variable of routingVariables) delete process.env[variable];
+		try {
+			for (const [repository, linkedWorktree] of linkedWorktrees) {
+				git(repository, "worktree", "remove", "--force", linkedWorktree);
+			}
+		} finally {
+			restoreEnvironment();
+			for (const [name, value] of originalRouting) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+			await rm(temporary, { recursive: true, force: true });
+		}
 	}
 });
 

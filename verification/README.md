@@ -9,6 +9,7 @@ transitions to the TypeScript guards that it represents.
 | TLA+ with TLC | Bounded session ownership, native close calls, query ownership of requests, and foreground interruption | [Lifecycle model and negative controls](tla/README.md) |
 | TLA+ with TLC | Startup reply retention across an elapsed gap and a control-key boundary | [Reply model and expiry counterexample](tla/startup-replies/README.md) |
 | Lean 4 and TLA+ with TLC | Atomic import-file publication, retry after failure, and completion-marker safety | [Import publication model and reproduction](tla/import-publication/README.md) |
+| Lean 4 and TLA+ with TLC | Local shell Git-index routing across worktrees | [Git context model and reproduction](tla/git-context/README.md) |
 
 The Lean theorems cover every reachable state of their extracted model. TLC
 checks the finite bounds in its configuration. Neither result proves that the

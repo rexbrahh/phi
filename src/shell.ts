@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { Readable } from "node:stream";
 import { ensurePhiHome, resolvePhiHome } from "./home.js";
+import { environmentForLocalGit } from "./workspace.js";
 
 const PREVIEW_LIMIT = 8_192;
 const STOP_ESCALATION_MS = 2_000;
@@ -405,7 +406,7 @@ export function runUserShell(
 	if (activeJobId !== undefined) throw new Error("Only one local shell job may run at a time");
 	safeSessionDirectory(sessionId, home);
 	const jobId = randomUUID();
-	const environment = { ...process.env };
+	const environment = environmentForLocalGit();
 	const shellPath = environment.SHELL || "/bin/sh";
 	activeJobId = jobId;
 	const done = runJob(jobId, command, cwd, sessionId, signal, onUpdate, shellPath, environment, home)

@@ -44,19 +44,23 @@ interface GitResult {
 	error?: Error & { code?: number | string | null; signal?: NodeJS.Signals | null };
 }
 
+export function environmentForLocalGit(): NodeJS.ProcessEnv {
+	const environment = { ...process.env };
+	delete environment.GIT_INDEX_FILE;
+	delete environment.GIT_DIR;
+	delete environment.GIT_WORK_TREE;
+	return environment;
+}
+
 function runGit(cwd: string, args: string[]): Promise<GitResult> {
 	return new Promise((resolve) => {
-		const environment = { ...process.env };
-		delete environment.GIT_INDEX_FILE;
-		delete environment.GIT_DIR;
-		delete environment.GIT_WORK_TREE;
 		execFile(
 			"git",
 			["-C", cwd, ...args],
 			{
 				encoding: "buffer",
-					env: {
-					...environment,
+				env: {
+					...environmentForLocalGit(),
 					GIT_OPTIONAL_LOCKS: "0",
 					GIT_TERMINAL_PROMPT: "0",
 				},
