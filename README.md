@@ -17,7 +17,7 @@ cd /path/to/project
 phi
 ```
 
-See the [Phi 1.0.4 release notes](docs/releases/v1.0.4.md) and the [v1 evidence report](docs/superpowers/reports/2026-10-24-phi-v1.md) for release limits and source-scoped evidence.
+See the [Phi 1.0.5 release notes](docs/releases/v1.0.5.md) and the [v1 evidence report](docs/superpowers/reports/2026-10-24-phi-v1.md) for release limits and source-scoped evidence.
 
 ## Requirements
 
