@@ -2,7 +2,8 @@ import { Markdown, Text, truncateToWidth, visibleWidth, type Component } from "@
 import type { ConversationBlock, PhiState, ProvisionalBlock, ToolReceipt } from "../state.js";
 import { boundedPreviewValue, getContentType, getDisplayText, getProperty, getStringProperty, parseInputObject } from "../state-utils.js";
 import { sanitizeTerminalText } from "./safe-text.js";
-import { markdownTheme } from "./theme.js";
+import { nativeCommandText } from "./native-command-text.js";
+import { markdownTheme, theme } from "./theme.js";
 
 interface CachedBlock {
 	fingerprint: string;
@@ -22,6 +23,7 @@ interface FittedLinesCache {
 
 interface CachedPreview {
 	width: number;
+	rows: number;
 	source: string;
 	text: string;
 }
@@ -31,9 +33,8 @@ interface DisplayBlock {
 	role: string;
 	text: string;
 	markdown: boolean;
+	diagnosticOnly?: boolean;
 }
-
-const MAX_TOOL_RESULT_DISPLAY_LINES = 4;
 
 export class TranscriptView implements Component {
 	private readonly renderedBlocks = new Map<string, CachedBlock>();
@@ -97,15 +98,14 @@ export class TranscriptView implements Component {
 			if (display) this.appendBlock(lines, display, width, currentKeys);
 		}
 
-		const notices = this.displayNotices();
+		const notices = this.displayNotices().filter((notice) => !notice.diagnosticOnly && notice.role !== "Command");
+		const commandOutput = this.displayNotices().findLast((notice) => notice.role === "Command");
+		if (commandOutput) this.appendBlock(lines, commandOutput, width, currentKeys);
 		for (const display of notices.slice(-2)) {
-			const preview = new Text(display.text.slice(0, 8_192), 0, 0).render(Math.max(1, width));
-			const clipped = preview.length > 2 || display.text.length > 8_192;
-			const text = preview.slice(0, 2);
-			if (clipped) text[text.length - 1] = `${truncateToWidth(text.at(-1) ?? "", Math.max(0, width - 1), "")}…`;
-			this.appendBlock(lines, { ...display, text: text.join("\n") }, width, currentKeys);
+			const summary = `${display.role}: ${display.text}`.replace(/\s+/gu, " ");
+			lines.push(truncateToWidth(`! ${summary}`, Math.max(1, width)));
 		}
-		if (notices.length > 0) lines.push(...new Text(`${notices.length} diagnostic${notices.length === 1 ? "" : "s"} · /phi diagnostics for details`, 0, 0).render(width));
+		if (notices.length > 0) lines.push(theme.dim(truncateToWidth(`${notices.length} diagnostic${notices.length === 1 ? "" : "s"} · /phi diagnostics`, Math.max(1, width))));
 
 		for (const key of this.renderedBlocks.keys()) {
 			if (!currentKeys.has(key)) this.renderedBlocks.delete(key);
@@ -134,18 +134,20 @@ export class TranscriptView implements Component {
 		const component = this.componentFor(display);
 		const fingerprint = `${display.role}\0${component.fingerprint}`;
 		const rendered = component.renderedLines;
+		if (lines.length > 0 && !display.role.startsWith("Tool") && display.role !== "Command") lines.push("");
 		if (rendered?.width === width && rendered.fingerprint === fingerprint) {
-			if (lines.length > 0) lines.push("");
 			lines.push(...rendered.lines);
 			return;
 		}
 
-		const renderedLines = [
-			...new Text(`${display.role}:`, 0, 0).render(width),
-			...component.component.render(width),
-		];
+		const body = component.component.render(Math.max(1, width - 2));
+		const prefix = display.role === "You" ? theme.accent("› ")
+			: display.role === "Phi" ? theme.accent("● ") : "  ";
+		const renderedLines = body.map((line, index) => {
+			const text = display.role === "Tool" || display.role === "Command" ? theme.dim(line) : line;
+			return `${index === 0 ? prefix : "  "}${text}`;
+		});
 		component.renderedLines = { width, fingerprint, lines: renderedLines };
-		if (lines.length > 0) lines.push("");
 		lines.push(...renderedLines);
 	}
 
@@ -188,16 +190,15 @@ export class TranscriptView implements Component {
 	}
 
 	private displayConversationBlock(block: ConversationBlock, width: number): DisplayBlock | undefined {
-		if (typeof block.content === "string") {
-			return { key: block.id, role: block.role === "assistant" ? "Phi" : "You", text: block.content, markdown: block.role === "assistant" };
-		}
-
 		const type = getContentType(block.content);
-		if (type === "text") {
+		if (typeof block.content === "string" || type === "text") {
+			const text = typeof block.content === "string" ? block.content : getDisplayText(block.content);
+			const command = block.role === "user" ? nativeCommandText(text) : undefined;
+			if (command && !command.text.trim()) return undefined;
 			return {
 				key: block.id,
-				role: block.role === "assistant" ? "Phi" : "You",
-				text: getDisplayText(block.content),
+				role: command?.kind === "output" ? "Command" : block.role === "assistant" ? "Phi" : "You",
+				text: command?.text ?? text,
 				markdown: block.role === "assistant",
 			};
 		}
@@ -207,8 +208,8 @@ export class TranscriptView implements Component {
 			const preview = receipt && !this.showToolDetails ? this.toolResultPreview(receipt, width) : undefined;
 			return {
 				key: block.id,
-				role: "Tool",
-				text: formatToolReceipt(block.content, receipt, preview, width, this.showToolDetails),
+				role: receipt?.resultIsError || receipt?.executionState === "failed" ? "Tool error" : "Tool",
+				text: formatToolReceipt(block.content, receipt, preview, Math.max(1, width - 2), this.showToolDetails),
 				markdown: false,
 			};
 		}
@@ -216,12 +217,13 @@ export class TranscriptView implements Component {
 			const id = getStringProperty(block.content, "tool_use_id");
 			const receipt = id ? this.state.toolReceipts.get(id) : undefined;
 			const output = receipt?.resultPreview ?? getDisplayText(block.content) ?? "Tool output is available in the SDK history.";
+			const failed = receipt?.resultIsError ?? getProperty(block.content, "is_error") === true;
 			return {
 				key: block.id,
-				role: `Tool result${receipt?.resultIsError ? " · failed" : ""}`,
-				text: this.showToolDetails && output
+				role: failed ? "Tool error" : "Tool",
+				text: [`Tool result${failed ? " · failed" : ""}`, this.showToolDetails && output
 					? `Retained output (bounded preview):\n${output}`
-					: output,
+					: renderToolResultPreview(output, Math.max(1, width - 2), failed ? 3 : 1)].join("\n"),
 				markdown: false,
 			};
 		}
@@ -236,17 +238,18 @@ export class TranscriptView implements Component {
 		const source = receipt.resultPreview;
 		if (!source) return undefined;
 
+		const rows = receipt.resultIsError ? 3 : 1;
 		const cached = this.toolResultPreviews.get(receipt);
-		if (cached?.width === width && cached.source === source) return cached.text;
+		if (cached?.width === width && cached.source === source && cached.rows === rows) return cached.text;
 
-		const text = renderToolResultPreview(source, Math.max(1, width - 2));
-		this.toolResultPreviews.set(receipt, { width, source, text });
+		const text = renderToolResultPreview(source, Math.max(1, width - 4), rows);
+		this.toolResultPreviews.set(receipt, { width, rows, source, text });
 		return text;
 	}
 
 	private displayProvisionalBlock(block: ProvisionalBlock, width: number): DisplayBlock | undefined {
 		if (block.contentType === "text") {
-			return { key: `partial:${block.id}`, role: "Phi · streaming", text: block.text, markdown: true };
+			return { key: `partial:${block.id}`, role: "Phi", text: block.text, markdown: true };
 		}
 		if (block.contentType === "tool_use") {
 			const receipt = block.toolUseId ? this.state.toolReceipts.get(block.toolUseId) : undefined;
@@ -254,13 +257,12 @@ export class TranscriptView implements Component {
 			const input = block.partialInputJson
 				? parseInputObject(block.partialInputJson) ?? block.partialInputJson
 				: block.toolInput;
-			const details = this.showToolDetails
-				? retainedToolInput(input)
-				: compactToolInputSummary(input, width);
 			return {
 				key: `partial:${block.id}`,
-				role: "Tool · streaming",
-				text: [String(name), details].filter(Boolean).join("\n"),
+				role: "Tool",
+				text: this.showToolDetails
+					? [`${name} · streaming`, retainedToolInput(input)].filter(Boolean).join("\n")
+					: compactToolHeader(name, "streaming", input, Math.max(1, width - 2)),
 				markdown: false,
 			};
 		}
@@ -285,15 +287,15 @@ function fitLines(lines: string[], width: number, previous?: FittedLinesCache): 
 	return { lines: output, cache: { width: availableWidth, source: lines, lines: output } };
 }
 
-function renderToolResultPreview(source: string, width: number): string {
+function renderToolResultPreview(source: string, width: number, maxRows: number): string {
 	if (source.trim() === "") return source;
 
 	const rendered: string[] = [];
 	const sourceLines = source.split("\n");
 	for (let index = 0; index < sourceLines.length; index += 1) {
 		const sourceLine = sourceLines[index] ?? "";
-		const remainingRows = MAX_TOOL_RESULT_DISPLAY_LINES + 1 - rendered.length;
-		if (remainingRows <= 0) return clippedToolResultPreview(rendered);
+		const remainingRows = maxRows + 1 - rendered.length;
+		if (remainingRows <= 0) return clippedToolResultPreview(rendered, width, maxRows);
 
 		const boundedLine = truncateToWidth(sourceLine, (width + 2) * remainingRows, "");
 		const normalizedLine = sourceLine.replace(/\t/g, "   ");
@@ -302,16 +304,18 @@ function renderToolResultPreview(source: string, width: number): string {
 			: new Text(boundedLine, 0, 0).render(width);
 		rendered.push(...wrappedLines.slice(0, remainingRows));
 
-		if (boundedLine !== sourceLine || wrappedLines.length > remainingRows || rendered.length > MAX_TOOL_RESULT_DISPLAY_LINES) {
-			return clippedToolResultPreview(rendered);
+		if (boundedLine !== sourceLine || wrappedLines.length > remainingRows || rendered.length > maxRows) {
+			return clippedToolResultPreview(rendered, width, maxRows);
 		}
 	}
 
 	return source;
 }
 
-function clippedToolResultPreview(lines: string[]): string {
-	return `${lines.slice(0, MAX_TOOL_RESULT_DISPLAY_LINES - 1).join("\n")}\n…`;
+function clippedToolResultPreview(lines: string[], width: number, maxRows: number): string {
+	const preview = lines.slice(0, maxRows);
+	preview[maxRows - 1] = `${truncateToWidth(preview[maxRows - 1] ?? "", Math.max(0, width - 1), "")}…`;
+	return preview.join("\n");
 }
 
 function formatToolReceipt(
@@ -333,21 +337,24 @@ function formatToolReceipt(
 				: "",
 		].filter(Boolean).join("\n");
 	}
-	const summary = compactToolInputSummary(input, width);
 	return [
-		`${name} · ${state}`,
-		summary,
-		preview ? `\n${preview}` : "",
+		compactToolHeader(name, state, input, width),
+		preview ? preview.split("\n").map((line) => `  ${line}`).join("\n") : "",
 	].filter(Boolean).join("\n");
+}
+
+function compactToolHeader(name: string, state: string, input: unknown, width: number): string {
+	const summary = compactToolInputSummary(input, width);
+	return truncateToWidth(sanitizeTerminalText(`${name} · ${state}${summary ? ` · ${summary}` : ""}`), width);
 }
 
 function compactToolInputSummary(input: unknown, width: number): string {
 	if (input === undefined) return "";
 	let summary: string | undefined;
-	for (const field of ["command", "file_path", "path", "pattern", "description"]) {
+	for (const field of ["description", "file_path", "path", "pattern", "command"]) {
 		const value = getStringProperty(input, field);
 		if (value?.trim()) {
-			summary = `${field}: ${value}`;
+			summary = value;
 			break;
 		}
 	}
@@ -440,7 +447,7 @@ function displayNotice(notice: PhiState["notices"][number]): DisplayBlock | unde
 				if (message.priority !== "high" && message.priority !== "immediate") return undefined;
 				return { key, role: "Notice", text: message.text, markdown: false };
 			case "local_command_output":
-				return { key, role: "Phi", text: message.content, markdown: false };
+				return { key, role: "Command", text: message.content, markdown: false };
 			default: {
 				const error = getStringProperty(message, "error");
 				return {
@@ -448,6 +455,7 @@ function displayNotice(notice: PhiState["notices"][number]): DisplayBlock | unde
 					role: error ? "SDK error" : "System",
 					text: error ?? notice.text,
 					markdown: false,
+					diagnosticOnly: !error,
 				};
 			}
 		}
@@ -474,5 +482,6 @@ function displayNotice(notice: PhiState["notices"][number]): DisplayBlock | unde
 		role: error ? "SDK error" : "Notice",
 		text: error ?? notice.text,
 		markdown: false,
+		diagnosticOnly: !error,
 	};
 }

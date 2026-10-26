@@ -3,7 +3,7 @@ import type { EditorTheme } from "@earendil-works/pi-tui";
 
 const accent = (text: string): string => styleText(text, { fg: indexedColor(81), bold: true }, "256color");
 const dim = (text: string): string => styleText(text, { fg: indexedColor(245) }, "256color");
-const code = (text: string): string => styleText(text, { fg: indexedColor(220) }, "256color");
+const code = (text: string): string => styleText(text, { fg: indexedColor(153) }, "256color");
 const plain = (text: string): string => text;
 
 export const markdownTheme: MarkdownTheme = {
@@ -16,7 +16,7 @@ export const markdownTheme: MarkdownTheme = {
 	quote: dim,
 	quoteBorder: dim,
 	hr: dim,
-	listBullet: accent,
+	listBullet: plain,
 	bold: (text) => styleText(text, { bold: true }, "256color"),
 	italic: (text) => styleText(text, { italic: true }, "256color"),
 	strikethrough: (text) => styleText(text, { strikethrough: true }, "256color"),

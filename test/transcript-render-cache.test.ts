@@ -50,7 +50,7 @@ test("unchanged transcript blocks reuse rendered lines and preserve their output
 
 	withRenderCounts((counts) => {
 		const first = view.render(80);
-		assert.ok(first.some((line) => line.includes("You:")));
+		assert.ok(first.some((line) => line.includes("› ")));
 		assert.ok(first.some((line) => line.includes("unchanged text")));
 		const firstRenderCounts = { ...counts };
 

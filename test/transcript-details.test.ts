@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { stripVTControlCharacters } from "node:util";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { applySdkMessage, createState } from "../src/state.js";
 import { TranscriptView } from "../src/ui/transcript.js";
@@ -27,11 +28,12 @@ test("compact tool input summaries stay on one width-bounded line", () => {
 	}));
 
 	const lines = new TranscriptView(state).render(36);
-	const rendered = lines.join("\n");
+	const rendered = stripVTControlCharacters(lines.join("\n"));
 	assert.match(rendered, /Bash · requested/);
-	assert.match(rendered, /command:/);
+	assert.match(rendered, /echo first/);
 	assert.doesNotMatch(rendered, /\u001b/);
-	assert.ok(lines.length <= 3, `compact input rendered ${lines.length} rows`);
+	assert.doesNotMatch(lines.join("\n"), /\u001b\[31m/, "tool input cannot inject terminal styling");
+	assert.equal(lines.length, 1, "the tool name, state, and input share one row");
 	assert.ok(lines.every((line) => visibleWidth(line) <= 36));
 });
 
@@ -63,7 +65,7 @@ test("streaming partial tool JSON stays compact", () => {
 	const lines = new TranscriptView(state).render(32);
 	assert.ok(lines.length <= 3, `streaming input rendered ${lines.length} rows`);
 	assert.ok(lines.every((line) => visibleWidth(line) <= 32));
-	assert.match(lines.join("\n"), /Tool · streaming/);
+	assert.match(lines.join("\n"), /Bash · streaming/);
 });
 
 test("tool details reveal retained input and output, then collapse after resize", () => {

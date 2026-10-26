@@ -136,6 +136,7 @@ test("tool result preview cache keeps one width per receipt, refreshes output, a
 		envelopeId: "transcript-load-result",
 		toolUseId: "transcript-load-tool",
 		text: "R".repeat(37_034),
+		error: true,
 	});
 	applySdkMessage(state, call);
 	applySdkMessage(state, result);
@@ -147,7 +148,7 @@ test("tool result preview cache keeps one width per receipt, refreshes output, a
 	assert.ok(wideLines.length <= 16, `wide tool preview rendered ${wideLines.length} lines`);
 	assert.ok(wideLines.some((line) => line.includes("…")), "the wide clipped preview must be marked");
 	const widePreviewLines = wideLines.filter((line) => line.includes("R".repeat(20)));
-	assert.deepEqual(widePreviewLines.map((line) => (line.match(/R+/)?.[0] ?? "").length), [78, 78, 78]);
+	assert.deepEqual(widePreviewLines.map((line) => (line.match(/R+/)?.[0] ?? "").length), [76, 76, 75]);
 	assert.ok(widePreviewLines.every((line) => visibleWidth(line) <= 80));
 	assert.equal(receipt.resultEnvelopeId, result.uuid);
 	assert.equal(receipt.resultPreview?.length, 8_192);
