@@ -25,7 +25,7 @@ this action order: `PrepareFirst`, `LegacyOpenTarget`,
 `PublishMarker`. The atomic config must finish with an empty queue and pass all
 four invariants. These checks cover only the stated abstraction.
 
-Recorded checks used Lean 4.35.0 and TLC 1.7.4. Lean exited 0 and reported
+Recorded checks used Lean 4.35.0 and TLC 2.19. Lean exited 0 and reported
 `[propext]` for `fixedFiniteTraceInvariant`, with no unfinished proofs. Legacy
 TLC exited 12 with the intended counterexample: 11 distinct states, depth 7.
 Atomic TLC exited 0 with 12 distinct states, depth 6, and an empty queue.
