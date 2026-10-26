@@ -134,6 +134,7 @@ export function applyStreamEvent(state: PhiState, message: SDKPartialAssistantMe
 	}
 	if (event.type === "content_block_delta") {
 		const deltaType = getContentType(event.delta);
+		if (deltaType === "signature_delta") return;
 		if (!["text_delta", "thinking_delta", "input_json_delta"].includes(deltaType)) {
 			addNotice(state, message, `unknown stream event delta ${deltaType}`);
 			return;

@@ -142,7 +142,7 @@ function fitLines(lines: string[], width: number, previous?: FittedLinesCache): 
 function statusLabel(state: PhiState): string {
 	const { foreground, phase, busyBackgroundTaskCount } = state.effectiveStatus;
 	const label = foreground === "requires_action" ? "waiting for you" : foreground;
-	const phaseLabel = phase ? ` · ${phase}` : "";
+	const phaseLabel = foreground === "running" && phase ? ` · ${phase}` : "";
 	const backgroundLabel = busyBackgroundTaskCount > 0 ? ` · ${busyBackgroundTaskCount} background task${busyBackgroundTaskCount === 1 ? "" : "s"}` : "";
 	return `${label}${phaseLabel}${backgroundLabel}`;
 }
