@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { AutocompleteProvider } from "@earendil-works/pi-tui";
 import { AppController } from "../src/ui/app.js";
 import { FakeQueryHarness, initializedResponse } from "./helpers/fake-query.js";
 import { FakeTerminal } from "./helpers/terminal.js";
@@ -120,6 +121,215 @@ test("Ctrl+Shift+P routes palette choices and preserves the composer draft", asy
 		assert.equal(fake.receivedMessages.length, 1);
 		assert.equal(controller.views.editor.getText(), "composer draft stays");
 	} finally {
+		await controller.close(0);
+		await running;
+	}
+});
+
+test("the command palette routes the short model control locally and cancel restores the draft", async () => {
+	const terminal = new FakeTerminal();
+	terminal.resize(60, 18);
+	const initialization = initializedResponse();
+	initialization.commands = [
+		{ name: "model", description: "SDK model command", argumentHint: "<id>" },
+		{ name: "effort", description: "SDK effort command", argumentHint: "<level>" },
+	];
+	const fake = new FakeQueryHarness(Promise.resolve(initialization));
+	fake.supportedModelsResult = [{ value: "model-a", displayName: "Model A", supportedEffortLevels: ["low"] }];
+	const controller = new AppController(testLaunch(), appDependencies(fake, terminal));
+	const running = controller.run();
+	try {
+		await waitFor(() => controller.ready !== undefined);
+		let autocompleteProvider: AutocompleteProvider | undefined;
+		const editor = controller.views.editor;
+		const setProvider = editor.setAutocompleteProvider.bind(editor);
+		editor.setAutocompleteProvider = (provider) => {
+			autocompleteProvider = provider;
+			setProvider(provider);
+		};
+		controller.refreshNativeCommands([
+			{ name: "model", description: "SDK model command", argumentHint: "<id>" },
+			{ name: "effort", description: "SDK effort command", argumentHint: "<level>" },
+		]);
+		const suggestions = await autocompleteProvider?.getSuggestions(["/mo"], 0, 3, {
+			signal: new AbortController().signal,
+		});
+		assert.deepEqual(suggestions?.items.map((item) => item.value), ["model"]);
+		const effortSuggestions = await autocompleteProvider?.getSuggestions(["/ef"], 0, 3, {
+			signal: new AbortController().signal,
+		});
+		assert.deepEqual(effortSuggestions?.items.map((item) => item.value), ["effort"]);
+		controller.setDraft("composer draft remains");
+		terminal.input("\u001b[112;6u");
+		await waitFor(() => terminal.output.includes("Command palette"));
+		assert.match(terminal.output, /Esc close/u);
+		terminal.input("model");
+		terminal.input("\r");
+		await waitFor(() => terminal.output.includes("Choose model"));
+
+		assert.equal(fake.supportedModelsCalls, 1);
+		assert.equal(fake.receivedMessages.length, 0);
+		assert.equal(controller.views.editor.getText(), "composer draft remains");
+		terminal.input("\u0003");
+		assert.equal(controller.views.editor.getText(), "composer draft remains");
+		assert.equal(controller.views.editor.focused, true);
+		assert.deepEqual(fake.setModelCalls, []);
+		controller.submitPrompt("/model");
+		await waitFor(() => controller.controlPickerVisible);
+		terminal.input("\u001b");
+		assert.equal(controller.controlPickerVisible, false);
+		assert.equal(controller.views.editor.focused, true);
+	} finally {
+		await controller.close(0);
+		await running;
+	}
+});
+
+test("model and effort pickers apply only advertised SDK choices without sending a turn", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	fake.supportedModelsResult = [
+		{ value: "model-current", displayName: "Model Current", supportedEffortLevels: ["low", "high"] },
+		{ value: "model-next", displayName: "Model Next", supportedEffortLevels: ["high"] },
+	];
+	await withController(fake, terminal, async (controller) => {
+		controller.setSessionControl("model", "model-current");
+		controller.setSessionControl("effort", "low");
+		terminal.input("/model");
+		terminal.input("\r");
+		await waitFor(() => terminal.output.includes("Choose model"));
+		assert.match(terminal.output, /✓ Model Current/u);
+		terminal.input("\u001b[B");
+		terminal.input("\r");
+		await waitFor(() => fake.setModelCalls.length === 1);
+		await waitFor(() => terminal.output.includes("Model changed to Model Next"));
+		assert.deepEqual(fake.setModelCalls, ["model-next"]);
+		assert.equal(controller.sessionControls.model, "model-next");
+		assert.equal(fake.receivedMessages.length, 0);
+		assert.match(terminal.output, /Model changed to Model Next/u);
+
+		terminal.input("/effort");
+		terminal.input("\r");
+		await waitFor(() => terminal.output.includes("Choose effort"));
+		await waitFor(() => terminal.output.includes("Current effort low is not supported by Model Next"));
+		terminal.input("\u001b[B");
+		terminal.input("\r");
+		await waitFor(() => fake.applyFlagSettingsCalls.length === 1);
+		await waitFor(() => terminal.output.includes("Effort changed to high"));
+		assert.deepEqual(fake.applyFlagSettingsCalls, [{ effortLevel: "high" }]);
+		assert.equal(controller.sessionControls.effort, "high");
+		assert.equal(fake.receivedMessages.length, 0);
+		assert.match(terminal.output, /Effort changed to high/u);
+	});
+});
+
+test("a rejected picker choice stays visible and leaves the prior selection unchanged", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	fake.supportedModelsResult = [{ value: "model-next", displayName: "Model Next", supportedEffortLevels: ["high"] }];
+	fake.setModelError = new Error("model rejected");
+	await withController(fake, terminal, async (controller) => {
+		controller.setSessionControl("model", "model-current");
+		terminal.input("/model");
+		terminal.input("\r");
+		await waitFor(() => terminal.output.includes("Choose model"));
+		terminal.input("\r");
+		await waitFor(() => terminal.output.includes("Could not set model: model rejected"));
+		assert.equal(controller.sessionControls.model, "model-current");
+		assert.deepEqual(fake.setModelCalls, ["model-next"]);
+		assert.equal(fake.receivedMessages.length, 0);
+		assert.equal(controller.controlPickerVisible, true);
+		assert.equal(terminal.output.includes("Model changed to Model Next"), false);
+		assert.equal(controller.views.editor.focused, false);
+	});
+});
+
+test("a pending permission dialog keeps keyboard priority over an open model picker", async () => {
+	const terminal = new FakeTerminal();
+	const fake = new FakeQueryHarness();
+	fake.supportedModelsResult = [{ value: "model-a", displayName: "Model A", supportedEffortLevels: ["low"] }];
+	await withController(fake, terminal, async (controller) => {
+		terminal.input("/model");
+		terminal.input("\r");
+		await waitFor(() => terminal.output.includes("Choose model"));
+		const canUseTool = fake.parameters?.options?.canUseTool;
+		assert.ok(canUseTool);
+		const requestId = "picker-priority";
+		const response = canUseTool("Read", { file_path: "/synthetic/file.ts" }, {
+			requestId,
+			toolUseID: "picker-priority-tool",
+			signal: new AbortController().signal,
+		});
+		await waitFor(() => controller.views.dialogs.requestId === requestId);
+		terminal.input("\u0003");
+		assert.equal(controller.views.dialogs.requestId, undefined);
+		assert.equal(controller.controlPickerVisible, true);
+		assert.deepEqual(fake.setModelCalls, []);
+		const result = await response;
+		assert.equal(result?.behavior, "deny");
+		terminal.input("\u001b");
+		assert.equal(controller.controlPickerVisible, false);
+	});
+});
+
+test("small terminals keep the picker footer visible while scrolling SDK models", async () => {
+	const terminal = new FakeTerminal();
+	terminal.resize(60, 18);
+	const fake = new FakeQueryHarness();
+	fake.supportedModelsResult = Array.from({ length: 18 }, (_, index) => ({
+		value: `model-${index}`,
+		displayName: `Runtime Model ${index}`,
+		description: `Long description for runtime model ${index}`,
+		supportedEffortLevels: ["low"],
+	}));
+	await withController(fake, terminal, async () => {
+		terminal.input("/model");
+		terminal.input("\r");
+		await waitFor(() => terminal.output.includes("Choose model"));
+		assert.match(terminal.output, /Esc\/Ctrl\+C close/u);
+		for (let index = 0; index < 17; index += 1) terminal.input("\u001b[B");
+		terminal.input("\r");
+		await waitFor(() => fake.setModelCalls.length === 1);
+		assert.deepEqual(fake.setModelCalls, ["model-17"]);
+	});
+});
+
+test("a picker selection finishing after a session switch cannot update the new session", async () => {
+	const terminal = new FakeTerminal();
+	const first = new FakeQueryHarness();
+	const second = new FakeQueryHarness();
+	first.supportedModelsResult = [{ value: "model-next", displayName: "Model Next", supportedEffortLevels: ["high"] }];
+	const pendingSetModel = deferred<void>();
+	first.query.setModel = async (model) => {
+		first.setModelCalls.push(model);
+		await pendingSetModel.promise;
+	};
+	let queryCount = 0;
+	const controller = new AppController(testLaunch(), appDependencies(first, terminal, {
+		createQuery: (parameters) => {
+			queryCount += 1;
+			return queryCount === 1 ? first.createQuery(parameters) : second.createQuery(parameters);
+		},
+	}));
+	const running = controller.run();
+	try {
+		await waitFor(() => controller.ready !== undefined);
+		const firstSessionId = controller.currentSessionId;
+		terminal.input("/model");
+		terminal.input("\r");
+		await waitFor(() => terminal.output.includes("Choose model"));
+		terminal.input("\r");
+		await waitFor(() => first.setModelCalls.length === 1);
+
+		controller.submitPrompt("/phi new");
+		await waitFor(() => queryCount === 2 && controller.ready !== undefined && controller.currentSessionId !== firstSessionId);
+		pendingSetModel.resolve();
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(controller.sessionControls.model, undefined);
+		assert.deepEqual(second.setModelCalls, []);
+		assert.equal(controller.views.editor.getText(), "");
+	} finally {
+		pendingSetModel.resolve();
 		await controller.close(0);
 		await running;
 	}
@@ -269,6 +479,7 @@ test("runtime model capabilities and accepted choices stay session-scoped", asyn
 		await waitFor(() => fake.supportedModelsCalls === 1);
 		await waitFor(() => terminal.output.includes("Model Current"));
 		assert.match(terminal.output, /Model Current/u);
+		terminal.input("\u001b");
 		controller.submitPrompt("/phi model model-current");
 		controller.submitPrompt("/phi effort high");
 		controller.submitPrompt("/phi workflow-size large");
@@ -280,8 +491,6 @@ test("runtime model capabilities and accepted choices stay session-scoped", asyn
 			{ workflowSizeGuideline: "large" },
 			{ ultracode: true },
 		]);
-		await waitFor(() => terminal.output.includes("accepted by the SDK"));
-		assert.match(terminal.output, /accepted by the SDK/u);
 	});
 });
 
