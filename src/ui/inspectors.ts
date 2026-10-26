@@ -133,7 +133,7 @@ export class InspectorView implements Component {
 	private renderWorkspace(width: number): string[] {
 		const workspace = this.model.workspace;
 		const lines = [
-			...wrapLine(theme.accent("Workspace · Ctrl+W"), width),
+			...wrapLine(theme.accent("Workspace · Ctrl+Shift+W"), width),
 			...wrapLine("Ctrl+G refreshes Git status.", width),
 		];
 		if (!workspace) return [...lines, ...wrapLine(theme.dim("Reading workspace status…"), width)];

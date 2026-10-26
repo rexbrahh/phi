@@ -468,7 +468,7 @@ test("child selection survives History/Tasks navigation without changing copied 
 	assert.equal(controller.views.inspectors.model.selectedTaskId, undefined);
 	assert.equal(controller.views.inspectors.model.selectedChildId, "child-agent");
 
-	terminal.input("\u0019");
+	terminal.input("\u001b[121;6u");
 	await waitFor(() => copied.length === 1);
 	assert.equal(copied[0], "child transcript output");
 	await new Promise<void>((resolve) => setTimeout(resolve, 1_050));
@@ -480,7 +480,7 @@ test("child selection survives History/Tasks navigation without changing copied 
 	assert.equal(await running, 0);
 });
 
-test("Ctrl+Y copies complete native tool-result text from the loaded history page", async () => {
+test("Ctrl+Shift+Y copies complete native tool-result text from the loaded history page", async () => {
 	const terminal = new FakeTerminal();
 	const fake = new FakeQueryHarness();
 	const sentinel = "NATIVE_TOOL_RESULT_END";
@@ -498,7 +498,7 @@ test("Ctrl+Y copies complete native tool-result text from the loaded history pag
 
 	assert.equal(resultText.length, 37 * 1024);
 	assert.equal(controller.views.inspectors.selectedOutput(), resultText);
-	terminal.input("\u0019");
+	terminal.input("\u001b[121;6u");
 	await waitFor(() => copied.length === 1);
 	assert.equal(copied[0], resultText);
 
@@ -559,7 +559,7 @@ test("history search finds native text beyond the preview cap and copies its vis
 		.join("");
 	assert.equal(displayedResult, "r".repeat(8_191) + "…");
 	assert.equal(displayedResult.includes(sentinel), false);
-	terminal.input("\u0019");
+	terminal.input("\u001b[121;6u");
 	await waitFor(() => copied.length === 1);
 	assert.equal(copied[0]?.length, resultText.length);
 	assert.equal(copied[0], resultText);

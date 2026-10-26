@@ -64,7 +64,7 @@ export class MainScreen {
 		this.heading.setText(theme.accent(`Phi · ${sanitizeTerminalText(this.state.cwd)}${workspaceLabel}`));
 		this.notice.setText(values.notice ? sanitizeTerminalText(values.notice) : "");
 		this.attachmentLine.setText(values.attachments.length
-			? `Images: ${values.attachments.map((attachment) => sanitizeTerminalText(attachment.name)).join(" · ")} · Alt+Backspace removes the last image`
+			? `Images: ${values.attachments.map((attachment) => sanitizeTerminalText(attachment.name)).join(" · ")} · Alt+Backspace removes the last image when the draft is empty`
 			: "");
 
 		const activity = [statusLabel(this.state)];

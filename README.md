@@ -121,9 +121,11 @@ Press Enter to submit a prompt. Use the editor for multiline input, history, pas
 | `Escape` | Close a menu, hide a pending dialog, leave shell mode, close an inspector, interrupt foreground work, or dismiss an idle notice. |
 | `Ctrl+C` | Cancel a visible native request, stop a local shell job, interrupt foreground SDK work, or request exit when those are idle. |
 | `Ctrl+Z` | Suspend Phi where the terminal supports process suspension. |
-| `Ctrl+T`, `Ctrl+R`, `Ctrl+W` | Open task, session-history, or workspace inspectors. |
-| `Ctrl+G`, `Ctrl+F`, `Ctrl+Y` | Refresh workspace status, search loaded history, or copy selected output. |
-| `Ctrl+V`, `Alt+Backspace` | Attach a clipboard image or remove the most recent attachment. |
+| `Ctrl+T`, `Ctrl+R`, `Ctrl+Shift+W` | Open task, session-history, or workspace inspectors. |
+| `Ctrl+G`, `Ctrl+Shift+F`, `Ctrl+Shift+Y` | Refresh workspace status, search loaded history, or copy selected output. |
+| `Ctrl+V`, `Alt+Backspace` | Attach a clipboard image, or remove the last attachment when the draft is empty. |
+| `Ctrl+W`, `Alt+Backspace` | Delete the previous word in the draft. |
+| `Ctrl+F`, `Ctrl+Y` | Move the cursor forward, or restore the last deleted text. |
 | `Ctrl+O` | Open transcript history. |
 | `Ctrl+Shift+P` | Open the command palette. |
 

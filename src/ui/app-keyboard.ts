@@ -160,7 +160,7 @@ export class AppKeyboardController {
 			this.toggleInspector("history");
 			return { consume: true };
 		}
-		if (matchesKey(data, Key.ctrl("w"))) {
+		if (matchesKey(data, Key.ctrlShift("w"))) {
 			this.toggleInspector("workspace");
 			return { consume: true };
 		}
@@ -168,12 +168,12 @@ export class AppKeyboardController {
 			this.actions.refreshWorkspace();
 			return { consume: true };
 		}
-		if (matchesKey(data, Key.ctrl("f"))) {
+		if (matchesKey(data, Key.ctrlShift("f"))) {
 			this.actions.showInspector("history");
 			this.actions.searchLoadedHistory(this.views.editor.getText());
 			return { consume: true };
 		}
-		if (matchesKey(data, Key.ctrl("y"))) {
+		if (matchesKey(data, Key.ctrlShift("y"))) {
 			void this.attachments.copySelectedOutput();
 			return { consume: true };
 		}
@@ -182,6 +182,8 @@ export class AppKeyboardController {
 			return { consume: true };
 		}
 		if (matchesKey(data, Key.alt("backspace"))) {
+			if (this.views.editor.getText().length > 0) return undefined;
+			if (this.attachments.attachments.length === 0) return undefined;
 			this.attachments.removeLatest();
 			this.actions.render();
 			return { consume: true };
