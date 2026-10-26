@@ -20,7 +20,8 @@ export class AppDialogController {
 			answer: (requestId, answer) => this.answer(requestId, answer),
 			openUrl: (url) => this.openUrl(url),
 			error: (message) => this.showNotice(message),
-		});
+			hide: () => this.hide(),
+		}, () => Math.max(1, this.tui.terminal.rows - 2));
 	}
 
 	get visible(): boolean {
@@ -48,7 +49,7 @@ export class AppDialogController {
 		if (!this.overlay) {
 			this.overlay = this.tui.showOverlay(this.view, {
 				width: "90%",
-				maxHeight: "65%",
+				maxHeight: "100%",
 				anchor: "bottom-center",
 				offsetY: -1,
 				margin: 1,

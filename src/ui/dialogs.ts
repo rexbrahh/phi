@@ -16,7 +16,6 @@ import type {
 	PendingInteraction,
 	PendingQuestionRequest,
 } from "../interaction-types.js";
-import { boundedPreviewValue } from "../state-utils.js";
 import { sanitizeTerminalText } from "./safe-text.js";
 import { theme } from "./theme.js";
 
@@ -24,6 +23,7 @@ export interface DialogViewActions {
 	answer(requestId: string, answer: InteractionAnswer): void;
 	openUrl(url: string): void;
 	error(message: string): void;
+	hide?(): void;
 }
 
 export class DialogView implements Component, Focusable {
@@ -34,18 +34,26 @@ export class DialogView implements Component, Focusable {
 	private readonly questionAnswers = new Map<string, { kind: "choice"; label: string } | { kind: "choices"; labels: string[] } | { kind: "text"; text: string }>();
 	private readonly selectedOptions = new Set<number>();
 	private validationMessage = "";
+	private scrollOffset = 0;
+	private scrollMaxOffset = 0;
+	private scrollPageSize = 1;
+	private revealInput = false;
 
-	constructor(private readonly actions: DialogViewActions) {
+	constructor(
+		private readonly actions: DialogViewActions,
+		private readonly getMaxRows: () => number = () => Number.MAX_SAFE_INTEGER,
+	) {
 		this.input.onSubmit = (value) => this.submitInput(value);
 	}
 
 	setRequest(request: PendingInteraction | undefined): void {
-		if (this.request?.requestId !== request?.requestId) {
+		if (this.request !== request) {
 			this.questionIndex = 0;
 			this.questionAnswers.clear();
 			this.selectedOptions.clear();
 			this.input.setValue("");
 			this.validationMessage = "";
+			this.resetScroll();
 		}
 		this.request = request;
 		this.input.focused = this.focused && this.needsTextInput();
@@ -71,6 +79,20 @@ export class DialogView implements Component, Focusable {
 			else this.answer({ kind: "elicitation", response: { action: "cancel" } });
 			return true;
 		}
+		if (matchesKey(data, Key.escape)) {
+			this.actions.hide?.();
+			return true;
+		}
+		if (matchesKey(data, Key.pageUp)) {
+			this.scrollOffset = Math.max(0, this.scrollOffset - this.scrollPageSize);
+			this.revealInput = false;
+			return true;
+		}
+		if (matchesKey(data, Key.pageDown)) {
+			this.scrollOffset = Math.min(this.scrollMaxOffset, this.scrollOffset + this.scrollPageSize);
+			this.revealInput = false;
+			return true;
+		}
 		if (this.needsTextInput()) {
 			if (request.kind === "elicitation" && request.mode === "form") {
 				if (data === "\u0004") {
@@ -79,6 +101,7 @@ export class DialogView implements Component, Focusable {
 				}
 			}
 			this.input.focused = this.focused;
+			this.revealInput = true;
 			this.input.handleInput(data);
 			return true;
 		}
@@ -135,47 +158,71 @@ export class DialogView implements Component, Focusable {
 		const request = this.request;
 		if (!request) return [];
 		const lines = wrapLine(theme.accent(`Waiting for you · ${request.kind}`), width);
+		const headerLength = lines.length;
+		let footer: string[];
+		let inputLine: number | undefined;
 		if (request.kind === "permission") {
 			lines.push(...wrapLine(theme.dim(sanitizeTerminalText(request.title ?? request.displayName ?? request.toolName)), width));
 			if (request.description) lines.push(...wrapLine(sanitizeTerminalText(request.description), width));
-			lines.push(...new Text(sanitizeTerminalText(boundedPreviewValue(request.input))).render(width));
-			lines.push(...wrapLine("1 Allow once · d Deny" + (request.canAlwaysAllow ? " · a Allow suggested" : ""), width));
+			lines.push(...wrapLine(formatPermissionInput(request.input), width));
+			footer = wrapLine("1 Allow once · d Deny" + (request.canAlwaysAllow ? " · a Allow suggested" : ""), width);
 		} else if (request.kind === "question") {
 			const question = this.currentQuestion();
 			lines.push(...wrapLine(theme.dim(`${request.title ?? request.displayName ?? "Question"} · ${this.questionIndex + 1}/${request.questions.length}`), width));
 			if (question) {
-				lines.push(...new Text(sanitizeTerminalText(question.question)).render(width));
+				lines.push(...wrapLine(sanitizeTerminalText(question.question), width));
 				if (question.options?.length) {
 					for (const [index, option] of question.options.entries()) {
 						const mark = this.selectedOptions.has(index) ? "[x]" : "[ ]";
 						lines.push(...wrapLine(`${mark} ${index + 1}. ${sanitizeTerminalText(option.label)}${option.description ? ` — ${sanitizeTerminalText(option.description)}` : ""}`, width));
 					}
-					lines.push(...wrapLine(question.multiSelect ? "Choose numbers, then Enter." : "Choose a number.", width));
+					footer = wrapLine(question.multiSelect ? "Choose numbers, then Enter." : "Choose a number.", width);
 				} else {
-					lines.push(...this.input.render(width));
+					const inputLines = this.input.render(width);
+					inputLine = lines.length - headerLength + inputLines.length - 1;
+					lines.push(...inputLines);
+					footer = wrapLine("Enter submits your response.", width);
 				}
+			} else {
+				footer = wrapLine("Ctrl+C cancels.", width);
 			}
 		} else if (request.mode === "url") {
-			lines.push(...new Text(sanitizeTerminalText(request.url ?? "URL unavailable")).render(width));
-			lines.push(...wrapLine(request.canOpenUrl ? "o Open URL · a Continue · d Decline · c Cancel" : "d Decline · c Cancel", width));
+			lines.push(...wrapLine(sanitizeTerminalText(request.url ?? "URL unavailable"), width));
+			footer = wrapLine(request.canOpenUrl ? "o Open URL · a Continue · d Decline · c Cancel" : "d Decline · c Cancel", width);
 		} else {
 			const formTitle = request.form.supported ? request.form.title : "Form response";
-			lines.push(...new Text(sanitizeTerminalText(formTitle ?? "Form response")).render(width));
+			lines.push(...wrapLine(sanitizeTerminalText(formTitle ?? "Form response"), width));
 			if (request.form.supported) {
 				for (const field of request.form.fields) {
 					lines.push(...wrapLine(`${sanitizeTerminalText(field.title ?? field.name)}${field.required ? " *" : ""} (${field.type})`, width));
 					if (field.description) lines.push(...wrapLine(theme.dim(sanitizeTerminalText(field.description)), width));
 				}
-				lines.push(...wrapLine("Enter a JSON object to accept; Ctrl+D Decline · Ctrl+C Cancel.", width));
-				lines.push(...this.input.render(width));
+				const inputLines = this.input.render(width);
+				inputLine = lines.length - headerLength + inputLines.length - 1;
+				lines.push(...inputLines);
+				footer = wrapLine("Enter JSON accepts · Ctrl+D declines", width);
 			} else {
 				lines.push(...wrapLine(theme.dim(`Unsupported form: ${sanitizeTerminalText(request.form.reason)}`), width));
-				lines.push(...wrapLine("d Decline · c Cancel", width));
+				footer = wrapLine("d Decline · c Cancel", width);
 			}
 		}
 		if (this.validationMessage) lines.push(...wrapLine(theme.dim(sanitizeTerminalText(this.validationMessage)), width));
-		lines.push(...wrapLine(theme.dim("Esc hides this dialog without answering."), width));
-		return fitLines(lines, width);
+		footer.push(...wrapLine("PgUp/PgDn scroll · Esc hides · Ctrl+C cancels.", width));
+
+		const maxRows = Math.max(1, Math.floor(this.getMaxRows()));
+		const bodyRows = Math.max(0, maxRows - headerLength - footer.length);
+		const body = lines.slice(headerLength);
+		this.scrollMaxOffset = Math.max(0, body.length - bodyRows);
+		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, this.scrollMaxOffset));
+		this.scrollPageSize = Math.max(1, bodyRows - 1);
+		if (this.revealInput && inputLine !== undefined && bodyRows > 0) {
+			if (inputLine < this.scrollOffset) this.scrollOffset = inputLine;
+			else if (inputLine >= this.scrollOffset + bodyRows) this.scrollOffset = inputLine - bodyRows + 1;
+			this.revealInput = false;
+		}
+		const visibleBody = body.slice(this.scrollOffset, this.scrollOffset + bodyRows);
+		return fitLines([...lines.slice(0, headerLength), ...visibleBody, ...footer], width)
+			.map((line) => theme.overlayLine(line, width));
 	}
 
 	invalidate(): void {
@@ -241,6 +288,7 @@ export class DialogView implements Component, Focusable {
 		this.input.setValue("");
 		if (this.questionIndex + 1 < request.questions.length) {
 			this.questionIndex += 1;
+			this.resetScroll();
 			return;
 		}
 		const answers = Object.fromEntries(this.questionAnswers);
@@ -253,6 +301,13 @@ export class DialogView implements Component, Focusable {
 		this.actions.answer(requestId, answer);
 	}
 
+	private resetScroll(): void {
+		this.scrollOffset = 0;
+		this.scrollMaxOffset = 0;
+		this.scrollPageSize = 1;
+		this.revealInput = false;
+	}
+
 	private showValidationError(error: unknown): void {
 		this.validationMessage = error instanceof Error ? error.message : String(error);
 		this.actions.error(this.validationMessage);
@@ -261,6 +316,10 @@ export class DialogView implements Component, Focusable {
 
 function wrapLine(text: string, width: number): string[] {
 	return new Text(text, 0, 0).render(Math.max(1, width));
+}
+
+function formatPermissionInput(value: Record<string, unknown>): string {
+	return sanitizeTerminalText(JSON.stringify(value, null, 2) ?? "{}");
 }
 
 function fitLines(lines: string[], width: number): string[] {

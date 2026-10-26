@@ -9,7 +9,7 @@ export interface ExitConfirmationReason {
 export class AppExitConfirmationController {
 	private overlay: OverlayHandle | undefined;
 	private isVisible = false;
-	private readonly prompt = new Text("");
+	private readonly prompt = new Text("", 0, 0);
 	private readonly choices = new SelectList([
 		{ value: "exit", label: "Stop work and exit Phi" },
 		{ value: "stay", label: "Keep Phi open" },
@@ -43,10 +43,10 @@ export class AppExitConfirmationController {
 			this.overlay = this.tui.showOverlay(new VStack([
 				this.prompt,
 				this.choices,
-				new Text(theme.dim("Enter confirms · Esc keeps Phi open")),
+				new Text(theme.dim("Enter confirms · Esc keeps Phi open"), 0, 0),
 			]), {
 				width: "75%",
-				maxHeight: "35%",
+				maxHeight: "100%",
 				anchor: "center",
 				margin: 1,
 			});
