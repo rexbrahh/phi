@@ -297,6 +297,45 @@ test("runUserShell keeps previews bounded while preserving complete output on di
 	}
 });
 
+for (const channel of ["stdout", "stderr"] as const) {
+	for (const [name, prefix, overflow] of [["exact limit", "x".repeat(8_192), "y"], ["surrogate boundary", "x".repeat(8_191), "🙂"]]) {
+		test(`shell preview publishes ${channel} truncation at the ${name}`, async () => {
+			const temporary = await mkdtemp(join(tmpdir(), "phi shell boundary "));
+			const acknowledgement = join(temporary, "preview-received");
+			const restoreEnvironment = setEnvironment({ SHELL: "/bin/sh" });
+			try {
+				let latest: ShellPreview | undefined;
+				const flag = channel === "stdout" ? "stdoutTruncated" : "stderrTruncated";
+				const script = `
+					const fs = require("node:fs");
+					process.${channel}.write(${JSON.stringify(prefix)});
+					const deadline = setTimeout(() => process.exit(2), 5000);
+					const poll = setInterval(() => {
+						if (!fs.existsSync(${JSON.stringify(acknowledgement)})) return;
+						clearInterval(poll);
+						clearTimeout(deadline);
+						process.${channel}.write(${JSON.stringify(overflow)});
+					}, 5);
+				`;
+				const command = `${quoteShell(process.execPath)} -e ${quoteShell(script)}`;
+				const receipt = await runUserShell(command, temporary, "boundary-session", new AbortController().signal, (preview) => {
+					latest = preview;
+					// Release the next write only after the first preview was observed.
+					if (preview[channel] === prefix && !preview[flag]) fs.writeFileSync(acknowledgement, "ready");
+				}, temporary).done;
+				assert.equal(receipt.exitCode, 0);
+				assert.equal(await readFile(receipt.outputFiles[channel]!, "utf8"), prefix + overflow);
+				assert.ok(latest);
+				assert.equal(latest[channel], prefix);
+				assert.equal(latest[flag], true);
+			} finally {
+				restoreEnvironment();
+				await rm(temporary, { recursive: true, force: true });
+			}
+		});
+	}
+}
+
 test("runUserShell reports nonzero exit status and spawn failure as receipts", async () => {
 	const temporary = await mkdtemp(join(tmpdir(), "phi shell failures "));
 	const stateHome = join(temporary, "state");

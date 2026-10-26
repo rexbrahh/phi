@@ -66,11 +66,11 @@ function formatError(error: unknown): string {
 }
 
 function appendPreview(buffer: PreviewBuffer, text: string): boolean {
-	if (text.length === 0) return false;
+	if (text.length === 0 || buffer.truncated) return false;
 	const remaining = PREVIEW_LIMIT - buffer.value.length;
 	if (remaining <= 0) {
 		buffer.truncated = true;
-		return false;
+		return true;
 	}
 	if (text.length <= remaining) {
 		buffer.value += text;
@@ -83,7 +83,7 @@ function appendPreview(buffer: PreviewBuffer, text: string): boolean {
 	if (lastUnit >= 0xd800 && lastUnit <= 0xdbff && nextUnit >= 0xdc00 && nextUnit <= 0xdfff) end -= 1;
 	buffer.value += text.slice(0, end);
 	buffer.truncated = true;
-	return end > 0;
+	return true;
 }
 
 function safeSessionDirectory(sessionId: string, home: string): string {
