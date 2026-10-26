@@ -121,7 +121,7 @@ export class InspectorView implements Component {
 			...wrapLine(theme.accent("Session history · Ctrl+R"), width),
 			...wrapLine(`Session: ${sanitizeTerminalText(this.state.conversationId ?? "waiting for SDK session metadata")}`, width),
 		];
-		lines.push(...wrapLine(`Messages ${this.model.historyOffset + 1}–${this.model.historyOffset + this.model.historyMessages.length} · page size 200 · [ older · ] newer`, width));
+		lines.push(...wrapLine(`Messages ${this.model.historyOffset + 1}–${this.model.historyOffset + this.model.historyMessages.length} · PgUp older · PgDn newer`, width));
 		if (this.model.historyLoading) lines.push(...wrapLine(theme.dim("Loading history…"), width));
 		if (this.model.historyError) lines.push(...wrapLine(theme.dim(`History unavailable: ${sanitizeTerminalText(this.model.historyError)}`), width));
 		if (this.model.searchText) lines.push(...wrapLine(`Search: ${sanitizeTerminalText(this.model.searchText)}`, width));

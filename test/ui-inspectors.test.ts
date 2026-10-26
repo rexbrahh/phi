@@ -610,6 +610,8 @@ test("history instructions name the Tasks panel for Tab child selection", () => 
 
 	const rendered = controller.views.inspectors.view.render(100).join("\n");
 	assert.match(rendered, /Children: open Tasks \(Ctrl\+T\); Tab selects the next task or child transcript\./);
+	assert.match(rendered, /PgUp older · PgDn newer/);
+	assert.doesNotMatch(rendered, /\[ older · \] newer/);
 });
 
 function nativeToolResultMessage(uuid: string, resultText: string): SessionMessage {
